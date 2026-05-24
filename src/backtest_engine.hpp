@@ -64,6 +64,20 @@ struct JsonFill {
   bool reduceOnly{false};
 };
 
+struct JsonEquityPoint {
+  std::int64_t tsNs{0};
+  std::int64_t grossRealizedPnlE8{0};
+  std::int64_t realizedPnlE8{0};
+  std::int64_t unrealizedPnlE8{0};
+  std::int64_t grossTotalPnlE8{0};
+  std::int64_t netTotalPnlE8{0};
+  std::int64_t totalPnlE8{0};
+  std::int64_t feesPaidE8{0};
+  std::int64_t walletBalanceE8{0};
+  std::int64_t positionQtyE8{0};
+  std::uint64_t fillCount{0};
+};
+
 struct OpenOrder {
   hft_trader::core::StrategyOrderState state{};
   std::size_t recordIndex{kNoRecordIndex};
@@ -86,6 +100,7 @@ struct PendingAction {
 struct EngineState {
   std::vector<JsonOrder> orders{};
   std::vector<JsonFill> fills{};
+  std::vector<JsonEquityPoint> equityPoints{};
   std::vector<PendingAction> pending{};
   std::array<OpenOrder, kMaxOrderStates> open{};
   hft_trader::core::StrategyPositionState position{};
@@ -132,6 +147,7 @@ std::int64_t feeForFillE8(std::int64_t priceE8, std::int64_t qtyE8, std::int64_t
 void initializeAccounting(EngineState& engine, const BacktestRunRequest& request) noexcept;
 void updatePosition(EngineState& engine, Side side, std::int64_t priceE8, std::int64_t qtyE8, std::int64_t tsNs, std::int64_t feeBpsE8, std::int64_t& netRealized) noexcept;
 std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept;
+void appendEquityPoint(EngineState& engine, std::int64_t tsNs);
 
 std::vector<hft_trader::core::StrategyOrderState> visibleOrders(const EngineState& engine);
 std::int64_t delayedTs(std::int64_t tsNs, std::uint64_t latencyUs) noexcept;
@@ -139,6 +155,7 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
 void tryFillOnTop(EngineState& engine, std::int64_t tsNs);
 void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& trade);
 void applyDueActions(EngineState& engine, std::int64_t tsNs);
+bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs);
 void applyIntents(EngineState& engine,
                   const hft_trader::core::StrategyIo& io,
                   std::int64_t tsNs,

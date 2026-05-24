@@ -163,13 +163,19 @@ bool settleAfterReplay(const StrategyDescriptor& descriptor,
   if (!runUntil(descriptor, state, engine, shard, control, untilTs, request)) return false;
   for (std::uint32_t i = 0u; i < 32u; ++i) {
     const std::int64_t wakeTs = nextWakeTs(descriptor, state);
-    if (wakeTs == std::numeric_limits<std::int64_t>::max()) return true;
+    if (wakeTs == std::numeric_limits<std::int64_t>::max()) break;
     untilTs = wakeTs;
     if (!runUntil(descriptor, state, engine, shard, control, untilTs, request)) return false;
     untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
     if (!runUntil(descriptor, state, engine, shard, control, untilTs, request)) return false;
+    if (engine.netQtyRaw == 0 && engine.pending.empty() && nextWakeTs(descriptor, state) == std::numeric_limits<std::int64_t>::max()) return true;
   }
-  return false;
+  if (engine.netQtyRaw != 0) {
+    if (!detail::forceClosePosition(engine, untilTs, request.orderLatencyUs)) return false;
+    untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
+    if (!runUntil(descriptor, state, engine, shard, control, untilTs, request)) return false;
+  }
+  return engine.netQtyRaw == 0 && engine.pending.empty();
 }
 
 void populateResultPnl(BacktestRunResult& result, const detail::EngineState& engine) noexcept {
@@ -352,6 +358,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)detail::writeResult(result, engine);
       return result;
     }
+    detail::appendEquityPoint(engine, event.tsNs);
     if (!runUntil(*descriptor, state.data(), engine, shard, control, event.tsNs, request)) {
       result.status = Status::InvalidArgument;
       result.error = "strategy event loop did not settle after market event";
@@ -377,6 +384,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)detail::writeResult(result, engine);
     return result;
   }
+  detail::appendEquityPoint(engine, result.lastTsNs > 0 ? result.lastTsNs + 1 : result.lastTsNs);
 
   populateResultPnl(result, engine);
   result.orders = engine.orders.size();

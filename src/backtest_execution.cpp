@@ -2,6 +2,7 @@
 
 #include "hft_trader/runtime/ClientOrderId.hpp"
 
+#include <array>
 #include <limits>
 
 namespace hft_backtest::detail {
@@ -36,6 +37,13 @@ std::int64_t latencyNs(std::uint64_t latencyUs) noexcept {
   return static_cast<std::int64_t>(latencyUs * 1000u);
 }
 
+std::uint64_t nextOrderId(const EngineState& engine) noexcept {
+  std::uint64_t out = 1u;
+  for (const JsonOrder& order : engine.orders) {
+    if (order.id >= out) out = order.id + 1u;
+  }
+  return out;
+}
 cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
                                              const OpenOrder& order,
                                              std::int64_t priceE8,
@@ -68,6 +76,49 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
   return event;
 }
 
+cxet::composite::UserDataEvent makeRejectedOrderEvent(EngineState& engine,
+                                                      const OpenOrder& order,
+                                                      std::int64_t tsNs) noexcept {
+  cxet::composite::UserDataEvent event{};
+  event.exchangeId = engine.exchange;
+  event.kind = cxet::composite::UserDataEventKind::Order;
+  event.symbol = engine.symbol;
+  (void)hft_trader::runtime::makeRuntimeClientOrderId(engine.exchange, 'o', order.state.clientIntentId, 1u, event.clientOrderId);
+  event.orderId = event.clientOrderId;
+  event.side = order.state.side;
+  event.sideSet = 1u;
+  event.orderType = order.state.orderType;
+  event.orderTypeSet = 1u;
+  event.orderStatus = canon::OrderStatus::Rejected;
+  event.orderStatusSet = 1u;
+  event.qty = order.state.qty;
+  event.eventTime.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
+  event.updateTime = event.eventTime;
+  event.reduceOnly = order.reduceOnly ? 1u : 0u;
+  return event;
+}
+
+std::int64_t reduceOnlyFillQty(const EngineState& engine, const OpenOrder& order) noexcept {
+  const std::int64_t requested = order.state.qty.raw;
+  if (!order.reduceOnly) return requested;
+  if (requested <= 0 || engine.netQtyRaw == 0) return 0;
+  if (engine.netQtyRaw > 0) {
+    if (order.state.side.raw != Side::Sell().raw) return 0;
+    return requested < engine.netQtyRaw ? requested : engine.netQtyRaw;
+  }
+  const std::int64_t shortQty = -engine.netQtyRaw;
+  if (order.state.side.raw != Side::Buy().raw) return 0;
+  return requested < shortQty ? requested : shortQty;
+}
+
+bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
+  if (!order.state.valid) return false;
+  engine.userEvents.push_back(makeRejectedOrderEvent(engine, order, tsNs));
+  if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "rejected";
+  order = OpenOrder{};
+  return false;
+}
+
 }  // namespace
 
 std::vector<hft_trader::core::StrategyOrderState> visibleOrders(const EngineState& engine) {
@@ -87,18 +138,20 @@ std::int64_t delayedTs(std::int64_t tsNs, std::uint64_t latencyUs) noexcept {
 
 bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std::int64_t tsNs, bool taker) {
   if (!order.state.valid || !order.active || order.state.qty.raw <= 0 || priceE8 <= 0) return false;
+  const std::int64_t fillQty = reduceOnlyFillQty(engine, order);
+  if (fillQty <= 0) return rejectOrder(engine, order, tsNs);
   std::int64_t netRealized = 0;
-  updatePosition(engine, order.state.side, priceE8, order.state.qty.raw, tsNs, taker ? engine.takerFeeBpsE8 : engine.makerFeeBpsE8, netRealized);
+  updatePosition(engine, order.state.side, priceE8, fillQty, tsNs, taker ? engine.takerFeeBpsE8 : engine.makerFeeBpsE8, netRealized);
   engine.fills.push_back(JsonFill{order.state.clientIntentId.raw,
                                   order.activeTsNs,
                                   tsNs,
                                   order.state.side.raw == Side::Buy().raw ? "buy" : "sell",
                                   priceE8,
-                                  order.state.qty.raw,
+                                  fillQty,
                                   netRealized,
                                   order.reduceOnly});
   if (order.reduceOnly) ++engine.reduceOnlyFills;
-  engine.userEvents.push_back(makeFillEvent(engine, order, priceE8, order.state.qty.raw, tsNs, taker));
+  engine.userEvents.push_back(makeFillEvent(engine, order, priceE8, fillQty, tsNs, taker));
   if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "filled";
   order = OpenOrder{};
   return true;
@@ -185,6 +238,25 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
   }
 }
 
+bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs) {
+  if (engine.netQtyRaw == 0) return true;
+  if (engine.snapshot.lastBookTicker.bid.px.raw <= 0 || engine.snapshot.lastBookTicker.ask.px.raw <= 0) return false;
+
+  hft_trader::core::OrderIntent intent{};
+  intent.clientIntentId.raw = nextOrderId(engine);
+  intent.side = engine.netQtyRaw > 0 ? Side::Sell() : Side::Buy();
+  intent.orderType = canon::OrderType::Market;
+  intent.qty.raw = engine.netQtyRaw > 0 ? engine.netQtyRaw : -engine.netQtyRaw;
+  intent.reduceOnly = true;
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{intent};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, tsNs, orderLatencyUs, 0u, 0u);
+  applyDueActions(engine, delayedTs(tsNs, orderLatencyUs));
+  return engine.netQtyRaw == 0;
+}
 void applyIntents(EngineState& engine,
                   const hft_trader::core::StrategyIo& io,
                   std::int64_t tsNs,

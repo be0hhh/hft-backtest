@@ -74,4 +74,21 @@ std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
   return ask > 0 ? mulPriceQtyE8(engine.entryPriceE8 - ask, qty) : 0;
 }
 
+void appendEquityPoint(EngineState& engine, std::int64_t tsNs) {
+  const std::int64_t unrealized = unrealizedPnlE8(engine);
+  const std::int64_t grossTotal = engine.grossRealizedPnlE8 + unrealized;
+  const std::int64_t netTotal = engine.netRealizedPnlE8 + unrealized;
+  engine.equityPoints.push_back(JsonEquityPoint{tsNs,
+                                                engine.grossRealizedPnlE8,
+                                                engine.netRealizedPnlE8,
+                                                unrealized,
+                                                grossTotal,
+                                                netTotal,
+                                                netTotal,
+                                                engine.feesPaidE8,
+                                                engine.walletBalanceE8,
+                                                engine.netQtyRaw,
+                                                static_cast<std::uint64_t>(engine.fills.size())});
+}
+
 }  // namespace hft_backtest::detail

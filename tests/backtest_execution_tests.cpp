@@ -163,6 +163,22 @@ bool testFillPublishesRuntimeUserEvent() {
          expect(parsed.clientIntentId.raw == 4, "client order id carries intent id");
 }
 
+bool testReduceOnlyMarketBuyDoesNotOpenWhenFlat() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 300000000ll, kPx100 - 200000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{reduceMarketIntent(7, Side::Buy())};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 200, 0, 0, 0);
+  return expect(engine.netQtyRaw == 0, "reduce-only buy cannot open long when flat") &&
+         expect(engine.fills.empty(), "invalid reduce-only order does not write fill") &&
+         expect(engine.orders.size() == 1u, "invalid reduce-only order is recorded") &&
+         expect(engine.orders[0].status == "rejected", "invalid reduce-only order is rejected") &&
+         expect(engine.userEvents.size() == 1u, "invalid reduce-only order publishes final user event") &&
+         expect(engine.userEvents[0].orderStatus == canon::OrderStatus::Rejected, "invalid reduce-only event is rejected");
+}
+
 bool testReduceOnlyMarketSellClosesLongAtBid() {
   EngineState engine{};
   engine.takerFeeBpsE8 = 0;
@@ -214,6 +230,50 @@ bool testFeesReduceWalletAndNetPnl() {
          expect(engine.walletBalanceE8 == engine.initialBalanceE8 + engine.netRealizedPnlE8, "wallet tracks net pnl");
 }
 
+bool testEquityPointCapturesMarkToMarketPnl() {
+  EngineState engine{};
+  engine.initialBalanceE8 = 100000000000ll;
+  engine.walletBalanceE8 = engine.initialBalanceE8;
+  engine.feesPaidE8 = 30000000ll;
+  engine.grossRealizedPnlE8 = 120000000ll;
+  engine.netRealizedPnlE8 = 90000000ll;
+  setTop(engine, kPx100 + 200000000ll, kPx100 + 300000000ll);
+  std::int64_t netRealized = 0;
+  updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0, netRealized);
+
+  appendEquityPoint(engine, 200);
+
+  return expect(engine.equityPoints.size() == 1u, "equity point is appended") &&
+         expect(engine.equityPoints[0].grossRealizedPnlE8 == 120000000ll, "gross realized pnl is captured") &&
+         expect(engine.equityPoints[0].realizedPnlE8 == 90000000ll, "realized pnl is net pnl") &&
+         expect(engine.equityPoints[0].unrealizedPnlE8 == 200000000ll, "long position marks to bid") &&
+         expect(engine.equityPoints[0].grossTotalPnlE8 == 320000000ll, "gross total includes unrealized pnl") &&
+         expect(engine.equityPoints[0].netTotalPnlE8 == 290000000ll, "net total includes fees and unrealized pnl") &&
+         expect(engine.equityPoints[0].totalPnlE8 == engine.equityPoints[0].netTotalPnlE8, "total pnl aliases net total") &&
+         expect(engine.equityPoints[0].feesPaidE8 == 30000000ll, "fees are captured as positive cost") &&
+         expect(engine.equityPoints[0].walletBalanceE8 == engine.initialBalanceE8, "wallet is preserved before close") &&
+         expect(engine.equityPoints[0].positionQtyE8 == kQty1, "position qty is captured");
+}
+
+bool testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() {
+  EngineState engine{};
+  engine.takerFeeBpsE8 = 0;
+  setTop(engine, kPx100 - 300000000ll, kPx100 - 200000000ll);
+  std::int64_t netRealized = 0;
+  updatePosition(engine, Side::Sell(), kPx100, kQty1, 100, 0, netRealized);
+
+  const bool closed = forceClosePosition(engine, 200, 100);
+
+  return expect(closed, "force close reports success") &&
+         expect(engine.netQtyRaw == 0, "force close flattens short") &&
+         expect(engine.orders.size() == 1u, "force close writes one order") &&
+         expect(engine.orders[0].side == "buy", "short force close submits buy") &&
+         expect(engine.orders[0].type == "market", "force close uses market order") &&
+         expect(engine.orders[0].reduceOnly, "force close order is reduce-only") &&
+         expect(engine.orders[0].activeTsNs == 100200, "force close honors order latency") &&
+         expect(engine.fills.size() == 1u, "force close writes fill") &&
+         expect(engine.fills[0].reduceOnly, "force close fill is reduce-only");
+}
 }  // namespace
 
 int main() {
@@ -222,8 +282,11 @@ int main() {
   ok = testStaleAmendDoesNotMutateReusedSlot() && ok;
   ok = testPendingDrainActivatesLateOrder() && ok;
   ok = testFillPublishesRuntimeUserEvent() && ok;
+  ok = testReduceOnlyMarketBuyDoesNotOpenWhenFlat() && ok;
   ok = testReduceOnlyMarketSellClosesLongAtBid() && ok;
   ok = testReduceOnlyMarketBuyClosesShortAtAsk() && ok;
   ok = testFeesReduceWalletAndNetPnl() && ok;
+  ok = testEquityPointCapturesMarkToMarketPnl() && ok;
+  ok = testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
