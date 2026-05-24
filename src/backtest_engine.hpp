@@ -31,6 +31,11 @@ namespace hft_backtest::detail {
 constexpr std::size_t kIntentCapacity = 64;
 constexpr std::size_t kMaxOrderStates = 256;
 constexpr std::size_t kNoRecordIndex = std::numeric_limits<std::size_t>::max();
+constexpr std::int64_t kRiskSnapshotIntervalNs = 1000000000ll;
+constexpr std::uint8_t kRiskSnapshotReasonStart = 1u;
+constexpr std::uint8_t kRiskSnapshotReasonFill = 2u;
+constexpr std::uint8_t kRiskSnapshotReasonInterval = 3u;
+constexpr std::uint8_t kRiskSnapshotReasonFinal = 4u;
 
 enum class PendingActionKind : std::uint8_t {
   OrderAck = 0,
@@ -78,6 +83,23 @@ struct JsonEquityPoint {
   std::uint64_t fillCount{0};
 };
 
+struct JsonRiskSnapshot {
+  std::int64_t tsNs{0};
+  std::int64_t grossRealizedPnlE8{0};
+  std::int64_t realizedPnlE8{0};
+  std::int64_t unrealizedPnlE8{0};
+  std::int64_t grossTotalPnlE8{0};
+  std::int64_t netTotalPnlE8{0};
+  std::int64_t feesPaidE8{0};
+  std::int64_t walletBalanceE8{0};
+  std::int64_t positionQtyE8{0};
+  std::int64_t entryPriceE8{0};
+  std::int64_t bidPriceE8{0};
+  std::int64_t askPriceE8{0};
+  std::uint64_t fillCount{0};
+  std::uint8_t reason{0};
+};
+
 struct OpenOrder {
   hft_trader::core::StrategyOrderState state{};
   std::size_t recordIndex{kNoRecordIndex};
@@ -91,6 +113,7 @@ struct PendingAction {
   PendingActionKind kind{PendingActionKind::OrderAck};
   std::size_t slotIndex{kNoRecordIndex};
   std::size_t recordIndex{kNoRecordIndex};
+  std::size_t replaceCancelRecordIndex{kNoRecordIndex};
   std::int64_t activeTsNs{0};
   Id targetClientIntentId{};
   Id commandClientIntentId{};
@@ -101,6 +124,7 @@ struct EngineState {
   std::vector<JsonOrder> orders{};
   std::vector<JsonFill> fills{};
   std::vector<JsonEquityPoint> equityPoints{};
+  std::vector<JsonRiskSnapshot> riskSnapshots{};
   std::vector<PendingAction> pending{};
   std::array<OpenOrder, kMaxOrderStates> open{};
   hft_trader::core::StrategyPositionState position{};
@@ -123,6 +147,9 @@ struct EngineState {
   std::int64_t walletBalanceE8{0};
   std::int64_t makerFeeBpsE8{0};
   std::int64_t takerFeeBpsE8{0};
+  std::int64_t lastRiskSnapshotTsNs{std::numeric_limits<std::int64_t>::min()};
+  std::int64_t lastRiskSnapshotUnrealizedPnlE8{0};
+  bool hasRiskSnapshot{false};
 };
 
 struct TimelineEvent {
@@ -148,6 +175,8 @@ void initializeAccounting(EngineState& engine, const BacktestRunRequest& request
 void updatePosition(EngineState& engine, Side side, std::int64_t priceE8, std::int64_t qtyE8, std::int64_t tsNs, std::int64_t feeBpsE8, std::int64_t& netRealized) noexcept;
 std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept;
 void appendEquityPoint(EngineState& engine, std::int64_t tsNs);
+void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t reason);
+bool appendRiskSnapshotIfDue(EngineState& engine, std::int64_t tsNs);
 
 std::vector<hft_trader::core::StrategyOrderState> visibleOrders(const EngineState& engine);
 std::int64_t delayedTs(std::int64_t tsNs, std::uint64_t latencyUs) noexcept;
@@ -156,6 +185,7 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs);
 void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& trade);
 void applyDueActions(EngineState& engine, std::int64_t tsNs);
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs);
+void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, std::uint64_t cancelLatencyUs);
 void applyIntents(EngineState& engine,
                   const hft_trader::core::StrategyIo& io,
                   std::int64_t tsNs,

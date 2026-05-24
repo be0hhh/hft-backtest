@@ -33,7 +33,7 @@ std::string makeRunId() {
 
 std::filesystem::path resultPathFor(const BacktestRunRequest& request, const std::string& runId) {
   if (!request.outputPath.empty()) return request.outputPath;
-  return request.sessionPath / "backtests" / (runId + ".json");
+  return request.sessionPath / "backtests" / runId;
 }
 
 bool reportProgress(std::uint64_t done, std::uint64_t total, std::string stage, BacktestProgressCallback cb, void* userData) noexcept {
@@ -168,13 +168,14 @@ bool settleAfterReplay(const StrategyDescriptor& descriptor,
     if (!runUntil(descriptor, state, engine, shard, control, untilTs, request)) return false;
     untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
     if (!runUntil(descriptor, state, engine, shard, control, untilTs, request)) return false;
-    if (engine.netQtyRaw == 0 && engine.pending.empty() && nextWakeTs(descriptor, state) == std::numeric_limits<std::int64_t>::max()) return true;
+    if (engine.netQtyRaw == 0 && engine.pending.empty() && nextWakeTs(descriptor, state) == std::numeric_limits<std::int64_t>::max()) break;
   }
   if (engine.netQtyRaw != 0) {
     if (!detail::forceClosePosition(engine, untilTs, request.orderLatencyUs)) return false;
     untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
     if (!runUntil(descriptor, state, engine, shard, control, untilTs, request)) return false;
   }
+  detail::cancelOpenOrders(engine, untilTs, request.cancelLatencyUs);
   return engine.netQtyRaw == 0 && engine.pending.empty();
 }
 
@@ -186,7 +187,7 @@ void populateResultPnl(BacktestRunResult& result, const detail::EngineState& eng
   result.netRealizedPnlE8 = engine.netRealizedPnlE8;
   result.realizedPnlE8 = engine.netRealizedPnlE8;
   result.unrealizedPnlE8 = detail::unrealizedPnlE8(engine);
-  result.totalPnlE8 = result.realizedPnlE8 + result.unrealizedPnlE8;
+  result.totalPnlE8 = result.realizedPnlE8;
   result.openPositionQtyE8 = engine.netQtyRaw;
   result.strategyClosed = engine.netQtyRaw == 0;
   result.userEvents = engine.userEvents.size();
@@ -215,6 +216,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (request.sessionPath.empty() || request.configPath.empty()) {
     result.status = Status::InvalidArgument;
     result.error = "session_path and config_path are required";
+    return result;
+  }
+  if (!request.outputPath.empty() && request.outputPath.extension() == ".json") {
+    result.status = Status::InvalidArgument;
+    result.error = "output_path must be a run directory, not a .json file";
     return result;
   }
 
@@ -252,11 +258,18 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   const ExchangeId sessionExchange = detail::exchangeFromText(session.exchange);
   const canon::MarketType sessionMarket = detail::marketFromText(session.market);
   const hft_trader::runtime::VenueRuntimeConfig* venue = nullptr;
+  Symbol selectedSymbol{};
+  bool symbolMatched = false;
   for (const auto& candidate : cfg.venues) {
     if (candidate.exchange.raw != sessionExchange.raw || candidate.market.raw != sessionMarket.raw) continue;
     for (const Symbol& symbol : candidate.symbols) {
-      if (session.symbol == symbol.data) venue = &candidate;
+      if (session.symbol != symbol.data) continue;
+      venue = &candidate;
+      selectedSymbol = symbol;
+      symbolMatched = true;
+      break;
     }
+    if (symbolMatched) break;
   }
   if (!venue) {
     result.status = Status::ConfigMismatch;
@@ -290,20 +303,20 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
 
   detail::EngineState engine{};
   engine.exchange = sessionExchange;
-  engine.symbol = venue->symbols.front();
+  engine.symbol = selectedSymbol;
   detail::initializeAccounting(engine, request);
   if (session.hasSnapshot) {
     hft_trader::core::LocalOrderBookConfig bookConfig{};
     bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
     bookConfig.tickSizeRaw = instrument.tickSizeRaw;
-    hft_trader::core::applySnapshot(engine.orderBook, detail::toRuntimeSnapshot(session.snapshot), venue->symbols.front(), bookConfig);
+    hft_trader::core::applySnapshot(engine.orderBook, detail::toRuntimeSnapshot(session.snapshot), selectedSymbol, bookConfig);
     hft_trader::core::bindOrderBookSnapshot(engine.snapshot, engine.orderBook);
   }
   hft_trader::core::SymbolShardConfig shard{};
   shard.shardId.raw = 1;
   shard.strategyId.raw = 1;
   shard.symbolId.raw = 1;
-  shard.symbol = venue->symbols.front();
+  shard.symbol = selectedSymbol;
   hft_trader::core::ShardControlState control{};
   control.shardId = shard.shardId;
 
@@ -315,6 +328,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.events = timeline.size();
   result.firstTsNs = session.firstTsNs;
   result.lastTsNs = session.lastTsNs;
+  detail::appendEquityPoint(engine, result.firstTsNs);
+  detail::appendRiskSnapshot(engine, result.firstTsNs, detail::kRiskSnapshotReasonStart);
 
   if (!reportProgress(0, timeline.size(), "running", progressCallback, userData)) {
     result.status = Status::Cancelled;
@@ -358,7 +373,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)detail::writeResult(result, engine);
       return result;
     }
-    detail::appendEquityPoint(engine, event.tsNs);
+    (void)detail::appendRiskSnapshotIfDue(engine, event.tsNs);
     if (!runUntil(*descriptor, state.data(), engine, shard, control, event.tsNs, request)) {
       result.status = Status::InvalidArgument;
       result.error = "strategy event loop did not settle after market event";
@@ -384,7 +399,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)detail::writeResult(result, engine);
     return result;
   }
-  detail::appendEquityPoint(engine, result.lastTsNs > 0 ? result.lastTsNs + 1 : result.lastTsNs);
+  const std::int64_t finalTsNs = result.lastTsNs > 0 ? result.lastTsNs + 1 : result.lastTsNs;
+  detail::appendEquityPoint(engine, finalTsNs);
+  detail::appendRiskSnapshot(engine, finalTsNs, detail::kRiskSnapshotReasonFinal);
 
   populateResultPnl(result, engine);
   result.orders = engine.orders.size();

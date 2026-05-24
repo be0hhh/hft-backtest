@@ -75,20 +75,49 @@ std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
 }
 
 void appendEquityPoint(EngineState& engine, std::int64_t tsNs) {
-  const std::int64_t unrealized = unrealizedPnlE8(engine);
-  const std::int64_t grossTotal = engine.grossRealizedPnlE8 + unrealized;
-  const std::int64_t netTotal = engine.netRealizedPnlE8 + unrealized;
   engine.equityPoints.push_back(JsonEquityPoint{tsNs,
                                                 engine.grossRealizedPnlE8,
                                                 engine.netRealizedPnlE8,
-                                                unrealized,
-                                                grossTotal,
-                                                netTotal,
-                                                netTotal,
+                                                0,
+                                                engine.grossRealizedPnlE8,
+                                                engine.netRealizedPnlE8,
+                                                engine.netRealizedPnlE8,
                                                 engine.feesPaidE8,
                                                 engine.walletBalanceE8,
                                                 engine.netQtyRaw,
                                                 static_cast<std::uint64_t>(engine.fills.size())});
+}
+
+void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t reason) {
+  const std::int64_t unrealized = unrealizedPnlE8(engine);
+  const std::int64_t grossTotal = engine.grossRealizedPnlE8 + unrealized;
+  const std::int64_t netTotal = engine.netRealizedPnlE8 + unrealized;
+  engine.riskSnapshots.push_back(JsonRiskSnapshot{tsNs,
+                                                  engine.grossRealizedPnlE8,
+                                                  engine.netRealizedPnlE8,
+                                                  unrealized,
+                                                  grossTotal,
+                                                  netTotal,
+                                                  engine.feesPaidE8,
+                                                  engine.walletBalanceE8,
+                                                  engine.netQtyRaw,
+                                                  engine.entryPriceE8,
+                                                  engine.snapshot.lastBookTicker.bid.px.raw,
+                                                  engine.snapshot.lastBookTicker.ask.px.raw,
+                                                  static_cast<std::uint64_t>(engine.fills.size()),
+                                                  reason});
+  engine.lastRiskSnapshotTsNs = tsNs;
+  engine.lastRiskSnapshotUnrealizedPnlE8 = unrealized;
+  engine.hasRiskSnapshot = true;
+}
+
+bool appendRiskSnapshotIfDue(EngineState& engine, std::int64_t tsNs) {
+  if (engine.netQtyRaw == 0) return false;
+  const std::int64_t unrealized = unrealizedPnlE8(engine);
+  if (engine.hasRiskSnapshot && unrealized == engine.lastRiskSnapshotUnrealizedPnlE8) return false;
+  if (engine.hasRiskSnapshot && tsNs < engine.lastRiskSnapshotTsNs + kRiskSnapshotIntervalNs) return false;
+  appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonInterval);
+  return true;
 }
 
 }  // namespace hft_backtest::detail

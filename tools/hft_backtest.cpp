@@ -10,7 +10,7 @@
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--strategy NAME] [--output JSON] [--run-id ID] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N]\n";
+  std::cerr << "Usage: hft-backtest --session DIR --config INI [--strategy NAME] [--output DIR] [--run-id ID] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {

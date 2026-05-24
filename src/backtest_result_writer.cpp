@@ -1,6 +1,5 @@
 #include "backtest_engine.hpp"
 
-#include <algorithm>
 #include <fstream>
 #include <system_error>
 
@@ -15,168 +14,209 @@ const char* resultStatusName(Status status) noexcept {
   }
 }
 
-constexpr std::size_t kMaxCompactEquityPoints = 4096;
-
-std::filesystem::path compactResultPath(const std::filesystem::path& fullPath) {
-  std::filesystem::path out = fullPath;
-  out.replace_filename(fullPath.stem().string() + ".summary.json");
-  return out;
+std::uint8_t actionCode(const std::string& action) noexcept {
+  if (action == "order") return 1u;
+  if (action == "amend") return 2u;
+  if (action == "cancel") return 3u;
+  return 0u;
 }
 
-bool includeCompactEquityPoint(std::size_t index, std::size_t count) noexcept {
-  if (count <= kMaxCompactEquityPoints) return true;
-  if (index == 0 || index + 1 == count) return true;
-  const std::size_t stride = (count + kMaxCompactEquityPoints - 1u) / kMaxCompactEquityPoints;
-  return stride == 0u || (index % stride) == 0u;
+std::uint8_t sideCode(const std::string& side) noexcept {
+  return side == "buy" ? 1u : 0u;
 }
 
-void writeEquityPoint(std::ostream& out, const JsonEquityPoint& row) {
+std::uint8_t typeCode(const std::string& type) noexcept {
+  if (type == "limit") return 1u;
+  if (type == "market") return 2u;
+  return 0u;
+}
+
+std::uint8_t statusCode(const std::string& status) noexcept {
+  if (status == "pending") return 1u;
+  if (status == "active" || status == "acked" || status == "amended") return 2u;
+  if (status == "filled") return 3u;
+  if (status == "cancelled") return 4u;
+  if (status == "missing") return 5u;
+  if (status == "rejected") return 6u;
+  return 0u;
+}
+
+bool writeOrders(const std::filesystem::path& path, const EngineState& engine) noexcept {
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) return false;
+  for (const JsonOrder& row : engine.orders) {
+    out << '[' << row.id
+        << ',' << row.targetId
+        << ',' << row.submitTsNs
+        << ',' << row.activeTsNs
+        << ',' << row.tsNs
+        << ',' << static_cast<unsigned>(actionCode(row.action))
+        << ',' << static_cast<unsigned>(sideCode(row.side))
+        << ',' << static_cast<unsigned>(typeCode(row.type))
+        << ',' << static_cast<unsigned>(statusCode(row.status))
+        << ',' << row.priceE8
+        << ',' << row.qtyE8
+        << ',' << (row.reduceOnly ? 1 : 0)
+        << "]\n";
+  }
+  return out.good();
+}
+
+bool writeFills(const std::filesystem::path& path, const EngineState& engine) noexcept {
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) return false;
+  for (const JsonFill& row : engine.fills) {
+    out << '[' << row.orderId
+        << ',' << row.entryTsNs
+        << ',' << row.exitTsNs
+        << ',' << static_cast<unsigned>(sideCode(row.side))
+        << ',' << row.priceE8
+        << ',' << row.qtyE8
+        << ',' << row.realizedPnlE8
+        << ',' << (row.reduceOnly ? 1 : 0)
+        << "]\n";
+  }
+  return out.good();
+}
+
+bool writeEquity(const std::filesystem::path& path, const EngineState& engine) noexcept {
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) return false;
+  for (const JsonEquityPoint& row : engine.equityPoints) {
+    out << '[' << row.tsNs
+        << ',' << row.grossRealizedPnlE8
+        << ',' << row.realizedPnlE8
+        << ',' << row.unrealizedPnlE8
+        << ',' << row.grossTotalPnlE8
+        << ',' << row.netTotalPnlE8
+        << ',' << row.totalPnlE8
+        << ',' << row.feesPaidE8
+        << ',' << row.walletBalanceE8
+        << ',' << row.positionQtyE8
+        << ',' << row.fillCount
+        << "]\n";
+  }
+  return out.good();
+}
+
+bool writeRiskSnapshots(const std::filesystem::path& path, const EngineState& engine) noexcept {
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) return false;
+  for (const JsonRiskSnapshot& row : engine.riskSnapshots) {
+    out << '[' << row.tsNs
+        << ',' << row.grossRealizedPnlE8
+        << ',' << row.realizedPnlE8
+        << ',' << row.unrealizedPnlE8
+        << ',' << row.grossTotalPnlE8
+        << ',' << row.netTotalPnlE8
+        << ',' << row.feesPaidE8
+        << ',' << row.walletBalanceE8
+        << ',' << row.positionQtyE8
+        << ',' << row.entryPriceE8
+        << ',' << row.bidPriceE8
+        << ',' << row.askPriceE8
+        << ',' << row.fillCount
+        << ',' << static_cast<unsigned>(row.reason)
+        << "]\n";
+  }
+  return out.good();
+}
+
+void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, const EngineState& engine, const char* indent) {
   const char q = '"';
-  out << "    {" << q << "ts_ns" << q << ": " << row.tsNs
-      << ", " << q << "gross_realized_pnl_e8" << q << ": " << row.grossRealizedPnlE8
-      << ", " << q << "realized_pnl_e8" << q << ": " << row.realizedPnlE8
-      << ", " << q << "unrealized_pnl_e8" << q << ": " << row.unrealizedPnlE8
-      << ", " << q << "gross_total_pnl_e8" << q << ": " << row.grossTotalPnlE8
-      << ", " << q << "net_total_pnl_e8" << q << ": " << row.netTotalPnlE8
-      << ", " << q << "total_pnl_e8" << q << ": " << row.totalPnlE8
-      << ", " << q << "fees_paid_e8" << q << ": " << row.feesPaidE8
-      << ", " << q << "wallet_balance_e8" << q << ": " << row.walletBalanceE8
-      << ", " << q << "position_qty_e8" << q << ": " << row.positionQtyE8
-      << ", " << q << "fill_count" << q << ": " << row.fillCount << "}";
+  out << indent << q << "mode" << q << ": " << q << "deterministic_bbo_v2_strategy_close" << q << ",\n";
+  out << indent << q << "events" << q << ": " << result.events << ",\n";
+  out << indent << q << "trades" << q << ": " << result.trades << ",\n";
+  out << indent << q << "booktickers" << q << ": " << result.bookTickers << ",\n";
+  out << indent << q << "depths" << q << ": " << result.depths << ",\n";
+  out << indent << q << "orders" << q << ": " << engine.orders.size() << ",\n";
+  out << indent << q << "fills" << q << ": " << engine.fills.size() << ",\n";
+  out << indent << q << "user_events" << q << ": " << result.userEvents << ",\n";
+  out << indent << q << "timer_wake_events" << q << ": " << result.timerWakeEvents << ",\n";
+  out << indent << q << "reduce_only_orders" << q << ": " << result.reduceOnlyOrders << ",\n";
+  out << indent << q << "reduce_only_fills" << q << ": " << result.reduceOnlyFills << ",\n";
+  out << indent << q << "strategy_closed" << q << ": " << (result.strategyClosed ? "true" : "false") << ",\n";
+  out << indent << q << "net_qty_e8" << q << ": " << engine.netQtyRaw << ",\n";
+  out << indent << q << "open_position_qty_e8" << q << ": " << result.openPositionQtyE8 << ",\n";
+  out << indent << q << "initial_balance_e8" << q << ": " << result.initialBalanceE8 << ",\n";
+  out << indent << q << "wallet_balance_e8" << q << ": " << result.walletBalanceE8 << ",\n";
+  out << indent << q << "gross_realized_pnl_e8" << q << ": " << result.grossRealizedPnlE8 << ",\n";
+  out << indent << q << "fees_paid_e8" << q << ": " << result.feesPaidE8 << ",\n";
+  out << indent << q << "net_realized_pnl_e8" << q << ": " << result.netRealizedPnlE8 << ",\n";
+  out << indent << q << "realized_pnl_e8" << q << ": " << result.realizedPnlE8 << ",\n";
+  out << indent << q << "unrealized_pnl_e8" << q << ": " << result.unrealizedPnlE8 << ",\n";
+  out << indent << q << "total_pnl_e8" << q << ": " << result.totalPnlE8 << "\n";
 }
 
-void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, const EngineState& engine) {
-  const char q = '"';
-  out << "    " << q << "mode" << q << ": " << q << "deterministic_bbo_v2_strategy_close" << q << ",\n";
-  out << "    " << q << "events" << q << ": " << result.events << ",\n";
-  out << "    " << q << "trades" << q << ": " << result.trades << ",\n";
-  out << "    " << q << "booktickers" << q << ": " << result.bookTickers << ",\n";
-  out << "    " << q << "depths" << q << ": " << result.depths << ",\n";
-  out << "    " << q << "orders" << q << ": " << engine.orders.size() << ",\n";
-  out << "    " << q << "fills" << q << ": " << engine.fills.size() << ",\n";
-  out << "    " << q << "user_events" << q << ": " << result.userEvents << ",\n";
-  out << "    " << q << "timer_wake_events" << q << ": " << result.timerWakeEvents << ",\n";
-  out << "    " << q << "reduce_only_orders" << q << ": " << result.reduceOnlyOrders << ",\n";
-  out << "    " << q << "reduce_only_fills" << q << ": " << result.reduceOnlyFills << ",\n";
-  out << "    " << q << "strategy_closed" << q << ": " << (result.strategyClosed ? "true" : "false") << ",\n";
-  out << "    " << q << "net_qty_e8" << q << ": " << engine.netQtyRaw << ",\n";
-  out << "    " << q << "open_position_qty_e8" << q << ": " << result.openPositionQtyE8 << ",\n";
-  out << "    " << q << "initial_balance_e8" << q << ": " << result.initialBalanceE8 << ",\n";
-  out << "    " << q << "wallet_balance_e8" << q << ": " << result.walletBalanceE8 << ",\n";
-  out << "    " << q << "gross_realized_pnl_e8" << q << ": " << result.grossRealizedPnlE8 << ",\n";
-  out << "    " << q << "fees_paid_e8" << q << ": " << result.feesPaidE8 << ",\n";
-  out << "    " << q << "net_realized_pnl_e8" << q << ": " << result.netRealizedPnlE8 << ",\n";
-  out << "    " << q << "realized_pnl_e8" << q << ": " << result.realizedPnlE8 << ",\n";
-  out << "    " << q << "unrealized_pnl_e8" << q << ": " << result.unrealizedPnlE8 << ",\n";
-  out << "    " << q << "total_pnl_e8" << q << ": " << result.totalPnlE8 << "\n";
+bool writeRunConfig(const std::filesystem::path& resultDir, const std::filesystem::path& configPath) noexcept {
+  if (configPath.empty()) return true;
+  const std::filesystem::path target = resultDir / "config.ini";
+  std::error_code ec;
+  if (std::filesystem::exists(target, ec) && std::filesystem::equivalent(configPath, target, ec)) return true;
+  ec.clear();
+  std::filesystem::copy_file(configPath, target, std::filesystem::copy_options::overwrite_existing, ec);
+  return !ec;
 }
 
-Status writeCompactResult(const BacktestRunResult& result, const EngineState& engine) noexcept {
-  std::ofstream out(compactResultPath(result.resultPath), std::ios::out | std::ios::trunc);
-  if (!out.is_open()) return Status::IoError;
+bool writeManifest(const std::filesystem::path& path, const BacktestRunResult& result, const EngineState& engine) noexcept {
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) return false;
   const char q = '"';
   out << "{\n";
-  out << "  " << q << "type" << q << ": " << q << "run.summary" << q << ",\n";
+  out << "  " << q << "type" << q << ": " << q << "run.result.v2" << q << ",\n";
+  out << "  " << q << "schema_version" << q << ": 2,\n";
   out << "  " << q << "request_id" << q << ": " << quote(result.requestId) << ",\n";
   out << "  " << q << "run_id" << q << ": " << quote(result.runId) << ",\n";
   out << "  " << q << "status" << q << ": " << quote(resultStatusName(result.status)) << ",\n";
   out << "  " << q << "strategy" << q << ": " << quote(result.strategy) << ",\n";
   out << "  " << q << "session_path" << q << ": " << quote(result.sessionPath.generic_string()) << ",\n";
-  out << "  " << q << "config_path" << q << ": " << quote(result.configPath.generic_string()) << ",\n";
+  out << "  " << q << "config_path" << q << ": " << quote("config.ini") << ",\n";
   out << "  " << q << "execution" << q << ": {" << q << "order_latency_us" << q << ": " << result.orderLatencyUs
       << ", " << q << "amend_latency_us" << q << ": " << result.amendLatencyUs
       << ", " << q << "cancel_latency_us" << q << ": " << result.cancelLatencyUs << "},\n";
-  out << "  " << q << "equity_points" << q << ": [\n";
-  bool first = true;
-  for (std::size_t i = 0; i < engine.equityPoints.size(); ++i) {
-    if (!includeCompactEquityPoint(i, engine.equityPoints.size())) continue;
-    if (!first) out << ",\n";
-    writeEquityPoint(out, engine.equityPoints[i]);
-    first = false;
-  }
-  out << "\n  ],\n  " << q << "summary" << q << ": {\n";
-  writeSummaryObject(out, result, engine);
-  out << "  },\n  " << q << "errors" << q << ": ";
+  out << "  " << q << "streams" << q << ": {\n";
+  out << "    " << q << "orders" << q << ": {" << q << "path" << q << ": " << q << "orders.jsonl" << q
+      << ", " << q << "row_schema" << q << ": " << q << "[id,target_id,submit_ts_ns,active_ts_ns,ts_ns,action,side,type,status,price_e8,qty_e8,reduce_only]" << q
+      << ", " << q << "rows" << q << ": " << engine.orders.size() << "},\n";
+  out << "    " << q << "fills" << q << ": {" << q << "path" << q << ": " << q << "fills.jsonl" << q
+      << ", " << q << "row_schema" << q << ": " << q << "[order_id,entry_ts_ns,exit_ts_ns,side,price_e8,qty_e8,realized_pnl_e8,reduce_only]" << q
+      << ", " << q << "rows" << q << ": " << engine.fills.size() << "},\n";
+  out << "    " << q << "equity" << q << ": {" << q << "path" << q << ": " << q << "equity.jsonl" << q
+      << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,gross_realized_pnl_e8,realized_pnl_e8,unrealized_pnl_e8,gross_total_pnl_e8,net_total_pnl_e8,total_pnl_e8,fees_paid_e8,wallet_balance_e8,position_qty_e8,fill_count]" << q
+      << ", " << q << "rows" << q << ": " << engine.equityPoints.size() << "},\n";
+  out << "    " << q << "risk_snapshots" << q << ": {" << q << "path" << q << ": " << q << "risk_snapshots.jsonl" << q
+      << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,gross_realized_pnl_e8,realized_pnl_e8,unrealized_pnl_e8,gross_total_pnl_e8,net_total_pnl_e8,fees_paid_e8,wallet_balance_e8,position_qty_e8,entry_price_e8,bid_price_e8,ask_price_e8,fill_count,reason]" << q
+      << ", " << q << "rows" << q << ": " << engine.riskSnapshots.size() << "}\n";
+  out << "  },\n";
+  out << "  " << q << "enums" << q << ": {\n";
+  out << "    " << q << "side" << q << ": {" << q << "0" << q << ": " << q << "sell" << q << ", " << q << "1" << q << ": " << q << "buy" << q << "},\n";
+  out << "    " << q << "action" << q << ": {" << q << "1" << q << ": " << q << "order" << q << ", " << q << "2" << q << ": " << q << "amend" << q << ", " << q << "3" << q << ": " << q << "cancel" << q << "},\n";
+  out << "    " << q << "type" << q << ": {" << q << "1" << q << ": " << q << "limit" << q << ", " << q << "2" << q << ": " << q << "market" << q << "},\n";
+  out << "    " << q << "status" << q << ": {" << q << "1" << q << ": " << q << "pending" << q << ", " << q << "2" << q << ": " << q << "acked" << q << ", " << q << "3" << q << ": " << q << "filled" << q << ", " << q << "4" << q << ": " << q << "cancelled" << q << ", " << q << "5" << q << ": " << q << "missing" << q << ", " << q << "6" << q << ": " << q << "rejected" << q << "}\n";
+  out << "  },\n";
+  out << "  " << q << "summary" << q << ": {\n";
+  writeSummaryObject(out, result, engine, "    ");
+  out << "  },\n";
+  out << "  " << q << "errors" << q << ": ";
   if (result.error.empty()) out << "[]\n";
   else out << "[{" << q << "message" << q << ": " << quote(result.error) << "}]\n";
   out << "}\n";
-  return out.good() ? Status::Ok : Status::IoError;
+  return out.good();
 }
+
 }  // namespace
 
 Status writeResult(const BacktestRunResult& result, const EngineState& engine) noexcept {
   std::error_code ec;
-  std::filesystem::create_directories(result.resultPath.parent_path(), ec);
+  std::filesystem::create_directories(result.resultPath, ec);
   if (ec) return Status::IoError;
-  std::ofstream out(result.resultPath, std::ios::out | std::ios::trunc);
-  if (!out.is_open()) return Status::IoError;
-  const char q = '"';
-  out << "{\n";
-  out << "  " << q << "type" << q << ": " << q << "run.result" << q << ",\n";
-  out << "  " << q << "request_id" << q << ": " << quote(result.requestId) << ",\n";
-  out << "  " << q << "run_id" << q << ": " << quote(result.runId) << ",\n";
-  out << "  " << q << "status" << q << ": " << quote(resultStatusName(result.status)) << ",\n";
-  out << "  " << q << "strategy" << q << ": " << quote(result.strategy) << ",\n";
-  out << "  " << q << "session_path" << q << ": " << quote(result.sessionPath.generic_string()) << ",\n";
-  out << "  " << q << "config_path" << q << ": " << quote(result.configPath.generic_string()) << ",\n";
-  out << "  " << q << "execution" << q << ": {" << q << "order_latency_us" << q << ": " << result.orderLatencyUs
-      << ", " << q << "amend_latency_us" << q << ": " << result.amendLatencyUs
-      << ", " << q << "cancel_latency_us" << q << ": " << result.cancelLatencyUs << "},\n";
-  out << "  " << q << "orders" << q << ": [\n";
-  for (std::size_t i = 0; i < engine.orders.size(); ++i) {
-    const JsonOrder& row = engine.orders[i];
-    out << "    {" << q << "id" << q << ": " << row.id
-        << ", " << q << "target_id" << q << ": " << row.targetId
-        << ", " << q << "submit_ts_ns" << q << ": " << row.submitTsNs
-        << ", " << q << "active_ts_ns" << q << ": " << row.activeTsNs
-        << ", " << q << "ts_ns" << q << ": " << row.tsNs
-        << ", " << q << "action" << q << ": " << quote(row.action)
-        << ", " << q << "side" << q << ": " << quote(row.side)
-        << ", " << q << "type" << q << ": " << quote(row.type)
-        << ", " << q << "status" << q << ": " << quote(row.status)
-        << ", " << q << "price_e8" << q << ": " << row.priceE8
-        << ", " << q << "qty_e8" << q << ": " << row.qtyE8
-        << ", " << q << "reduce_only" << q << ": " << (row.reduceOnly ? "true" : "false") << "}"
-        << (i + 1 == engine.orders.size() ? "\n" : ",\n");
-  }
-  out << "  ],\n  " << q << "fills" << q << ": [\n";
-  for (std::size_t i = 0; i < engine.fills.size(); ++i) {
-    const JsonFill& row = engine.fills[i];
-    out << "    {" << q << "order_id" << q << ": " << row.orderId
-        << ", " << q << "entry_ts_ns" << q << ": " << row.entryTsNs
-        << ", " << q << "exit_ts_ns" << q << ": " << row.exitTsNs
-        << ", " << q << "side" << q << ": " << quote(row.side)
-        << ", " << q << "price_e8" << q << ": " << row.priceE8
-        << ", " << q << "qty_e8" << q << ": " << row.qtyE8
-        << ", " << q << "realized_pnl_e8" << q << ": " << row.realizedPnlE8
-        << ", " << q << "reduce_only" << q << ": " << (row.reduceOnly ? "true" : "false") << "}"
-        << (i + 1 == engine.fills.size() ? "\n" : ",\n");
-  }
-  out << "  ],\n  " << q << "equity_points" << q << ": [\n";
-  for (std::size_t i = 0; i < engine.equityPoints.size(); ++i) {
-    const JsonEquityPoint& row = engine.equityPoints[i];
-    out << "    {" << q << "ts_ns" << q << ": " << row.tsNs
-        << ", " << q << "gross_realized_pnl_e8" << q << ": " << row.grossRealizedPnlE8
-        << ", " << q << "realized_pnl_e8" << q << ": " << row.realizedPnlE8
-        << ", " << q << "unrealized_pnl_e8" << q << ": " << row.unrealizedPnlE8
-        << ", " << q << "gross_total_pnl_e8" << q << ": " << row.grossTotalPnlE8
-        << ", " << q << "net_total_pnl_e8" << q << ": " << row.netTotalPnlE8
-        << ", " << q << "total_pnl_e8" << q << ": " << row.totalPnlE8
-        << ", " << q << "fees_paid_e8" << q << ": " << row.feesPaidE8
-        << ", " << q << "wallet_balance_e8" << q << ": " << row.walletBalanceE8
-        << ", " << q << "position_qty_e8" << q << ": " << row.positionQtyE8
-        << ", " << q << "fill_count" << q << ": " << row.fillCount << "}"
-        << (i + 1 == engine.equityPoints.size() ? "\n" : ",\n");
-  }
-  out << "  ],\n  " << q << "summary" << q << ": {\n";
-  writeSummaryObject(out, result, engine);
-
-  out << "  },\n  " << q << "errors" << q << ": ";
-  if (result.error.empty()) out << "[]\n";
-  else out << "[{" << q << "message" << q << ": " << quote(result.error) << "}]\n";
-  out << "}\n";
-  if (!out.good()) return Status::IoError;
-  return writeCompactResult(result, engine);
+  if (!writeRunConfig(result.resultPath, result.configPath)) return Status::IoError;
+  if (!writeOrders(result.resultPath / "orders.jsonl", engine)) return Status::IoError;
+  if (!writeFills(result.resultPath / "fills.jsonl", engine)) return Status::IoError;
+  if (!writeEquity(result.resultPath / "equity.jsonl", engine)) return Status::IoError;
+  if (!writeRiskSnapshots(result.resultPath / "risk_snapshots.jsonl", engine)) return Status::IoError;
+  if (!writeManifest(result.resultPath / "manifest.json", result, engine)) return Status::IoError;
+  return Status::Ok;
 }
 
 }  // namespace hft_backtest::detail
