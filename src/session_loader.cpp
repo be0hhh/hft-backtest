@@ -77,13 +77,16 @@ bool parseTradeLine(std::string_view line, TradeRow& out) noexcept {
 bool parseBookTickerLine(std::string_view line, BookTickerRow& out) noexcept {
   std::size_t pos = 0;
   out = BookTickerRow{};
-  return consume(line, pos, '[') && parseI64(line, pos, out.bidPriceE8) && consume(line, pos, ',') &&
-         parseI64(line, pos, out.bidQtyE8) && consume(line, pos, ',') && parseI64(line, pos, out.askPriceE8) &&
-         consume(line, pos, ',') && parseI64(line, pos, out.askQtyE8) && consume(line, pos, ',') &&
-         parseI64(line, pos, out.tsNs);
+  if (!consume(line, pos, '[') || !parseI64(line, pos, out.bidPriceE8) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.bidQtyE8) || !consume(line, pos, ',') || !parseI64(line, pos, out.askPriceE8) ||
+      !consume(line, pos, ',') || !parseI64(line, pos, out.askQtyE8) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.tsNs)) return false;
+  std::int64_t captureSeq = 0;
+  if (consume(line, pos, ',') && (!parseI64(line, pos, captureSeq) || !consume(line, pos, ',') || !parseI64(line, pos, out.ingestSeq))) return false;
+  return true;
 }
 
-bool parseBookDocument(std::string_view line, std::vector<PriceLevelRow>& levels, std::int64_t& tsNs) noexcept {
+bool parseBookDocument(std::string_view line, std::vector<PriceLevelRow>& levels, std::int64_t& tsNs, std::int64_t* ingestSeq = nullptr) noexcept {
   std::size_t pos = 0;
   levels.clear();
   if (!consume(line, pos, '[')) return false;
@@ -96,7 +99,12 @@ bool parseBookDocument(std::string_view line, std::vector<PriceLevelRow>& levels
     levels.push_back(level);
     if (!consume(line, pos, ',')) return false;
   }
-  return parseI64(line, pos, tsNs);
+  if (!parseI64(line, pos, tsNs)) return false;
+  std::int64_t captureSeq = 0;
+  std::int64_t parsedIngestSeq = 0;
+  if (consume(line, pos, ',') && (!parseI64(line, pos, captureSeq) || !consume(line, pos, ',') || !parseI64(line, pos, parsedIngestSeq))) return false;
+  if (ingestSeq) *ingestSeq = parsedIngestSeq;
+  return true;
 }
 
 template<typename Row, typename ParseFn>
@@ -184,7 +192,7 @@ Status loadSession(const std::filesystem::path& sessionPath, SessionData& out, s
   status = loadJsonl<BookTickerRow>(existingPath(sessionPath, bookTickerPath, "bookticker.jsonl"), out.bookTickers, parseBookTickerLine, error);
   if (!isOk(status)) return status;
   status = loadJsonl<DepthRow>(existingPath(sessionPath, depthPath, "depth.jsonl"), out.depths, [](std::string_view line, DepthRow& row) noexcept {
-    return parseBookDocument(line, row.levels, row.tsNs);
+    return parseBookDocument(line, row.levels, row.tsNs, &row.ingestSeq);
   }, error);
   if (!isOk(status)) return status;
 

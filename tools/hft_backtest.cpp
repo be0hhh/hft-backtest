@@ -10,7 +10,7 @@
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--strategy NAME] [--output JSON] [--run-id ID] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N]\n";
+  std::cerr << "Usage: hft-backtest --session DIR --config INI [--strategy NAME] [--output JSON] [--run-id ID] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {
@@ -23,6 +23,41 @@ bool parseU64(const char* text, std::uint64_t& out) noexcept {
   const char* last = text + std::strlen(text);
   const auto parsed = std::from_chars(text, last, out);
   return parsed.ec == std::errc{} && parsed.ptr == last;
+}
+
+bool parseDecimalE8(const char* text, std::int64_t& out) noexcept {
+  if (!text || *text == '\0') return false;
+  bool negative = false;
+  const char* p = text;
+  if (*p == '-') {
+    negative = true;
+    ++p;
+  }
+  std::int64_t whole = 0;
+  bool anyWhole = false;
+  while (*p >= '0' && *p <= '9') {
+    anyWhole = true;
+    if (whole > (INT64_MAX / 10)) return false;
+    whole = whole * 10 + static_cast<std::int64_t>(*p - '0');
+    ++p;
+  }
+  std::int64_t frac = 0;
+  std::int64_t scale = 10000000;
+  if (*p == '.') {
+    ++p;
+    while (*p >= '0' && *p <= '9') {
+      if (scale > 0) {
+        frac += static_cast<std::int64_t>(*p - '0') * scale;
+        scale /= 10;
+      }
+      ++p;
+    }
+  }
+  if (!anyWhole || *p != '\0') return false;
+  if (whole > (INT64_MAX - frac) / 100000000ll) return false;
+  out = whole * 100000000ll + frac;
+  if (negative) out = -out;
+  return true;
 }
 
 }  // namespace
@@ -54,6 +89,12 @@ int main(int argc, char** argv) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.amendLatencyUs)) return 2;
     } else if (std::strcmp(arg, "--cancel-latency-us") == 0) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.cancelLatencyUs)) return 2;
+    } else if (std::strcmp(arg, "--initial-balance-usdt") == 0) {
+      if (const char* value = needValue(arg); value && (!parseDecimalE8(value, request.initialBalanceE8) || request.initialBalanceE8 < 0)) return 2;
+    } else if (std::strcmp(arg, "--maker-fee-bps") == 0) {
+      if (const char* value = needValue(arg); value && (!parseDecimalE8(value, request.makerFeeBpsE8) || request.makerFeeBpsE8 < 0)) return 2;
+    } else if (std::strcmp(arg, "--taker-fee-bps") == 0) {
+      if (const char* value = needValue(arg); value && (!parseDecimalE8(value, request.takerFeeBpsE8) || request.takerFeeBpsE8 < 0)) return 2;
     } else if (std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--help") == 0) {
       printUsage();
       return 0;

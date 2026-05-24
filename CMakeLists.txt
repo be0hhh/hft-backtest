@@ -67,8 +67,13 @@ set_property(TARGET hft_trader_runtime PROPERTY INTERFACE_LINK_OPTIONS
 find_package(Threads REQUIRED)
 
 add_library(hft_backtest_core SHARED
+  src/backtest_accounting.cpp
+  src/backtest_common.cpp
   src/backtest.cpp
+  src/backtest_execution.cpp
+  src/backtest_result_writer.cpp
   src/session_loader.cpp
+  src/backtest_timeline.cpp
 )
 add_library(hft_backtest::core ALIAS hft_backtest_core)
 
@@ -97,6 +102,19 @@ set_target_properties(hft-backtest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_property(TARGET hft-backtest PROPERTY BUILD_RPATH
+  $ORIGIN
+  ${HFT_BACKTEST_TRADER_ROOT}/build
+  ${HFT_BACKTEST_CXET_ROOT}/lib
+)
+
+add_executable(hft-backtest-execution-tests tests/backtest_execution_tests.cpp)
+target_include_directories(hft-backtest-execution-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(hft-backtest-execution-tests PRIVATE hft_backtest_core)
+target_compile_features(hft-backtest-execution-tests PRIVATE cxx_std_23)
+set_target_properties(hft-backtest-execution-tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_property(TARGET hft-backtest-execution-tests PROPERTY BUILD_RPATH
   $ORIGIN
   ${HFT_BACKTEST_TRADER_ROOT}/build
   ${HFT_BACKTEST_CXET_ROOT}/lib

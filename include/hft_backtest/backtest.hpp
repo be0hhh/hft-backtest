@@ -19,6 +19,9 @@ struct BacktestRunRequest {
   std::uint64_t orderLatencyUs{1000};
   std::uint64_t amendLatencyUs{1000};
   std::uint64_t cancelLatencyUs{1000};
+  std::int64_t initialBalanceE8{0};
+  std::int64_t makerFeeBpsE8{0};
+  std::int64_t takerFeeBpsE8{0};
 };
 
 struct BacktestProgress {
@@ -46,11 +49,22 @@ struct BacktestRunResult {
   std::uint64_t orders{0};
   std::uint64_t fills{0};
   std::uint64_t events{0};
+  std::uint64_t userEvents{0};
+  std::uint64_t timerWakeEvents{0};
+  std::uint64_t reduceOnlyOrders{0};
+  std::uint64_t reduceOnlyFills{0};
   std::int64_t firstTsNs{0};
   std::int64_t lastTsNs{0};
   std::int64_t realizedPnlE8{0};
   std::int64_t unrealizedPnlE8{0};
   std::int64_t totalPnlE8{0};
+  std::int64_t initialBalanceE8{0};
+  std::int64_t walletBalanceE8{0};
+  std::int64_t grossRealizedPnlE8{0};
+  std::int64_t feesPaidE8{0};
+  std::int64_t netRealizedPnlE8{0};
+  std::int64_t openPositionQtyE8{0};
+  bool strategyClosed{false};
 };
 
 using BacktestProgressCallback = bool (*)(const BacktestProgress& progress, void* userData) noexcept;
