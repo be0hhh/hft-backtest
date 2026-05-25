@@ -38,6 +38,14 @@ struct DepthRow {
   std::vector<PriceLevelRow> levels{};
 };
 
+struct CandleRow {
+  std::int64_t tier{0};
+  std::int64_t tsNs{0};
+  std::int64_t highE8{0};
+  std::int64_t lowE8{0};
+  std::int64_t quoteAmountE8{0};
+};
+
 struct SnapshotDocument {
   std::int64_t tsNs{0};
   std::vector<PriceLevelRow> levels{};
@@ -49,21 +57,42 @@ struct InstrumentMetadata {
   std::int64_t contractBaseQtyE8{100000000};
 };
 
+struct SessionLoadPlan {
+  bool loadTrades{true};
+  bool loadBookTickers{true};
+  bool loadDepths{true};
+  bool loadCandles{false};
+  bool requireTrades{false};
+  bool requireBookTickers{false};
+  bool requireDepths{false};
+  bool requireCandles{false};
+};
+
 struct SessionData {
   std::filesystem::path sessionPath{};
   std::string exchange{};
   std::string market{};
   std::string symbol{};
   std::vector<TradeRow> trades{};
+  std::vector<TradeRow> tradeWarmup{};
   std::vector<BookTickerRow> bookTickers{};
   std::vector<DepthRow> depths{};
+  std::vector<CandleRow> candles{};
   SnapshotDocument snapshot{};
   bool hasSnapshot{false};
   InstrumentMetadata instrument{};
+  std::int64_t tradeHistoryWarmupSec{0};
+  std::int64_t tradeHistoryRequestedStartNs{0};
+  std::int64_t tradeHistoryRequestedEndNs{0};
+  std::int64_t tradeHistoryRows{0};
   std::int64_t firstTsNs{0};
   std::int64_t lastTsNs{0};
 };
 
+Status loadSession(const std::filesystem::path& sessionPath,
+                   const SessionLoadPlan& plan,
+                   SessionData& out,
+                   std::string& error) noexcept;
 Status loadSession(const std::filesystem::path& sessionPath, SessionData& out, std::string& error) noexcept;
 
 }  // namespace hft_backtest::detail

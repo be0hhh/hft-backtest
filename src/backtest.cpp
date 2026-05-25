@@ -8,6 +8,7 @@
 #include "hft_trader/core/StrategyContract.hpp"
 #include "hft_trader/runtime/GeneratedStrategyRegistry.hpp"
 #include "hft_trader/runtime/RuntimeConfig.hpp"
+#include "hft_trader/runtime/StrategyMarketDataRuntime.hpp"
 
 #include <array>
 #include <chrono>
@@ -36,6 +37,34 @@ std::filesystem::path resultPathFor(const BacktestRunRequest& request, const std
   return request.sessionPath / "backtests" / runId;
 }
 
+bool buildSessionLoadPlan(const StrategyDescriptor& descriptor, detail::SessionLoadPlan& out, std::string& error) noexcept {
+  out = detail::SessionLoadPlan{};
+  out.loadTrades = false;
+  out.loadBookTickers = false;
+  out.loadDepths = false;
+  out.loadCandles = descriptor.seedHistory != nullptr;
+  out.requireCandles = descriptor.seedHistory != nullptr;
+  if (descriptor.resolveTradeHistory && descriptor.seedTrades) out.loadTrades = true;
+  const std::size_t streamCount = hft_trader::runtime::descriptorStreamCount(descriptor);
+  for (std::size_t i = 0u; i < streamCount; ++i) {
+    const cxet::api::market::PublicMarketDataStream stream = hft_trader::runtime::descriptorStreamAt(descriptor, i);
+    if (stream == cxet::api::market::PublicMarketDataStream::Trades) {
+      out.loadTrades = true;
+      out.requireTrades = true;
+    } else if (stream == cxet::api::market::PublicMarketDataStream::BookTicker) {
+      out.loadBookTickers = true;
+      out.requireBookTickers = true;
+    } else if (stream == cxet::api::market::PublicMarketDataStream::Orderbook) {
+      out.loadDepths = true;
+      out.requireDepths = true;
+    } else {
+      error = "strategy requires unsupported market data stream for backtest";
+      return false;
+    }
+  }
+  return true;
+}
+
 bool reportProgress(std::uint64_t done, std::uint64_t total, std::string stage, BacktestProgressCallback cb, void* userData) noexcept {
   if (!cb) return true;
   BacktestProgress progress{};
@@ -47,6 +76,16 @@ bool reportProgress(std::uint64_t done, std::uint64_t total, std::string stage, 
   return cb(progress, userData);
 }
 
+bool strategySnapshotReady(const StrategyDescriptor& descriptor,
+                           const hft_trader::core::StrategyMarketSnapshot& snapshot) noexcept {
+  const std::size_t streamCount = hft_trader::runtime::descriptorStreamCount(descriptor);
+  for (std::size_t i = 0u; i < streamCount; ++i) {
+    const cxet::api::market::PublicMarketDataStream stream = hft_trader::runtime::descriptorStreamAt(descriptor, i);
+    if (!hft_trader::runtime::snapshotHasRequiredStream(snapshot, stream, &descriptor)) return false;
+  }
+  return true;
+}
+
 bool runCycle(const StrategyDescriptor& descriptor,
               void* state,
               detail::EngineState& engine,
@@ -55,6 +94,7 @@ bool runCycle(const StrategyDescriptor& descriptor,
               std::int64_t tsNs,
               const BacktestRunRequest& request,
               const cxet::composite::UserDataEvent* userEvent) {
+  if (!strategySnapshotReady(descriptor, engine.snapshot)) return true;
   std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<hft_trader::core::AmendIntent, detail::kIntentCapacity> amendBuf{};
   std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
@@ -79,7 +119,7 @@ bool runCycle(const StrategyDescriptor& descriptor,
   ctx.io.amendOut = Span<hft_trader::core::AmendIntent>(amendBuf.data(), amendBuf.size());
   ctx.io.cancelOut = Span<hft_trader::core::CancelIntent>(cancelBuf.data(), cancelBuf.size());
   ctx.io.clear();
-  if (!descriptor.runCycle(state, ctx)) return false;
+  (void)descriptor.runCycle(state, ctx);
   detail::applyIntents(engine, ctx.io, tsNs, request.orderLatencyUs, request.amendLatencyUs, request.cancelLatencyUs);
   return true;
 }
@@ -94,6 +134,61 @@ std::uint64_t maxLatencyUs(const BacktestRunRequest& request) noexcept {
 std::int64_t toInt64Time(TimeNs value) noexcept {
   if (value.raw > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) return std::numeric_limits<std::int64_t>::max();
   return static_cast<std::int64_t>(value.raw);
+}
+
+TimeNs timeNsFromI64(std::int64_t value) noexcept {
+  TimeNs out{};
+  if (value > 0) out.raw = static_cast<std::uint64_t>(value);
+  return out;
+}
+
+bool buildTradeWarmupRows(const detail::SessionData& session,
+                          std::vector<cxet::composite::TradeRuntimeV1>& out,
+                          hft_trader::runtime::StrategyTradeHistorySeedStats& stats) {
+  out.clear();
+  out.reserve(session.tradeWarmup.size());
+  stats = hft_trader::runtime::StrategyTradeHistorySeedStats{};
+  stats.rowsFetched = static_cast<std::uint64_t>(session.tradeHistoryRows > 0 ? session.tradeHistoryRows : static_cast<std::int64_t>(session.tradeWarmup.size()));
+  stats.rowsProvided = static_cast<std::uint64_t>(session.tradeWarmup.size());
+  stats.firstTs = timeNsFromI64(session.tradeWarmup.empty() ? 0 : session.tradeWarmup.front().tsNs);
+  stats.lastTs = timeNsFromI64(session.tradeHistoryRequestedEndNs > 0 ? session.tradeHistoryRequestedEndNs : (session.tradeWarmup.empty() ? 0 : session.tradeWarmup.back().tsNs));
+  for (const detail::TradeRow& row : session.tradeWarmup) out.push_back(detail::toRuntime(row));
+  return !out.empty();
+}
+
+bool seedTradeWarmupFromSession(const StrategyDescriptor& descriptor,
+                                void* state,
+                                const StrategyParamStorage& params,
+                                const detail::SessionData& session,
+                                std::string& error) {
+  if (!descriptor.resolveTradeHistory || !descriptor.seedTrades) return true;
+  const TimeNs seedEnd = timeNsFromI64(session.tradeHistoryRequestedEndNs > 0 ? session.tradeHistoryRequestedEndNs : session.firstTsNs);
+  hft_trader::runtime::StrategyTradeHistoryRequest request{};
+  if (!descriptor.resolveTradeHistory(params, seedEnd, request)) {
+    error = "strategy trade history request failed";
+    return false;
+  }
+  if (!request.enabled) return true;
+  if (session.tradeHistoryRequestedStartNs <= 0 || session.tradeHistoryRequestedEndNs <= 0) {
+    error = "strategy requires trade warmup but recorder manifest has no trade history coverage";
+    return false;
+  }
+  if (static_cast<std::uint64_t>(session.tradeHistoryRequestedStartNs) > request.startTime.raw) {
+    error = "recorder trade warmup is shorter than strategy requires";
+    return false;
+  }
+  std::vector<cxet::composite::TradeRuntimeV1> rows{};
+  hft_trader::runtime::StrategyTradeHistorySeedStats stats{};
+  if (!buildTradeWarmupRows(session, rows, stats)) {
+    error = "strategy requires trade warmup but warmup trades are empty";
+    return false;
+  }
+  const hft_trader::runtime::StrategySeedTradesStatus seedStatus = descriptor.seedTrades(state, rows.data(), rows.size(), stats);
+  if (seedStatus == hft_trader::runtime::StrategySeedTradesStatus::BadData) {
+    error = "strategy seedTrades rejected warmup data";
+    return false;
+  }
+  return true;
 }
 
 std::int64_t nextPendingTs(const detail::EngineState& engine) noexcept {
@@ -170,10 +265,17 @@ bool settleAfterReplay(const StrategyDescriptor& descriptor,
     if (!runUntil(descriptor, state, engine, shard, control, untilTs, request)) return false;
     if (engine.netQtyRaw == 0 && engine.pending.empty() && nextWakeTs(descriptor, state) == std::numeric_limits<std::int64_t>::max()) break;
   }
-  if (engine.netQtyRaw != 0) {
-    if (!detail::forceClosePosition(engine, untilTs, request.orderLatencyUs)) return false;
+  hft_trader::core::ShardControlState teardownControl = control;
+  teardownControl.killActive = hft_trader::core::kAlgoFlagTrue;
+  for (std::uint32_t i = 0u; i < 8u && (engine.netQtyRaw != 0 || !engine.pending.empty()); ++i) {
     untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
-    if (!runUntil(descriptor, state, engine, shard, control, untilTs, request)) return false;
+    if (!runUntil(descriptor, state, engine, shard, teardownControl, untilTs, request)) return false;
+    if (engine.netQtyRaw != 0) {
+      if (!detail::forceClosePosition(engine, untilTs, request.orderLatencyUs)) return false;
+      untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
+      if (!runUntil(descriptor, state, engine, shard, teardownControl, untilTs, request)) return false;
+    }
+    detail::cancelOpenOrders(engine, untilTs, request.cancelLatencyUs);
   }
   detail::cancelOpenOrders(engine, untilTs, request.cancelLatencyUs);
   return engine.netQtyRaw == 0 && engine.pending.empty();
@@ -224,15 +326,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     return result;
   }
 
-  detail::SessionData session{};
   std::string error;
-  result.status = detail::loadSession(request.sessionPath, session, error);
-  if (!isOk(result.status)) {
-    result.error = error;
-    (void)detail::writeResult(result, detail::EngineState{});
-    return result;
-  }
-
   hft_trader::runtime::HftRuntimeConfig cfg{};
   if (!hft_trader::runtime::loadRuntimeConfig(request.configPath.string().c_str(), cfg, error)) {
     result.status = Status::InvalidArgument;
@@ -251,6 +345,22 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!descriptor || !descriptor->resolveParams || !descriptor->initState || !descriptor->runCycle) {
     result.status = Status::Unsupported;
     result.error = "strategy descriptor is missing required callbacks";
+    (void)detail::writeResult(result, detail::EngineState{});
+    return result;
+  }
+
+  detail::SessionLoadPlan loadPlan{};
+  if (!buildSessionLoadPlan(*descriptor, loadPlan, error)) {
+    result.status = Status::Unsupported;
+    result.error = error;
+    (void)detail::writeResult(result, detail::EngineState{});
+    return result;
+  }
+
+  detail::SessionData session{};
+  result.status = detail::loadSession(request.sessionPath, loadPlan, session, error);
+  if (!isOk(result.status)) {
+    result.error = error;
     (void)detail::writeResult(result, detail::EngineState{});
     return result;
   }
@@ -297,6 +407,34 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!descriptor->initState(state.data(), params, instrument)) {
     result.status = Status::InvalidArgument;
     result.error = "strategy initState failed";
+    (void)detail::writeResult(result, detail::EngineState{});
+    return result;
+  }
+  if (descriptor->seedHistory) {
+    if (session.candles.empty()) {
+      result.status = Status::CorruptData;
+      result.error = "strategy requires candle history but candles channel is missing or empty";
+      (void)detail::writeResult(result, detail::EngineState{});
+      return result;
+    }
+    cxet::composite::TieredCandleHistory history{};
+    if (!detail::buildTieredCandleHistory(session.candles, history)) {
+      result.status = Status::CorruptData;
+      result.error = "failed to build strategy candle history from recorder session";
+      (void)detail::writeResult(result, detail::EngineState{});
+      return result;
+    }
+    hft_trader::runtime::StrategyHistorySeedStats stats{};
+    if (!descriptor->seedHistory(state.data(), history, &stats)) {
+      result.status = Status::InvalidArgument;
+      result.error = "strategy seedHistory failed";
+      (void)detail::writeResult(result, detail::EngineState{});
+      return result;
+    }
+  }
+  if (!seedTradeWarmupFromSession(*descriptor, state.data(), params, session, error)) {
+    result.status = Status::CorruptData;
+    result.error = error;
     (void)detail::writeResult(result, detail::EngineState{});
     return result;
   }
@@ -351,7 +489,14 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (event.kind == 0) {
       const auto delta = detail::toRuntime(session.depths[event.index]);
       hft_trader::core::copyDepthSnapshot(engine.snapshot, delta);
-      (void)hft_trader::core::applyDelta(engine.orderBook, delta);
+      if (engine.orderBook.initialized.raw != hft_trader::core::kAlgoFlagTrue.raw) {
+        hft_trader::core::LocalOrderBookConfig bookConfig{};
+        bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+        bookConfig.tickSizeRaw = instrument.tickSizeRaw;
+        hft_trader::core::applySnapshot(engine.orderBook, detail::toRuntimeSnapshot(session.depths[event.index]), selectedSymbol, bookConfig);
+      } else {
+        (void)hft_trader::core::applyDelta(engine.orderBook, delta);
+      }
       hft_trader::core::bindOrderBookSnapshot(engine.snapshot, engine.orderBook);
     } else if (event.kind == 1) {
       const auto trade = detail::toRuntime(session.trades[event.index]);

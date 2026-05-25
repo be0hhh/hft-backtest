@@ -14,6 +14,7 @@
 #include "primitives/composite/BookTickerRuntimeV1.hpp"
 #include "primitives/composite/OrderBookDeltaRuntimeV1.hpp"
 #include "primitives/composite/OrderBookSnapshot.hpp"
+#include "primitives/composite/TieredCandleHistory.hpp"
 #include "primitives/composite/TradeRuntimeV1.hpp"
 #include "primitives/composite/UserDataEvent.hpp"
 
@@ -168,6 +169,9 @@ cxet::composite::TradeRuntimeV1 toRuntime(const TradeRow& row) noexcept;
 cxet::composite::BookTickerRuntimeV1 toRuntime(const BookTickerRow& row) noexcept;
 cxet::composite::OrderBookDeltaRuntimeV1 toRuntime(const DepthRow& row) noexcept;
 cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const SnapshotDocument& row) noexcept;
+cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const DepthRow& row) noexcept;
+bool buildTieredCandleHistory(const std::vector<CandleRow>& rows,
+                              cxet::composite::TieredCandleHistory& out) noexcept;
 
 std::int64_t mulPriceQtyE8(std::int64_t px, std::int64_t qty) noexcept;
 std::int64_t feeForFillE8(std::int64_t priceE8, std::int64_t qtyE8, std::int64_t feeBpsE8) noexcept;

@@ -9,6 +9,7 @@
 #include <iostream>
 #include <sstream>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -90,6 +91,12 @@ std::string readText(const std::filesystem::path& path) {
   std::ostringstream ss;
   ss << in.rdbuf();
   return ss.str();
+}
+
+void writeText(const std::filesystem::path& path, std::string_view text) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream out(path, std::ios::out | std::ios::trunc | std::ios::binary);
+  out << text;
 }
 
 bool testStaleCancelDoesNotCancelReusedSlot() {
@@ -444,10 +451,113 @@ bool testCancelAfterAmendCancelsReplacementOrder() {
          expect(engine.orders[3].status == "acked", "cancel command is acked") &&
          expect(!engine.open[0].state.valid, "replacement cancel clears active order");
 }
+
+bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_loader_manifest_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+            "  \"channels\": {\n"
+            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
+            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
+            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
+            "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
+            "  },\n"
+            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
+            "}\n");
+  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000}\n");
+  writeText(dir / "jsonl" / "trades.jsonl", "[10000000000,100000000,1,1000]\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,1001]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],1002]\n");
+  writeText(dir / "jsonl" / "candles.jsonl", "[1,900,10200000000,9800000000,500000000]\n");
+
+  SessionLoadPlan plan{};
+  plan.loadTrades = true;
+  plan.loadBookTickers = true;
+  plan.loadDepths = true;
+  plan.loadCandles = true;
+  plan.requireTrades = true;
+  plan.requireBookTickers = true;
+  plan.requireDepths = true;
+  plan.requireCandles = true;
+  SessionData data{};
+  std::string error;
+  const hft_backtest::Status status = loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::Ok, "loader accepts current manifest channel path schema") &&
+         expect(data.exchange == "binance", "loader reads exchange identity") &&
+         expect(data.market == "futures", "loader reads market identity") &&
+         expect(data.symbol == "BTCUSDT", "loader reads first symbol identity") &&
+         expect(data.trades.size() == 1u, "loader reads trades from channel path") &&
+         expect(data.bookTickers.size() == 1u, "loader reads bookticker from channel path") &&
+         expect(data.depths.size() == 1u, "loader reads depth from channel path") &&
+         expect(data.candles.size() == 1u, "loader reads candles from channel path") &&
+         expect(data.instrument.tickSizeE8 == 1000000, "loader reads tick size metadata") &&
+         expect(data.instrument.lotSizeE8 == 1000, "loader reads lot size metadata");
+}
+
+bool testLoadSessionFailsMissingRequiredDepth() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_loader_missing_depth_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
+  SessionLoadPlan plan{};
+  plan.loadDepths = true;
+  plan.requireDepths = true;
+  SessionData data{};
+  std::string error;
+  const hft_backtest::Status status = loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::CorruptData, "loader rejects missing required depth") &&
+         expect(error.find("depth") != std::string::npos, "missing required depth error names channel");
+}
+
+bool testDepthRowBuildsInitialOrderBookSnapshot() {
+  DepthRow row{};
+  row.tsNs = 1002;
+  row.levels.push_back(PriceLevelRow{9900000000ll, 100000000ll, 1});
+  row.levels.push_back(PriceLevelRow{10100000000ll, 200000000ll, 0});
+  cxet::composite::OrderBookSnapshot snapshot = toRuntimeSnapshot(row);
+
+  hft_trader::core::LocalOrderBookState book{};
+  hft_trader::core::LocalOrderBookConfig config{};
+  config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+  config.tickSizeRaw = 1000000;
+  Symbol symbol{};
+  symbol.copyFrom("BTCUSDT");
+  hft_trader::core::applySnapshot(book, snapshot, symbol, config);
+
+  const hft_trader::core::LocalOrderBookView view = hft_trader::core::orderBook(book);
+  return expect(snapshot.levelCount.raw == 2u, "depth row snapshot carries levels") &&
+         expect(book.initialized.raw == hft_trader::core::kAlgoFlagTrue.raw, "depth row snapshot initializes local orderbook") &&
+         expect(hft_trader::core::bestBid(view).raw == 9900000000ll, "depth row snapshot sets best bid") &&
+         expect(hft_trader::core::bestAsk(view).raw == 10100000000ll, "depth row snapshot sets best ask");
+}
+
+bool testTieredCandleHistoryBuildsCounts() {
+  std::vector<CandleRow> rows{};
+  rows.push_back(CandleRow{1, 1000, 10200000000ll, 9800000000ll, 500000000ll});
+  rows.push_back(CandleRow{2, 900, 10300000000ll, 9700000000ll, 600000000ll});
+  rows.push_back(CandleRow{3, 800, 10400000000ll, 9600000000ll, 700000000ll});
+  cxet::composite::TieredCandleHistory history{};
+  const bool ok = buildTieredCandleHistory(rows, history);
+
+  return expect(ok, "tiered candle history accepts valid rows") &&
+         expect(history.m1Count.raw == 1u, "tiered candle history writes m1 count") &&
+         expect(history.m15Count.raw == 1u, "tiered candle history writes m15 count") &&
+         expect(history.d1Count.raw == 1u, "tiered candle history writes d1 count") &&
+         expect(history.m1Status == cxet::composite::CandleHistoryTierStatus::Ok, "tiered candle history marks m1 ok") &&
+         expect(history.m15Status == cxet::composite::CandleHistoryTierStatus::Ok, "tiered candle history marks m15 ok") &&
+         expect(history.d1Status == cxet::composite::CandleHistoryTierStatus::Ok, "tiered candle history marks d1 ok") &&
+         expect(history.m1[0].quoteAmount.raw == 500000000ll, "tiered candle history preserves quote amount");
+}
+
 bool testWriterCreatesV2RunDirectory() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_v2_writer_" + std::to_string(std::rand()));
-  BacktestRunResult result{};
+  hft_backtest::BacktestRunResult result{};
   result.status = hft_backtest::Status::Ok;
   result.requestId = "run-v2";
   result.runId = "run-v2";
@@ -489,7 +599,7 @@ bool testWriterCreatesV2RunDirectory() {
          expect(manifest.find("\"type\": \"run.result.v2\"") != std::string::npos, "manifest declares v2 result") &&
          expect(manifest.find("\"orders\": 1") != std::string::npos, "manifest summary includes order count") &&
          expect(manifest.find("\"risk_snapshots\": {") != std::string::npos, "manifest declares risk snapshots stream") &&
-         expect(orders == "[1,0,100,110,100,1,1,1,2,10000000000,100000000,0]\n", "orders stream uses compact arrays") &&
+         expect(orders == "[1,0,100,110,100,1,1,1,3,10000000000,100000000,0]\n", "orders stream uses compact arrays") &&
          expect(fills == "[1,110,150,1,10000000000,100000000,0,0]\n", "fills stream uses compact arrays") &&
          expect(equity == "[150,0,0,0,0,0,0,0,100000000000,100000000,1]\n", "equity stream uses compact arrays") &&
          expect(risk == "[150,0,0,0,0,0,0,100000000000,100000000,10000000000,9900000000,10100000000,1,2]\n", "risk stream uses compact arrays") &&
@@ -516,6 +626,10 @@ int main() {
   ok = testAmendFillBelongsToReplacementOrder() && ok;
   ok = testAmendChainFillBelongsToLastReplacementOrder() && ok;
   ok = testCancelAfterAmendCancelsReplacementOrder() && ok;
+  ok = testLoadSessionUsesManifestChannelPathsAndMetadata() && ok;
+  ok = testLoadSessionFailsMissingRequiredDepth() && ok;
+  ok = testDepthRowBuildsInitialOrderBookSnapshot() && ok;
+  ok = testTieredCandleHistoryBuildsCounts() && ok;
   ok = testWriterCreatesV2RunDirectory() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
