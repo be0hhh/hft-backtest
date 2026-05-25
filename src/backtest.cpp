@@ -86,6 +86,28 @@ bool strategySnapshotReady(const StrategyDescriptor& descriptor,
   return true;
 }
 
+void recordInputCoverage(detail::EngineState& engine) noexcept {
+  ++engine.inputCoverage.strategyCycles;
+  if (engine.snapshot.hasTrade.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithTrade;
+  if (engine.snapshot.hasBookTicker.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithBookTicker;
+  if (engine.snapshot.hasDepth.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithDepth;
+  if (engine.snapshot.hasOrderBook.raw == hft_trader::core::kAlgoFlagTrue.raw && engine.snapshot.orderBook) ++engine.inputCoverage.cyclesWithOrderBook;
+}
+
+bool validateBacktestProbeCoverage(const BacktestInputCoverage& coverage, std::string& error) {
+  error.clear();
+  if (coverage.strategyCycles == 0u) error = "backtest_probe did not run strategy cycles";
+  else if (coverage.cyclesWithTrade == 0u) error = "backtest_probe did not observe trade input";
+  else if (coverage.cyclesWithBookTicker == 0u) error = "backtest_probe did not observe bookticker input";
+  else if (coverage.cyclesWithDepth == 0u) error = "backtest_probe did not observe depth input";
+  else if (coverage.cyclesWithOrderBook == 0u) error = "backtest_probe did not observe reconstructed orderbook input";
+  else if (coverage.seedTradeRows == 0u) error = "backtest_probe did not receive trade warmup rows";
+  else if (coverage.seedM1Candles == 0u || coverage.seedM15Candles == 0u || coverage.seedD1Candles == 0u) {
+    error = "backtest_probe did not receive full m1/m15/d1 candle seed";
+  }
+  return error.empty();
+}
+
 bool runCycle(const StrategyDescriptor& descriptor,
               void* state,
               detail::EngineState& engine,
@@ -119,6 +141,7 @@ bool runCycle(const StrategyDescriptor& descriptor,
   ctx.io.amendOut = Span<hft_trader::core::AmendIntent>(amendBuf.data(), amendBuf.size());
   ctx.io.cancelOut = Span<hft_trader::core::CancelIntent>(cancelBuf.data(), cancelBuf.size());
   ctx.io.clear();
+  recordInputCoverage(engine);
   (void)descriptor.runCycle(state, ctx);
   detail::applyIntents(engine, ctx.io, tsNs, request.orderLatencyUs, request.amendLatencyUs, request.cancelLatencyUs);
   return true;
@@ -296,6 +319,7 @@ void populateResultPnl(BacktestRunResult& result, const detail::EngineState& eng
   result.timerWakeEvents = engine.timerWakeEvents;
   result.reduceOnlyOrders = engine.reduceOnlyOrders;
   result.reduceOnlyFills = engine.reduceOnlyFills;
+  result.inputCoverage = engine.inputCoverage;
 }
 
 }  // namespace
@@ -410,6 +434,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)detail::writeResult(result, detail::EngineState{});
     return result;
   }
+  BacktestInputCoverage seedCoverage{};
   if (descriptor->seedHistory) {
     if (session.candles.empty()) {
       result.status = Status::CorruptData;
@@ -424,6 +449,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)detail::writeResult(result, detail::EngineState{});
       return result;
     }
+    seedCoverage.seedM1Candles = history.m1Count.raw;
+    seedCoverage.seedM15Candles = history.m15Count.raw;
+    seedCoverage.seedD1Candles = history.d1Count.raw;
     hft_trader::runtime::StrategyHistorySeedStats stats{};
     if (!descriptor->seedHistory(state.data(), history, &stats)) {
       result.status = Status::InvalidArgument;
@@ -438,8 +466,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)detail::writeResult(result, detail::EngineState{});
     return result;
   }
+  seedCoverage.seedTradeRows = session.tradeWarmup.size();
 
   detail::EngineState engine{};
+  engine.inputCoverage = seedCoverage;
   engine.exchange = sessionExchange;
   engine.symbol = selectedSymbol;
   detail::initializeAccounting(engine, request);
@@ -551,6 +581,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   populateResultPnl(result, engine);
   result.orders = engine.orders.size();
   result.fills = engine.fills.size();
+  if (result.strategy == "backtest_probe" && !validateBacktestProbeCoverage(result.inputCoverage, result.error)) {
+    result.status = Status::CorruptData;
+    (void)detail::writeResult(result, engine);
+    return result;
+  }
   result.status = Status::Ok;
   Status writeStatus = detail::writeResult(result, engine);
   if (!isOk(writeStatus)) result.status = writeStatus;

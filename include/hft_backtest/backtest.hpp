@@ -31,6 +31,18 @@ struct BacktestProgress {
   std::string stage{};
 };
 
+struct BacktestInputCoverage {
+  std::uint64_t strategyCycles{0};
+  std::uint64_t cyclesWithTrade{0};
+  std::uint64_t cyclesWithBookTicker{0};
+  std::uint64_t cyclesWithDepth{0};
+  std::uint64_t cyclesWithOrderBook{0};
+  std::uint64_t seedTradeRows{0};
+  std::uint64_t seedM1Candles{0};
+  std::uint64_t seedM15Candles{0};
+  std::uint64_t seedD1Candles{0};
+};
+
 struct BacktestRunResult {
   Status status{Status::Unknown};
   std::string requestId{};
@@ -64,6 +76,7 @@ struct BacktestRunResult {
   std::int64_t feesPaidE8{0};
   std::int64_t netRealizedPnlE8{0};
   std::int64_t openPositionQtyE8{0};
+  BacktestInputCoverage inputCoverage{};
   bool strategyClosed{false};
 };
 

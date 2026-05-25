@@ -131,6 +131,7 @@ struct EngineState {
   hft_trader::core::StrategyPositionState position{};
   hft_trader::core::StrategyMarketSnapshot snapshot{};
   hft_trader::core::LocalOrderBookState orderBook{};
+  BacktestInputCoverage inputCoverage{};
   ExchangeId exchange{};
   Symbol symbol{};
   std::vector<cxet::composite::UserDataEvent> userEvents{};

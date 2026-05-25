@@ -136,6 +136,16 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
   out << indent << q << "reduce_only_orders" << q << ": " << result.reduceOnlyOrders << ",\n";
   out << indent << q << "reduce_only_fills" << q << ": " << result.reduceOnlyFills << ",\n";
   out << indent << q << "strategy_closed" << q << ": " << (result.strategyClosed ? "true" : "false") << ",\n";
+  out << indent << q << "input_coverage" << q << ": {"
+      << q << "strategy_cycles" << q << ": " << result.inputCoverage.strategyCycles << ", "
+      << q << "cycles_with_trade" << q << ": " << result.inputCoverage.cyclesWithTrade << ", "
+      << q << "cycles_with_bookticker" << q << ": " << result.inputCoverage.cyclesWithBookTicker << ", "
+      << q << "cycles_with_depth" << q << ": " << result.inputCoverage.cyclesWithDepth << ", "
+      << q << "cycles_with_orderbook" << q << ": " << result.inputCoverage.cyclesWithOrderBook << ", "
+      << q << "seed_trade_rows" << q << ": " << result.inputCoverage.seedTradeRows << ", "
+      << q << "seed_m1_candles" << q << ": " << result.inputCoverage.seedM1Candles << ", "
+      << q << "seed_m15_candles" << q << ": " << result.inputCoverage.seedM15Candles << ", "
+      << q << "seed_d1_candles" << q << ": " << result.inputCoverage.seedD1Candles << "},\n";
   out << indent << q << "net_qty_e8" << q << ": " << engine.netQtyRaw << ",\n";
   out << indent << q << "open_position_qty_e8" << q << ": " << result.openPositionQtyE8 << ",\n";
   out << indent << q << "initial_balance_e8" << q << ": " << result.initialBalanceE8 << ",\n";

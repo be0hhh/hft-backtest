@@ -606,6 +606,147 @@ bool testWriterCreatesV2RunDirectory() {
          expect(std::filesystem::exists(dir / "config.ini"), "writer copies run config into result directory") &&
          expect(!std::filesystem::exists(dir.parent_path() / "run-v2.summary.json"), "writer does not create legacy summary json");
 }
+
+bool testBacktestProbeReportsFullInputCoverage() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_probe_full_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+            "  \"channels\": {\n"
+            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
+            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
+            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
+            "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
+            "  },\n"
+            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"},\n"
+            "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1000000000, \"history_requested_end_ns\": 2000000000, \"history_rows\": 1}}\n"
+            "}\n");
+  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
+  writeText(dir / "snapshot_000.json", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000]\n");
+  writeText(dir / "jsonl" / "trades.jsonl",
+            "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n"
+            "[10050000000,100000000,1,3100000000,2,2,2,10050000000,0,\"BTCUSDT\",\"binance\",\"futures\",2,4]\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000,2,2]\n");
+  writeText(dir / "jsonl" / "candles.jsonl",
+            "[1,1000000000,10200000000,9800000000,500000000]\n"
+            "[2,900000000,10300000000,9700000000,600000000]\n"
+            "[3,800000000,10400000000,9600000000,700000000]\n");
+  writeText(dir / "probe.ini",
+            "[runtime]\nname=probe\nenv_path=.env\n"
+            "[strategy]\ntype=backtest_probe\nenabled=1\n"
+            "[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessionPath = dir;
+  request.configPath = dir / "probe.ini";
+  request.strategy = "backtest_probe";
+  request.runId = "probe-full";
+  request.outputPath = dir / "backtests" / "probe-full";
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+
+  return expect(result.status == hft_backtest::Status::Ok, "probe backtest completes on full corpus") &&
+         expect(result.orders == 0u, "probe strategy emits no orders") &&
+         expect(result.inputCoverage.strategyCycles > 0u, "probe strategy was invoked") &&
+         expect(result.inputCoverage.cyclesWithTrade > 0u, "strategy context exposes trades") &&
+         expect(result.inputCoverage.cyclesWithBookTicker > 0u, "strategy context exposes bookticker") &&
+         expect(result.inputCoverage.cyclesWithDepth > 0u, "strategy context exposes depth") &&
+         expect(result.inputCoverage.cyclesWithOrderBook > 0u, "strategy context exposes reconstructed orderbook") &&
+         expect(result.inputCoverage.seedTradeRows == 1u, "probe reports seeded trade warmup rows") &&
+         expect(result.inputCoverage.seedM1Candles == 1u, "probe reports m1 candle seed") &&
+         expect(result.inputCoverage.seedM15Candles == 1u, "probe reports m15 candle seed") &&
+         expect(result.inputCoverage.seedD1Candles == 1u, "probe reports d1 candle seed");
+}
+
+bool testBacktestProbeRequiresCandleSeed() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_probe_no_candles_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "\"channels\":{\"trades\":{\"path\":\"jsonl/trades.jsonl\"},\"bookticker\":{\"path\":\"jsonl/bookticker.jsonl\"},\"depth\":{\"path\":\"jsonl/depth.jsonl\"}},"
+            "\"summary\":{\"trades\":{\"history_requested_start_ns\":1000000000,\"history_requested_end_ns\":2000000000,\"history_rows\":1}}}\n");
+  writeText(dir / "jsonl" / "trades.jsonl", "[10000000000,100000000,1,1500000000]\n[10050000000,100000000,1,3100000000]\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\n");
+  writeText(dir / "probe.ini",
+            "[strategy]\ntype=backtest_probe\nenabled=1\n[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessionPath = dir;
+  request.configPath = dir / "probe.ini";
+  request.strategy = "backtest_probe";
+  request.runId = "probe-no-candles";
+  request.outputPath = dir / "backtests" / "probe-no-candles";
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+
+  return expect(result.status == hft_backtest::Status::CorruptData, "probe rejects missing candle channel") &&
+         expect(result.error.find("candles") != std::string::npos || result.error.find("candle") != std::string::npos,
+                "missing candle error names candle channel");
+}
+
+bool testBacktestProbeRequiresAllCandleSeedTiers() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_probe_partial_candles_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\\n"
+            "  \"channels\": {\\n"
+            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\\n"
+            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\\n"
+            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\\n"
+            "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\\n"
+            "  },\\n"
+            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"},\\n"
+            "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1000000000, \"history_requested_end_ns\": 2000000000, \"history_rows\": 1}}\\n"
+            "}\\n");
+  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\\n");
+  writeText(dir / "jsonl" / "trades.jsonl",
+            "[10000000000,100000000,1,1500000000]\\n"
+            "[10050000000,100000000,1,3100000000]\\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\\n");
+  writeText(dir / "jsonl" / "candles.jsonl", "[1,1000000000,10200000000,9800000000,500000000]\\n");
+  writeText(dir / "probe.ini",
+            "[strategy]\\ntype=backtest_probe\\nenabled=1\\n[venue.binance_futures]\\napi_slot=1\\nsymbols=BTCUSDT\\n");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessionPath = dir;
+  request.configPath = dir / "probe.ini";
+  request.strategy = "backtest_probe";
+  request.runId = "probe-partial-candles";
+  request.outputPath = dir / "backtests" / "probe-partial-candles";
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+
+  return expect(result.status == hft_backtest::Status::CorruptData, "probe rejects partial candle seed tiers") &&
+         expect(result.error.find("candle seed") != std::string::npos, "partial candle error names candle seed");
+}
+
+bool testBacktestProbeRequiresTradeWarmupCoverage() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_probe_no_warmup_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "\"channels\":{\"trades\":{\"path\":\"jsonl/trades.jsonl\"},\"bookticker\":{\"path\":\"jsonl/bookticker.jsonl\"},\"depth\":{\"path\":\"jsonl/depth.jsonl\"},\"candles\":{\"path\":\"jsonl/candles.jsonl\"}}}\n");
+  writeText(dir / "jsonl" / "trades.jsonl", "[10050000000,100000000,1,3100000000]\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\n");
+  writeText(dir / "jsonl" / "candles.jsonl", "[1,1000000000,10200000000,9800000000,500000000]\n");
+  writeText(dir / "probe.ini",
+            "[strategy]\ntype=backtest_probe\nenabled=1\n[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessionPath = dir;
+  request.configPath = dir / "probe.ini";
+  request.strategy = "backtest_probe";
+  request.runId = "probe-no-warmup";
+  request.outputPath = dir / "backtests" / "probe-no-warmup";
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+
+  return expect(result.status == hft_backtest::Status::CorruptData, "probe rejects missing warmup coverage") &&
+         expect(result.error.find("warmup") != std::string::npos || result.error.find("history") != std::string::npos,
+                "missing warmup error names trade history");
+}
 }  // namespace
 
 int main() {
@@ -631,5 +772,9 @@ int main() {
   ok = testDepthRowBuildsInitialOrderBookSnapshot() && ok;
   ok = testTieredCandleHistoryBuildsCounts() && ok;
   ok = testWriterCreatesV2RunDirectory() && ok;
+  ok = testBacktestProbeReportsFullInputCoverage() && ok;
+  ok = testBacktestProbeRequiresCandleSeed() && ok;
+  ok = testBacktestProbeRequiresAllCandleSeedTiers() && ok;
+  ok = testBacktestProbeRequiresTradeWarmupCoverage() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
