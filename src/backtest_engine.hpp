@@ -101,6 +101,29 @@ struct JsonRiskSnapshot {
   std::uint8_t reason{0};
 };
 
+struct JsonProbeMetric {
+  std::int64_t tsNs{0};
+  std::uint8_t decisionKind{0u};
+  std::uint8_t reasonRaw{0u};
+  std::uint8_t sideRaw{0u};
+  std::uint32_t orderCount{0u};
+  std::uint32_t amendCount{0u};
+  std::uint32_t cancelCount{0u};
+  std::int64_t bestBidRaw{0};
+  std::int64_t bestAskRaw{0};
+  std::uint32_t tradeRangeSampleBps{0u};
+  std::uint32_t tradeRangeEmaBps{0u};
+  std::uint32_t tradeRangeObservedSeconds{0u};
+  std::uint64_t rollingPerMinuteRaw{0u};
+  std::uint32_t volumeWindowObservedSeconds{0u};
+  std::uint8_t tradeRangeReady{0u};
+  std::uint8_t volumeWindowReady{0u};
+  std::uint8_t hasTrade{0u};
+  std::uint8_t hasBookTicker{0u};
+  std::uint8_t hasDepth{0u};
+  std::uint8_t hasOrderBook{0u};
+};
+
 struct OpenOrder {
   hft_trader::core::StrategyOrderState state{};
   std::size_t recordIndex{kNoRecordIndex};
@@ -126,6 +149,7 @@ struct EngineState {
   std::vector<JsonFill> fills{};
   std::vector<JsonEquityPoint> equityPoints{};
   std::vector<JsonRiskSnapshot> riskSnapshots{};
+  std::vector<JsonProbeMetric> probeMetrics{};
   std::vector<PendingAction> pending{};
   std::array<OpenOrder, kMaxOrderStates> open{};
   hft_trader::core::StrategyPositionState position{};

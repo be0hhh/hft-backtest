@@ -122,6 +122,40 @@ bool writeRiskSnapshots(const std::filesystem::path& path, const EngineState& en
   return out.good();
 }
 
+bool writeProbeMetrics(const std::filesystem::path& path, const EngineState& engine) noexcept {
+  if (engine.probeMetrics.empty()) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    return true;
+  }
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) return false;
+  for (const JsonProbeMetric& row : engine.probeMetrics) {
+    out << '[' << row.tsNs
+        << ',' << static_cast<unsigned>(row.decisionKind)
+        << ',' << static_cast<unsigned>(row.reasonRaw)
+        << ',' << static_cast<unsigned>(row.sideRaw)
+        << ',' << row.orderCount
+        << ',' << row.amendCount
+        << ',' << row.cancelCount
+        << ',' << row.bestBidRaw
+        << ',' << row.bestAskRaw
+        << ',' << row.tradeRangeSampleBps
+        << ',' << row.tradeRangeEmaBps
+        << ',' << row.tradeRangeObservedSeconds
+        << ',' << row.rollingPerMinuteRaw
+        << ',' << row.volumeWindowObservedSeconds
+        << ',' << static_cast<unsigned>(row.tradeRangeReady)
+        << ',' << static_cast<unsigned>(row.volumeWindowReady)
+        << ',' << static_cast<unsigned>(row.hasTrade)
+        << ',' << static_cast<unsigned>(row.hasBookTicker)
+        << ',' << static_cast<unsigned>(row.hasDepth)
+        << ',' << static_cast<unsigned>(row.hasOrderBook)
+        << "]\n";
+  }
+  return out.good();
+}
+
 void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, const EngineState& engine, const char* indent) {
   const char q = '"';
   out << indent << q << "mode" << q << ": " << q << "deterministic_bbo_v2_strategy_close" << q << ",\n";
@@ -196,7 +230,15 @@ bool writeManifest(const std::filesystem::path& path, const BacktestRunResult& r
       << ", " << q << "rows" << q << ": " << engine.equityPoints.size() << "},\n";
   out << "    " << q << "risk_snapshots" << q << ": {" << q << "path" << q << ": " << q << "risk_snapshots.jsonl" << q
       << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,gross_realized_pnl_e8,realized_pnl_e8,unrealized_pnl_e8,gross_total_pnl_e8,net_total_pnl_e8,fees_paid_e8,wallet_balance_e8,position_qty_e8,entry_price_e8,bid_price_e8,ask_price_e8,fill_count,reason]" << q
-      << ", " << q << "rows" << q << ": " << engine.riskSnapshots.size() << "}\n";
+      << ", " << q << "rows" << q << ": " << engine.riskSnapshots.size() << "}";
+  if (!engine.probeMetrics.empty()) {
+    out << ",\n";
+    out << "    " << q << "probe_metrics" << q << ": {" << q << "path" << q << ": " << q << "probe_metrics.jsonl" << q
+        << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,decision_kind,reason,side,orders,amends,cancels,best_bid,best_ask,trade_range_sample_bps,trade_range_ema_bps,trade_range_observed_seconds,rolling_per_minute_raw,volume_observed_seconds,trade_range_ready,volume_ready,has_trade,has_bookticker,has_depth,has_orderbook]" << q
+        << ", " << q << "rows" << q << ": " << engine.probeMetrics.size() << "}\n";
+  } else {
+    out << "\n";
+  }
   out << "  },\n";
   out << "  " << q << "enums" << q << ": {\n";
   out << "    " << q << "side" << q << ": {" << q << "0" << q << ": " << q << "sell" << q << ", " << q << "1" << q << ": " << q << "buy" << q << "},\n";
@@ -225,6 +267,7 @@ Status writeResult(const BacktestRunResult& result, const EngineState& engine) n
   if (!writeFills(result.resultPath / "fills.jsonl", engine)) return Status::IoError;
   if (!writeEquity(result.resultPath / "equity.jsonl", engine)) return Status::IoError;
   if (!writeRiskSnapshots(result.resultPath / "risk_snapshots.jsonl", engine)) return Status::IoError;
+  if (!writeProbeMetrics(result.resultPath / "probe_metrics.jsonl", engine)) return Status::IoError;
   if (!writeManifest(result.resultPath / "manifest.json", result, engine)) return Status::IoError;
   return Status::Ok;
 }

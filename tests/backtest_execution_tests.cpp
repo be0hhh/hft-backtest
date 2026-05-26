@@ -620,13 +620,15 @@ bool testBacktestProbeReportsFullInputCoverage() {
             "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
             "  },\n"
             "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"},\n"
-            "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1000000000, \"history_requested_end_ns\": 2000000000, \"history_rows\": 1}}\n"
+            "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1, \"history_requested_end_ns\": 2500000000, \"history_rows\": 3}}\n"
             "}\n");
   writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
   writeText(dir / "snapshot_000.json", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000]\n");
   writeText(dir / "jsonl" / "trades.jsonl",
             "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n"
-            "[10050000000,100000000,1,3100000000,2,2,2,10050000000,0,\"BTCUSDT\",\"binance\",\"futures\",2,4]\n");
+            "[10020000000,100000000,0,1600000000,2,2,2,10020000000,0,\"BTCUSDT\",\"binance\",\"futures\",2,2]\n"
+            "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTCUSDT\",\"binance\",\"futures\",3,3]\n"
+            "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTCUSDT\",\"binance\",\"futures\",4,4]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000,2,2]\n");
   writeText(dir / "jsonl" / "candles.jsonl",
@@ -645,18 +647,56 @@ bool testBacktestProbeReportsFullInputCoverage() {
   request.runId = "probe-full";
   request.outputPath = dir / "backtests" / "probe-full";
   const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+  const std::string manifest = readText(request.outputPath / "manifest.json");
+  const std::string probeMetrics = readText(request.outputPath / "probe_metrics.jsonl");
 
   return expect(result.status == hft_backtest::Status::Ok, "probe backtest completes on full corpus") &&
-         expect(result.orders == 0u, "probe strategy emits no orders") &&
+         expect(result.orders > 0u, "probe strategy emits orders") &&
+         expect(result.fills > 0u, "probe strategy receives simulated fills") &&
+         expect(result.userEvents > 0u, "probe strategy receives user events") &&
+         expect(result.timerWakeEvents > 0u, "probe strategy receives timer wakes") &&
+         expect(result.strategyClosed, "probe strategy closes its position") &&
          expect(result.inputCoverage.strategyCycles > 0u, "probe strategy was invoked") &&
          expect(result.inputCoverage.cyclesWithTrade > 0u, "strategy context exposes trades") &&
          expect(result.inputCoverage.cyclesWithBookTicker > 0u, "strategy context exposes bookticker") &&
          expect(result.inputCoverage.cyclesWithDepth > 0u, "strategy context exposes depth") &&
          expect(result.inputCoverage.cyclesWithOrderBook > 0u, "strategy context exposes reconstructed orderbook") &&
-         expect(result.inputCoverage.seedTradeRows == 1u, "probe reports seeded trade warmup rows") &&
+         expect(result.inputCoverage.seedTradeRows == 3u, "probe reports seeded trade warmup rows") &&
          expect(result.inputCoverage.seedM1Candles == 1u, "probe reports m1 candle seed") &&
          expect(result.inputCoverage.seedM15Candles == 1u, "probe reports m15 candle seed") &&
-         expect(result.inputCoverage.seedD1Candles == 1u, "probe reports d1 candle seed");
+         expect(result.inputCoverage.seedD1Candles == 1u, "probe reports d1 candle seed") &&
+         expect(manifest.find("\"probe_metrics\"") != std::string::npos, "manifest declares probe metrics stream") &&
+         expect(!probeMetrics.empty(), "probe metrics stream is written");
+}
+
+bool testBacktestProbeRequiresCalculatedTradeWarmup() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_probe_short_warmup_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "\"channels\":{\"trades\":{\"path\":\"jsonl/trades.jsonl\"},\"bookticker\":{\"path\":\"jsonl/bookticker.jsonl\"},\"depth\":{\"path\":\"jsonl/depth.jsonl\"},\"candles\":{\"path\":\"jsonl/candles.jsonl\"}},"
+            "\"summary\":{\"trades\":{\"history_requested_start_ns\":1,\"history_requested_end_ns\":2500000000,\"history_rows\":1}}}\n");
+  writeText(dir / "jsonl" / "trades.jsonl", "[10000000000,100000000,1,1500000000]\n[10050000000,100000000,1,2600000000]\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\n");
+  writeText(dir / "jsonl" / "candles.jsonl",
+            "[1,1000000000,10200000000,9800000000,500000000]\n"
+            "[2,900000000,10300000000,9700000000,600000000]\n"
+            "[3,800000000,10400000000,9600000000,700000000]\n");
+  writeText(dir / "probe.ini",
+            "[strategy]\ntype=backtest_probe\nenabled=1\n[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessionPath = dir;
+  request.configPath = dir / "probe.ini";
+  request.strategy = "backtest_probe";
+  request.runId = "probe-short-warmup";
+  request.outputPath = dir / "backtests" / "probe-short-warmup";
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+
+  return expect(result.status == hft_backtest::Status::CorruptData, "probe rejects warmup that cannot calculate range/volume") &&
+         expect(result.error.find("warmup") != std::string::npos || result.error.find("seedTrades") != std::string::npos,
+                "calculated warmup error names warmup seed");
 }
 
 bool testBacktestProbeRequiresCandleSeed() {
@@ -689,26 +729,28 @@ bool testBacktestProbeRequiresAllCandleSeedTiers() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_probe_partial_candles_" + std::to_string(std::rand()));
   writeText(dir / "manifest.json",
-            "{\\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\\n"
-            "  \"channels\": {\\n"
-            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\\n"
-            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\\n"
-            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\\n"
-            "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\\n"
-            "  },\\n"
-            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"},\\n"
-            "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1000000000, \"history_requested_end_ns\": 2000000000, \"history_rows\": 1}}\\n"
-            "}\\n");
-  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\\n");
+            "{\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+            "  \"channels\": {\n"
+            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
+            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
+            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
+            "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
+            "  },\n"
+            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"},\n"
+            "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1, \"history_requested_end_ns\": 2500000000, \"history_rows\": 3}}\n"
+            "}\n");
+  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
   writeText(dir / "jsonl" / "trades.jsonl",
-            "[10000000000,100000000,1,1500000000]\\n"
-            "[10050000000,100000000,1,3100000000]\\n");
-  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\\n");
-  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\\n");
-  writeText(dir / "jsonl" / "candles.jsonl", "[1,1000000000,10200000000,9800000000,500000000]\\n");
+            "[10000000000,100000000,1,1500000000]\n"
+            "[10020000000,100000000,0,1600000000]\n"
+            "[10050000000,100000000,1,2100000000]\n"
+            "[10060000000,100000000,1,3100000000]\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\n");
+  writeText(dir / "jsonl" / "candles.jsonl", "[1,1000000000,10200000000,9800000000,500000000]\n");
   writeText(dir / "probe.ini",
-            "[strategy]\\ntype=backtest_probe\\nenabled=1\\n[venue.binance_futures]\\napi_slot=1\\nsymbols=BTCUSDT\\n");
+            "[strategy]\ntype=backtest_probe\nenabled=1\n[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
 
   hft_backtest::BacktestRunRequest request{};
   request.sessionPath = dir;
@@ -731,7 +773,10 @@ bool testBacktestProbeRequiresTradeWarmupCoverage() {
   writeText(dir / "jsonl" / "trades.jsonl", "[10050000000,100000000,1,3100000000]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\n");
-  writeText(dir / "jsonl" / "candles.jsonl", "[1,1000000000,10200000000,9800000000,500000000]\n");
+  writeText(dir / "jsonl" / "candles.jsonl",
+            "[1,1000000000,10200000000,9800000000,500000000]\n"
+            "[2,900000000,10300000000,9700000000,600000000]\n"
+            "[3,800000000,10400000000,9600000000,700000000]\n");
   writeText(dir / "probe.ini",
             "[strategy]\ntype=backtest_probe\nenabled=1\n[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
 
@@ -773,6 +818,7 @@ int main() {
   ok = testTieredCandleHistoryBuildsCounts() && ok;
   ok = testWriterCreatesV2RunDirectory() && ok;
   ok = testBacktestProbeReportsFullInputCoverage() && ok;
+  ok = testBacktestProbeRequiresCalculatedTradeWarmup() && ok;
   ok = testBacktestProbeRequiresCandleSeed() && ok;
   ok = testBacktestProbeRequiresAllCandleSeedTiers() && ok;
   ok = testBacktestProbeRequiresTradeWarmupCoverage() && ok;

@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -86,6 +87,10 @@ bool strategySnapshotReady(const StrategyDescriptor& descriptor,
   return true;
 }
 
+bool isBacktestProbe(const StrategyDescriptor& descriptor) noexcept {
+  return descriptor.name && std::string_view{descriptor.name} == "backtest_probe";
+}
+
 void recordInputCoverage(detail::EngineState& engine) noexcept {
   ++engine.inputCoverage.strategyCycles;
   if (engine.snapshot.hasTrade.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithTrade;
@@ -94,8 +99,51 @@ void recordInputCoverage(detail::EngineState& engine) noexcept {
   if (engine.snapshot.hasOrderBook.raw == hft_trader::core::kAlgoFlagTrue.raw && engine.snapshot.orderBook) ++engine.inputCoverage.cyclesWithOrderBook;
 }
 
-bool validateBacktestProbeCoverage(const BacktestInputCoverage& coverage, std::string& error) {
+void appendProbeMetric(detail::EngineState& engine,
+                       std::int64_t tsNs,
+                       const hft_trader::core::StrategyDecisionTrace& trace) {
+  detail::JsonProbeMetric row{};
+  row.tsNs = tsNs;
+  row.decisionKind = trace.decisionKind;
+  row.reasonRaw = trace.reasonRaw;
+  row.sideRaw = trace.sideRaw;
+  row.orderCount = trace.orderCount;
+  row.amendCount = trace.amendCount;
+  row.cancelCount = trace.cancelCount;
+  row.bestBidRaw = trace.bestBidRaw;
+  row.bestAskRaw = trace.bestAskRaw;
+  row.tradeRangeSampleBps = trace.tradeRangeSampleBps;
+  row.tradeRangeEmaBps = trace.tradeRangeEmaBps;
+  row.tradeRangeObservedSeconds = trace.tradeRangeObservedSeconds;
+  row.rollingPerMinuteRaw = trace.rollingPerMinuteRaw;
+  row.volumeWindowObservedSeconds = trace.volumeWindowObservedSeconds;
+  row.tradeRangeReady = trace.tradeRangeReady;
+  row.volumeWindowReady = trace.volumeWindowReady;
+  row.hasTrade = engine.snapshot.hasTrade.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
+  row.hasBookTicker = engine.snapshot.hasBookTicker.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
+  row.hasDepth = engine.snapshot.hasDepth.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
+  row.hasOrderBook = engine.snapshot.hasOrderBook.raw == hft_trader::core::kAlgoFlagTrue.raw && engine.snapshot.orderBook ? 1u : 0u;
+  engine.probeMetrics.push_back(row);
+}
+
+bool probeMetricsReady(const std::vector<detail::JsonProbeMetric>& metrics) noexcept {
+  for (const detail::JsonProbeMetric& metric : metrics) {
+    if (metric.tradeRangeReady != 0u && metric.volumeWindowReady != 0u && metric.tradeRangeObservedSeconds != 0u &&
+        metric.volumeWindowObservedSeconds != 0u && metric.rollingPerMinuteRaw != 0u) return true;
+  }
+  return false;
+}
+
+bool probeMetricsUpdatedFromReplay(const std::vector<detail::JsonProbeMetric>& metrics) noexcept {
+  for (const detail::JsonProbeMetric& metric : metrics) {
+    if (metric.hasTrade != 0u && metric.tradeRangeReady != 0u && metric.volumeWindowReady != 0u) return true;
+  }
+  return false;
+}
+
+bool validateBacktestProbeCoverage(const BacktestRunResult& result, const detail::EngineState& engine, std::string& error) {
   error.clear();
+  const BacktestInputCoverage& coverage = result.inputCoverage;
   if (coverage.strategyCycles == 0u) error = "backtest_probe did not run strategy cycles";
   else if (coverage.cyclesWithTrade == 0u) error = "backtest_probe did not observe trade input";
   else if (coverage.cyclesWithBookTicker == 0u) error = "backtest_probe did not observe bookticker input";
@@ -104,6 +152,22 @@ bool validateBacktestProbeCoverage(const BacktestInputCoverage& coverage, std::s
   else if (coverage.seedTradeRows == 0u) error = "backtest_probe did not receive trade warmup rows";
   else if (coverage.seedM1Candles == 0u || coverage.seedM15Candles == 0u || coverage.seedD1Candles == 0u) {
     error = "backtest_probe did not receive full m1/m15/d1 candle seed";
+  } else if (engine.probeMetrics.empty()) {
+    error = "backtest_probe did not write probe metrics";
+  } else if (!probeMetricsReady(engine.probeMetrics)) {
+    error = "backtest_probe warmup did not produce ready range and volume metrics";
+  } else if (!probeMetricsUpdatedFromReplay(engine.probeMetrics)) {
+    error = "backtest_probe did not update range and volume metrics from replay trades";
+  } else if (result.orders == 0u) {
+    error = "backtest_probe did not emit an order";
+  } else if (result.fills == 0u) {
+    error = "backtest_probe did not receive simulated fills";
+  } else if (result.userEvents == 0u) {
+    error = "backtest_probe did not receive user events";
+  } else if (result.timerWakeEvents == 0u) {
+    error = "backtest_probe did not receive timer wake events";
+  } else if (!result.strategyClosed) {
+    error = "backtest_probe did not close its position";
   }
   return error.empty();
 }
@@ -142,7 +206,20 @@ bool runCycle(const StrategyDescriptor& descriptor,
   ctx.io.cancelOut = Span<hft_trader::core::CancelIntent>(cancelBuf.data(), cancelBuf.size());
   ctx.io.clear();
   recordInputCoverage(engine);
-  (void)descriptor.runCycle(state, ctx);
+  hft_trader::core::StrategyDecisionTrace trace{};
+  const bool captureProbeTrace = isBacktestProbe(descriptor);
+  if (captureProbeTrace) {
+    hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
+    ctx.decisionTrace = &trace;
+  }
+  const bool ok = descriptor.runCycle(state, ctx);
+  if (captureProbeTrace) {
+    trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
+    trace.amendCount = static_cast<std::uint32_t>(ctx.io.amendCount);
+    trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
+    appendProbeMetric(engine, tsNs, trace);
+  }
+  if (captureProbeTrace && !ok) return false;
   detail::applyIntents(engine, ctx.io, tsNs, request.orderLatencyUs, request.amendLatencyUs, request.cancelLatencyUs);
   return true;
 }
@@ -208,7 +285,7 @@ bool seedTradeWarmupFromSession(const StrategyDescriptor& descriptor,
   }
   const hft_trader::runtime::StrategySeedTradesStatus seedStatus = descriptor.seedTrades(state, rows.data(), rows.size(), stats);
   if (seedStatus == hft_trader::runtime::StrategySeedTradesStatus::BadData) {
-    error = "strategy seedTrades rejected warmup data";
+    error = "strategy seedTrades rejected warmup data; calculated warmup metrics are not ready";
     return false;
   }
   return true;
@@ -459,6 +536,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)detail::writeResult(result, detail::EngineState{});
       return result;
     }
+    if (isBacktestProbe(*descriptor) &&
+        (seedCoverage.seedM1Candles == 0u || seedCoverage.seedM15Candles == 0u || seedCoverage.seedD1Candles == 0u)) {
+      result.status = Status::CorruptData;
+      result.error = "backtest_probe did not receive full m1/m15/d1 candle seed";
+      (void)detail::writeResult(result, detail::EngineState{});
+      return result;
+    }
   }
   if (!seedTradeWarmupFromSession(*descriptor, state.data(), params, session, error)) {
     result.status = Status::CorruptData;
@@ -581,7 +665,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   populateResultPnl(result, engine);
   result.orders = engine.orders.size();
   result.fills = engine.fills.size();
-  if (result.strategy == "backtest_probe" && !validateBacktestProbeCoverage(result.inputCoverage, result.error)) {
+  if (result.strategy == "backtest_probe" && !validateBacktestProbeCoverage(result, engine, result.error)) {
     result.status = Status::CorruptData;
     (void)detail::writeResult(result, engine);
     return result;

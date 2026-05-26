@@ -269,7 +269,8 @@ void loadInstrumentMetadata(const std::filesystem::path& path, InstrumentMetadat
 }
 
 void loadTradeHistoryManifestFields(std::string_view manifest, SessionData& out) noexcept {
-  const std::string_view trades = extractObjectAfter(manifest, "\"trades\"");
+  const std::string_view summary = extractObjectAfter(manifest, "\"summary\"");
+  const std::string_view trades = summary.empty() ? extractObjectAfter(manifest, "\"trades\"") : extractObjectAfter(summary, "\"trades\"");
   const std::string_view source = trades.empty() ? manifest : trades;
   (void)extractPositiveI64Field(source, "\"history_warmup_sec\"", out.tradeHistoryWarmupSec);
   (void)extractPositiveI64Field(source, "\"history_requested_start_ns\"", out.tradeHistoryRequestedStartNs);
