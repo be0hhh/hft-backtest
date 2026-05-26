@@ -562,6 +562,7 @@ bool testWriterCreatesV2RunDirectory() {
   result.requestId = "run-v2";
   result.runId = "run-v2";
   result.strategy = "spread_maker1and2";
+  result.indicatorProfile = "trade_range";
   result.sessionPath = dir.parent_path() / "session";
   result.configPath = dir / "source_config.ini";
   result.resultPath = dir;
@@ -586,6 +587,12 @@ bool testWriterCreatesV2RunDirectory() {
   engine.fills.push_back(JsonFill{1, 110, 150, "buy", kPx100, kQty1, 0, false});
   engine.equityPoints.push_back(JsonEquityPoint{150, 0, 0, 0, 0, 0, 0, 0, 100000000000ll, kQty1, 1});
   engine.riskSnapshots.push_back(JsonRiskSnapshot{150, 0, 0, 0, 0, 0, 0, 100000000000ll, kQty1, kPx100, kPx100 - 100000000ll, kPx100 + 100000000ll, 1, kRiskSnapshotReasonFill});
+  engine.strategyIndicatorProfile = "trade_range";
+  engine.strategyIndicatorTitle = "Trade range";
+  engine.strategyIndicatorValueLabel = "EMA";
+  engine.strategyIndicatorAuxLabel = "Sample";
+  engine.strategyIndicatorUnit = "bps";
+  engine.strategyIndicator.push_back(JsonStrategyIndicatorPoint{150, 42, 44, 1, 7, 3, 1});
 
   const hft_backtest::Status status = writeResult(result, engine);
   const std::string manifest = readText(dir / "manifest.json");
@@ -593,16 +600,20 @@ bool testWriterCreatesV2RunDirectory() {
   const std::string fills = readText(dir / "fills.jsonl");
   const std::string equity = readText(dir / "equity.jsonl");
   const std::string risk = readText(dir / "risk_snapshots.jsonl");
+  const std::string indicator = readText(dir / "strategy_indicator.jsonl");
 
   return expect(status == hft_backtest::Status::Ok, "v2 writer reports ok") &&
          expect(std::filesystem::is_directory(dir), "result path is a directory") &&
          expect(manifest.find("\"type\": \"run.result.v2\"") != std::string::npos, "manifest declares v2 result") &&
          expect(manifest.find("\"orders\": 1") != std::string::npos, "manifest summary includes order count") &&
          expect(manifest.find("\"risk_snapshots\": {") != std::string::npos, "manifest declares risk snapshots stream") &&
+         expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
+         expect(manifest.find("\"profile\": \"trade_range\"") != std::string::npos, "indicator stream carries profile") &&
          expect(orders == "[1,0,100,110,100,1,1,1,3,10000000000,100000000,0]\n", "orders stream uses compact arrays") &&
          expect(fills == "[1,110,150,1,10000000000,100000000,0,0]\n", "fills stream uses compact arrays") &&
          expect(equity == "[150,0,0,0,0,0,0,0,100000000000,100000000,1]\n", "equity stream uses compact arrays") &&
          expect(risk == "[150,0,0,0,0,0,0,100000000000,100000000,10000000000,9900000000,10100000000,1,2]\n", "risk stream uses compact arrays") &&
+         expect(indicator == "[150,42,44,1,7,3,1]\n", "strategy indicator stream uses compact arrays") &&
          expect(std::filesystem::exists(dir / "config.ini"), "writer copies run config into result directory") &&
          expect(!std::filesystem::exists(dir.parent_path() / "run-v2.summary.json"), "writer does not create legacy summary json");
 }
@@ -792,6 +803,37 @@ bool testBacktestProbeRequiresTradeWarmupCoverage() {
          expect(result.error.find("warmup") != std::string::npos || result.error.find("history") != std::string::npos,
                 "missing warmup error names trade history");
 }
+
+bool metadataHasParam(const hft_backtest::StrategyMetadata& metadata, std::string_view key) noexcept {
+  for (std::size_t i = 0; i < metadata.paramCount; ++i) {
+    if (metadata.params[i].key && key == metadata.params[i].key) return true;
+  }
+  return false;
+}
+
+bool testStrategyMetadataExposesOnlySupportedSpreadMakerParams() {
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("spread_maker1and2");
+  return expect(metadata != nullptr, "spread_maker1and2 metadata is exported") &&
+         expect(metadata->displayNameRu != nullptr && std::string_view{metadata->displayNameRu}.find("1/2") != std::string_view::npos,
+                "spread_maker1and2 metadata carries Russian display name") &&
+         expect(metadataHasParam(*metadata, "distance_bps"), "spread metadata contains distance_bps") &&
+         expect(metadataHasParam(*metadata, "trigger_bps"), "spread metadata contains trigger_bps") &&
+         expect(metadataHasParam(*metadata, "amount_qty"), "spread metadata contains amount_qty") &&
+         expect(metadataHasParam(*metadata, "order_qty"), "spread metadata contains order_qty") &&
+         expect(!metadataHasParam(*metadata, "distance_natr_pct"), "spread metadata does not expose unsupported distance_natr_pct") &&
+         expect(!metadataHasParam(*metadata, "trigger_natr_pct"), "spread metadata does not expose unsupported trigger_natr_pct") &&
+         expect(!metadataHasParam(*metadata, "natr_ema_period_seconds"), "spread metadata does not expose unsupported natr_ema_period_seconds") &&
+         expect(metadata->indicatorCount == 0u, "spread metadata declares no indicator profiles");
+}
+
+bool testBacktestProbeMetadataHasTraceIndicators() {
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("backtest_probe");
+  return expect(metadata != nullptr, "backtest_probe metadata is exported") &&
+         expect(metadata->paramCount == 0u, "backtest_probe has no UI params") &&
+         expect(metadata->indicatorCount == 2u, "backtest_probe declares trace indicator profiles") &&
+         expect(metadata->indicators[0].id != nullptr && std::string_view{metadata->indicators[0].id} == "trade_range", "backtest_probe exposes trade_range indicator") &&
+         expect(metadata->indicators[1].id != nullptr && std::string_view{metadata->indicators[1].id} == "rolling_volume", "backtest_probe exposes rolling_volume indicator");
+}
 }  // namespace
 
 int main() {
@@ -822,5 +864,7 @@ int main() {
   ok = testBacktestProbeRequiresCandleSeed() && ok;
   ok = testBacktestProbeRequiresAllCandleSeedTiers() && ok;
   ok = testBacktestProbeRequiresTradeWarmupCoverage() && ok;
+  ok = testStrategyMetadataExposesOnlySupportedSpreadMakerParams() && ok;
+  ok = testBacktestProbeMetadataHasTraceIndicators() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

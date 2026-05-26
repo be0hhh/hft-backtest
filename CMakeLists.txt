@@ -73,6 +73,7 @@ add_library(hft_backtest_core SHARED
   src/backtest_execution.cpp
   src/backtest_result_writer.cpp
   src/session_loader.cpp
+  src/strategy_metadata.cpp
   src/backtest_timeline.cpp
 )
 add_library(hft_backtest::core ALIAS hft_backtest_core)

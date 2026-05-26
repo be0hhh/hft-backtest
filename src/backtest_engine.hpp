@@ -101,6 +101,16 @@ struct JsonRiskSnapshot {
   std::uint8_t reason{0};
 };
 
+struct JsonStrategyIndicatorPoint {
+  std::int64_t tsNs{0};
+  std::int64_t valueRaw{0};
+  std::int64_t auxRaw{0};
+  std::uint8_t eventCode{0u};
+  std::uint8_t reasonRaw{0u};
+  std::uint8_t decisionKind{0u};
+  std::uint8_t sideRaw{0u};
+};
+
 struct JsonProbeMetric {
   std::int64_t tsNs{0};
   std::uint8_t decisionKind{0u};
@@ -150,6 +160,12 @@ struct EngineState {
   std::vector<JsonEquityPoint> equityPoints{};
   std::vector<JsonRiskSnapshot> riskSnapshots{};
   std::vector<JsonProbeMetric> probeMetrics{};
+  std::vector<JsonStrategyIndicatorPoint> strategyIndicator{};
+  std::string strategyIndicatorProfile{};
+  std::string strategyIndicatorTitle{};
+  std::string strategyIndicatorValueLabel{};
+  std::string strategyIndicatorAuxLabel{};
+  std::string strategyIndicatorUnit{};
   std::vector<PendingAction> pending{};
   std::array<OpenOrder, kMaxOrderStates> open{};
   hft_trader::core::StrategyPositionState position{};

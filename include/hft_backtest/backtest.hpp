@@ -6,6 +6,7 @@
 
 #include "hft_backtest/api.hpp"
 #include "hft_backtest/status.hpp"
+#include "hft_backtest/strategy_metadata.hpp"
 
 namespace hft_backtest {
 
@@ -16,6 +17,7 @@ struct BacktestRunRequest {
   std::string requestId{};
   std::string runId{};
   std::string strategy{};
+  std::string indicatorProfile{};
   std::uint64_t orderLatencyUs{1000};
   std::uint64_t amendLatencyUs{1000};
   std::uint64_t cancelLatencyUs{1000};
@@ -48,6 +50,7 @@ struct BacktestRunResult {
   std::string requestId{};
   std::string runId{};
   std::string strategy{};
+  std::string indicatorProfile{};
   std::filesystem::path sessionPath{};
   std::filesystem::path configPath{};
   std::filesystem::path resultPath{};

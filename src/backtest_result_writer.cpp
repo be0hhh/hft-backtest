@@ -156,6 +156,26 @@ bool writeProbeMetrics(const std::filesystem::path& path, const EngineState& eng
   return out.good();
 }
 
+bool writeStrategyIndicator(const std::filesystem::path& path, const EngineState& engine) noexcept {
+  if (engine.strategyIndicator.empty()) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    return true;
+  }
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) return false;
+  for (const JsonStrategyIndicatorPoint& row : engine.strategyIndicator) {
+    out << '[' << row.tsNs
+        << ',' << row.valueRaw
+        << ',' << row.auxRaw
+        << ',' << static_cast<unsigned>(row.eventCode)
+        << ',' << static_cast<unsigned>(row.reasonRaw)
+        << ',' << static_cast<unsigned>(row.decisionKind)
+        << ',' << static_cast<unsigned>(row.sideRaw)
+        << "]\n";
+  }
+  return out.good();
+}
 void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, const EngineState& engine, const char* indent) {
   const char q = '"';
   out << indent << q << "mode" << q << ": " << q << "deterministic_bbo_v2_strategy_close" << q << ",\n";
@@ -213,6 +233,7 @@ bool writeManifest(const std::filesystem::path& path, const BacktestRunResult& r
   out << "  " << q << "run_id" << q << ": " << quote(result.runId) << ",\n";
   out << "  " << q << "status" << q << ": " << quote(resultStatusName(result.status)) << ",\n";
   out << "  " << q << "strategy" << q << ": " << quote(result.strategy) << ",\n";
+  out << "  " << q << "indicator_profile" << q << ": " << quote(result.indicatorProfile) << ",\n";
   out << "  " << q << "session_path" << q << ": " << quote(result.sessionPath.generic_string()) << ",\n";
   out << "  " << q << "config_path" << q << ": " << quote("config.ini") << ",\n";
   out << "  " << q << "execution" << q << ": {" << q << "order_latency_us" << q << ": " << result.orderLatencyUs
@@ -231,6 +252,17 @@ bool writeManifest(const std::filesystem::path& path, const BacktestRunResult& r
   out << "    " << q << "risk_snapshots" << q << ": {" << q << "path" << q << ": " << q << "risk_snapshots.jsonl" << q
       << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,gross_realized_pnl_e8,realized_pnl_e8,unrealized_pnl_e8,gross_total_pnl_e8,net_total_pnl_e8,fees_paid_e8,wallet_balance_e8,position_qty_e8,entry_price_e8,bid_price_e8,ask_price_e8,fill_count,reason]" << q
       << ", " << q << "rows" << q << ": " << engine.riskSnapshots.size() << "}";
+  if (!engine.strategyIndicator.empty()) {
+    out << ",\n";
+    out << "    " << q << "strategy_indicator" << q << ": {" << q << "path" << q << ": " << q << "strategy_indicator.jsonl" << q
+        << ", " << q << "profile" << q << ": " << quote(engine.strategyIndicatorProfile)
+        << ", " << q << "title" << q << ": " << quote(engine.strategyIndicatorTitle)
+        << ", " << q << "value_label" << q << ": " << quote(engine.strategyIndicatorValueLabel)
+        << ", " << q << "aux_label" << q << ": " << quote(engine.strategyIndicatorAuxLabel)
+        << ", " << q << "unit" << q << ": " << quote(engine.strategyIndicatorUnit)
+        << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,value_raw,aux_raw,event_code,reason_raw,decision_kind,side_raw]" << q
+        << ", " << q << "rows" << q << ": " << engine.strategyIndicator.size() << "}";
+  }
   if (!engine.probeMetrics.empty()) {
     out << ",\n";
     out << "    " << q << "probe_metrics" << q << ": {" << q << "path" << q << ": " << q << "probe_metrics.jsonl" << q
@@ -268,6 +300,7 @@ Status writeResult(const BacktestRunResult& result, const EngineState& engine) n
   if (!writeEquity(result.resultPath / "equity.jsonl", engine)) return Status::IoError;
   if (!writeRiskSnapshots(result.resultPath / "risk_snapshots.jsonl", engine)) return Status::IoError;
   if (!writeProbeMetrics(result.resultPath / "probe_metrics.jsonl", engine)) return Status::IoError;
+  if (!writeStrategyIndicator(result.resultPath / "strategy_indicator.jsonl", engine)) return Status::IoError;
   if (!writeManifest(result.resultPath / "manifest.json", result, engine)) return Status::IoError;
   return Status::Ok;
 }

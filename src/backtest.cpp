@@ -91,6 +91,113 @@ bool isBacktestProbe(const StrategyDescriptor& descriptor) noexcept {
   return descriptor.name && std::string_view{descriptor.name} == "backtest_probe";
 }
 
+struct StrategyIndicatorProfileInfo {
+  std::string_view id{};
+  std::string_view title{};
+  std::string_view valueLabel{};
+  std::string_view auxLabel{};
+  std::string_view unit{};
+};
+
+bool resolveStrategyIndicatorProfile(std::string_view id, StrategyIndicatorProfileInfo& out) noexcept {
+  out = StrategyIndicatorProfileInfo{};
+  if (id.empty() || id == "none") return true;
+  if (id == "rolling_volume") {
+    out = StrategyIndicatorProfileInfo{"rolling_volume", "Rolling volume", "Rolling/min", "EMA/min", "raw"};
+    return true;
+  }
+  if (id == "trade_range") {
+    out = StrategyIndicatorProfileInfo{"trade_range", "Trade range", "EMA", "Sample", "bps"};
+    return true;
+  }
+  if (id == "wall_density") {
+    out = StrategyIndicatorProfileInfo{"wall_density", "Wall density", "Current", "Max seen", "notional"};
+    return true;
+  }
+  return false;
+}
+
+
+bool strategyDeclaresIndicator(std::string_view strategy, std::string_view profile) noexcept {
+  if (profile.empty()) return true;
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata(strategy);
+  if (metadata == nullptr) return false;
+  for (std::size_t i = 0; i < metadata->indicatorCount && i < hft_backtest::kStrategyMetadataMaxIndicators; ++i) {
+    const hft_backtest::StrategyIndicatorMetadata& indicator = metadata->indicators[i];
+    if (indicator.id != nullptr && profile == std::string_view{indicator.id}) return true;
+  }
+  return false;
+}
+
+bool strategyIndicatorEnabled(const detail::EngineState& engine) noexcept {
+  return !engine.strategyIndicatorProfile.empty();
+}
+
+void configureStrategyIndicator(detail::EngineState& engine, const StrategyIndicatorProfileInfo& profile) {
+  engine.strategyIndicatorProfile = std::string{profile.id};
+  engine.strategyIndicatorTitle = std::string{profile.title};
+  engine.strategyIndicatorValueLabel = std::string{profile.valueLabel};
+  engine.strategyIndicatorAuxLabel = std::string{profile.auxLabel};
+  engine.strategyIndicatorUnit = std::string{profile.unit};
+}
+
+std::int64_t maxWallValue(const hft_trader::core::StrategyDecisionTrace& trace, bool maxSeen) noexcept {
+  std::int64_t out = 0;
+  for (std::size_t side = 0; side < hft_trader::core::kStrategyDecisionWallSideCount; ++side) {
+    for (std::size_t rank = 0; rank < hft_trader::core::kStrategyDecisionWallRankCount; ++rank) {
+      if (trace.wallActive[side][rank] == 0u && trace.wallConfirmed[side][rank] == 0u && trace.wallDropped[side][rank] == 0u) continue;
+      const std::int64_t value = maxSeen ? trace.wallMaxSeenNotionalRaw[side][rank] : trace.wallCurrentNotionalRaw[side][rank];
+      if (value > out) out = value;
+    }
+  }
+  return out;
+}
+
+bool hasWallDrop(const hft_trader::core::StrategyDecisionTrace& trace) noexcept {
+  for (std::size_t side = 0; side < hft_trader::core::kStrategyDecisionWallSideCount; ++side) {
+    for (std::size_t rank = 0; rank < hft_trader::core::kStrategyDecisionWallRankCount; ++rank) {
+      if (trace.wallDropped[side][rank] != 0u) return true;
+    }
+  }
+  return false;
+}
+
+std::uint8_t indicatorEventCode(const hft_trader::core::StrategyDecisionTrace& trace) noexcept {
+  if (hasWallDrop(trace)) return 2u;
+  if (trace.decisionKind == static_cast<std::uint8_t>(hft_trader::core::StrategyDecisionKind::Skip) && trace.reasonRaw != 0u) return 4u;
+  if (trace.decisionKind == static_cast<std::uint8_t>(hft_trader::core::StrategyDecisionKind::Enter) ||
+      trace.decisionKind == static_cast<std::uint8_t>(hft_trader::core::StrategyDecisionKind::Close) ||
+      trace.bidTriggered != 0u || trace.askTriggered != 0u) return 1u;
+  return 0u;
+}
+
+std::int64_t clampU64ToI64(std::uint64_t value) noexcept {
+  const std::uint64_t max = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  return static_cast<std::int64_t>(value > max ? max : value);
+}
+
+void appendStrategyIndicator(detail::EngineState& engine,
+                             std::int64_t tsNs,
+                             const hft_trader::core::StrategyDecisionTrace& trace) {
+  if (!strategyIndicatorEnabled(engine)) return;
+  detail::JsonStrategyIndicatorPoint row{};
+  row.tsNs = tsNs;
+  if (engine.strategyIndicatorProfile == "rolling_volume") {
+    row.valueRaw = clampU64ToI64(trace.rollingPerMinuteRaw);
+    row.auxRaw = clampU64ToI64(trace.volumeEmaPerMinuteRaw);
+  } else if (engine.strategyIndicatorProfile == "trade_range") {
+    row.valueRaw = static_cast<std::int64_t>(trace.tradeRangeEmaBps);
+    row.auxRaw = static_cast<std::int64_t>(trace.tradeRangeSampleBps);
+  } else if (engine.strategyIndicatorProfile == "wall_density") {
+    row.valueRaw = maxWallValue(trace, false);
+    row.auxRaw = maxWallValue(trace, true);
+  }
+  row.eventCode = indicatorEventCode(trace);
+  row.reasonRaw = trace.reasonRaw;
+  row.decisionKind = trace.decisionKind;
+  row.sideRaw = trace.sideRaw;
+  engine.strategyIndicator.push_back(row);
+}
 void recordInputCoverage(detail::EngineState& engine) noexcept {
   ++engine.inputCoverage.strategyCycles;
   if (engine.snapshot.hasTrade.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithTrade;
@@ -208,16 +315,18 @@ bool runCycle(const StrategyDescriptor& descriptor,
   recordInputCoverage(engine);
   hft_trader::core::StrategyDecisionTrace trace{};
   const bool captureProbeTrace = isBacktestProbe(descriptor);
-  if (captureProbeTrace) {
+  const bool captureIndicatorTrace = strategyIndicatorEnabled(engine);
+  if (captureProbeTrace || captureIndicatorTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
   const bool ok = descriptor.runCycle(state, ctx);
-  if (captureProbeTrace) {
+  if (captureProbeTrace || captureIndicatorTrace) {
     trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
     trace.amendCount = static_cast<std::uint32_t>(ctx.io.amendCount);
     trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
-    appendProbeMetric(engine, tsNs, trace);
+    if (captureProbeTrace) appendProbeMetric(engine, tsNs, trace);
+    if (captureIndicatorTrace) appendStrategyIndicator(engine, tsNs, trace);
   }
   if (captureProbeTrace && !ok) return false;
   detail::applyIntents(engine, ctx.io, tsNs, request.orderLatencyUs, request.amendLatencyUs, request.cancelLatencyUs);
@@ -436,6 +545,20 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     return result;
   }
   result.strategy = request.strategy.empty() ? cfg.strategyType : request.strategy;
+  StrategyIndicatorProfileInfo indicatorProfile{};
+  if (!resolveStrategyIndicatorProfile(request.indicatorProfile, indicatorProfile)) {
+    result.status = Status::InvalidArgument;
+    result.error = "unknown indicator profile";
+    (void)detail::writeResult(result, detail::EngineState{});
+    return result;
+  }
+  result.indicatorProfile = std::string{indicatorProfile.id};
+  if (!strategyDeclaresIndicator(result.strategy, result.indicatorProfile)) {
+    result.status = Status::InvalidArgument;
+    result.error = "indicator profile is not supported by strategy";
+    (void)detail::writeResult(result, detail::EngineState{});
+    return result;
+  }
   if (result.strategy != cfg.strategyType) {
     result.status = Status::ConfigMismatch;
     result.error = "requested strategy does not match config [strategy] type";
@@ -553,6 +676,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   seedCoverage.seedTradeRows = session.tradeWarmup.size();
 
   detail::EngineState engine{};
+  configureStrategyIndicator(engine, indicatorProfile);
   engine.inputCoverage = seedCoverage;
   engine.exchange = sessionExchange;
   engine.symbol = selectedSymbol;
