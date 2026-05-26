@@ -2,6 +2,7 @@
 
 #include "hft_backtest/backtest.hpp"
 
+#include "backtest_latency.hpp"
 #include "session_loader.hpp"
 
 #include "hft_trader/core/LocalOrderBook.hpp"
@@ -42,6 +43,7 @@ enum class PendingActionKind : std::uint8_t {
   OrderAck = 0,
   CancelAck = 1,
   AmendAck = 2,
+  ReplaceCancelAck = 3,
 };
 
 struct JsonOrder {
@@ -170,11 +172,14 @@ struct EngineState {
   std::array<OpenOrder, kMaxOrderStates> open{};
   hft_trader::core::StrategyPositionState position{};
   hft_trader::core::StrategyMarketSnapshot snapshot{};
+  hft_trader::core::StrategyMarketSnapshot venueSnapshot{};
   hft_trader::core::LocalOrderBookState orderBook{};
+  hft_trader::core::LocalOrderBookState venueOrderBook{};
   BacktestInputCoverage inputCoverage{};
   ExchangeId exchange{};
   Symbol symbol{};
   std::vector<cxet::composite::UserDataEvent> userEvents{};
+  BacktestLatencyRuntime latency{};
   std::size_t deliveredUserEvents{0};
   std::uint64_t fillSequence{0};
   std::uint64_t timerWakeEvents{0};
@@ -196,6 +201,7 @@ struct EngineState {
 
 struct TimelineEvent {
   std::int64_t tsNs{0};
+  std::int64_t deliveryTsNs{0};
   std::int64_t ingestSeq{0};
   std::uint8_t kind{0};
   std::size_t index{0};
@@ -230,13 +236,19 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs);
 void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& trade);
 void applyDueActions(EngineState& engine, std::int64_t tsNs);
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs);
+bool forceClosePosition(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency);
 void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, std::uint64_t cancelLatencyUs);
+void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency);
 void applyIntents(EngineState& engine,
                   const hft_trader::core::StrategyIo& io,
                   std::int64_t tsNs,
                   std::uint64_t orderLatencyUs,
                   std::uint64_t amendLatencyUs,
                   std::uint64_t cancelLatencyUs);
+void applyIntents(EngineState& engine,
+                  const hft_trader::core::StrategyIo& io,
+                  std::int64_t tsNs,
+                  BacktestLatencyRuntime& latency);
 
 void buildTimeline(const SessionData& session, std::vector<TimelineEvent>& out);
 Status writeResult(const BacktestRunResult& result, const EngineState& engine) noexcept;

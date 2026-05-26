@@ -1,4 +1,5 @@
 #include "hft_backtest/backtest.hpp"
+#include "hft_backtest/backtest_sweep.hpp"
 
 #include <charconv>
 #include <cstring>
@@ -6,11 +7,13 @@
 #include <iostream>
 #include <string>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--strategy NAME] [--output DIR] [--run-id ID] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N]\n";
+  std::cerr << "Usage: hft-backtest --session DIR --config INI [--strategy NAME] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {
@@ -23,6 +26,40 @@ bool parseU64(const char* text, std::uint64_t& out) noexcept {
   const char* last = text + std::strlen(text);
   const auto parsed = std::from_chars(text, last, out);
   return parsed.ec == std::errc{} && parsed.ptr == last;
+}
+
+bool parseI64Text(const char* first, const char* last, std::int64_t& out) noexcept {
+  if (!first || first == last) return false;
+  const auto parsed = std::from_chars(first, last, out);
+  return parsed.ec == std::errc{} && parsed.ptr == last;
+}
+
+bool parseSweepParam(const char* text, hft_backtest::BacktestSweepParamRange& out) {
+  if (!text || *text == '\0') return false;
+  const char* keyEnd = std::strchr(text, ':');
+  if (!keyEnd || keyEnd == text) return false;
+  const char* minFirst = keyEnd + 1;
+  const char* minEnd = std::strchr(minFirst, ':');
+  if (!minEnd) return false;
+  const char* maxFirst = minEnd + 1;
+  const char* maxEnd = std::strchr(maxFirst, ':');
+  if (!maxEnd) return false;
+  const char* stepFirst = maxEnd + 1;
+  const char* textEnd = text + std::strlen(text);
+  const char* stepEnd = std::strchr(stepFirst, ':');
+  const char* modeFirst = nullptr;
+  if (stepEnd) modeFirst = stepEnd + 1;
+  else stepEnd = textEnd;
+  out.key.assign(text, static_cast<std::size_t>(keyEnd - text));
+  if (!parseI64Text(minFirst, minEnd, out.minRaw) ||
+      !parseI64Text(maxFirst, maxEnd, out.maxRaw) ||
+      !parseI64Text(stepFirst, stepEnd, out.stepRaw)) return false;
+  if (modeFirst) {
+    const std::string mode(modeFirst, static_cast<std::size_t>(textEnd - modeFirst));
+    if (mode == "grid" || mode == "sweep") out.mode = hft_backtest::BacktestSweepParamMode::Grid;
+    else return false;
+  }
+  return true;
 }
 
 bool parseDecimalE8(const char* text, std::int64_t& out) noexcept {
@@ -64,6 +101,10 @@ bool parseDecimalE8(const char* text, std::int64_t& out) noexcept {
 
 int main(int argc, char** argv) {
   hft_backtest::BacktestRunRequest request{};
+  std::vector<hft_backtest::BacktestSweepParamRange> sweepRanges{};
+  std::uint64_t sweepBudget = 0u;
+  std::uint64_t sweepSeed = 0u;
+  std::string sweepId{};
   for (int i = 1; i < argc; ++i) {
     const char* arg = argv[i];
     auto needValue = [&](const char* name) -> const char* {
@@ -83,8 +124,36 @@ int main(int argc, char** argv) {
       if (const char* value = needValue(arg)) request.outputPath = value;
     } else if (std::strcmp(arg, "--run-id") == 0) {
       if (const char* value = needValue(arg)) request.runId = value;
+    } else if (std::strcmp(arg, "--sweep-id") == 0) {
+      if (const char* value = needValue(arg)) sweepId = value;
+    } else if (std::strcmp(arg, "--sweep-budget") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, sweepBudget)) return 2;
+    } else if (std::strcmp(arg, "--sweep-seed") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, sweepSeed)) return 2;
+    } else if (std::strcmp(arg, "--sweep-param") == 0) {
+      if (const char* value = needValue(arg)) {
+        hft_backtest::BacktestSweepParamRange range{};
+        if (!parseSweepParam(value, range)) return 2;
+        sweepRanges.push_back(std::move(range));
+      }
+    } else if (std::strcmp(arg, "--latency-seed") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.latencySeed)) return 2;
+    } else if (std::strcmp(arg, "--market-data-latency-us") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.marketDataLatency.baseUs)) return 2;
+    } else if (std::strcmp(arg, "--market-data-jitter-us") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.marketDataLatency.jitterUs)) return 2;
+    } else if (std::strcmp(arg, "--market-order-latency-us") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.marketOrderLatency.baseUs)) return 2;
+    } else if (std::strcmp(arg, "--market-order-jitter-us") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.marketOrderLatency.jitterUs)) return 2;
+    } else if (std::strcmp(arg, "--limit-order-latency-us") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.limitOrderLatency.baseUs)) return 2;
+    } else if (std::strcmp(arg, "--limit-order-jitter-us") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.limitOrderLatency.jitterUs)) return 2;
     } else if (std::strcmp(arg, "--order-latency-us") == 0) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.orderLatencyUs)) return 2;
+      request.marketOrderLatency.baseUs = request.orderLatencyUs;
+      request.limitOrderLatency.baseUs = request.orderLatencyUs;
     } else if (std::strcmp(arg, "--amend-latency-us") == 0) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.amendLatencyUs)) return 2;
     } else if (std::strcmp(arg, "--cancel-latency-us") == 0) {
@@ -107,6 +176,22 @@ int main(int argc, char** argv) {
   if (request.sessionPath.empty() || request.configPath.empty()) {
     printUsage();
     return 2;
+  }
+  if (!sweepRanges.empty() || sweepBudget != 0u) {
+    hft_backtest::BacktestSweepRequest sweep{};
+    sweep.baseRun = request;
+    sweep.outputPath = request.outputPath;
+    sweep.sweepId = sweepId;
+    sweep.runBudget = sweepBudget;
+    sweep.searchSeed = sweepSeed;
+    sweep.ranges = std::move(sweepRanges);
+    const auto result = hft_backtest::runBacktestSweep(sweep, progress, nullptr);
+    if (!hft_backtest::isOk(result.status)) {
+      std::cerr << "sweep failed: " << hft_backtest::statusToString(result.status) << ": " << result.error << "\n";
+      return 1;
+    }
+    std::cout << result.resultPath.generic_string() << "\n";
+    return 0;
   }
   const auto result = hft_backtest::runBacktest(request, progress, nullptr);
   if (!hft_backtest::isOk(result.status)) {

@@ -1,5 +1,7 @@
 #include "backtest_engine.hpp"
 
+#include "backtest_latency.hpp"
+
 #include "hft_trader/api/UserDataTools.hpp"
 
 #include <array>
@@ -78,6 +80,8 @@ hft_trader::core::AmendIntent amendIntent(std::uint64_t commandId, std::uint64_t
 void setTop(EngineState& engine, std::int64_t bid, std::int64_t ask) noexcept {
   engine.snapshot.lastBookTicker.bid.px.raw = bid;
   engine.snapshot.lastBookTicker.ask.px.raw = ask;
+  engine.venueSnapshot.lastBookTicker.bid.px.raw = bid;
+  engine.venueSnapshot.lastBookTicker.ask.px.raw = ask;
 }
 
 bool expect(bool value, std::string_view message) {
@@ -159,6 +163,59 @@ bool testPendingDrainActivatesLateOrder() {
   return expect(engine.orders[0].status == "pending", "late order initially pending") &&
          (applyDueActions(engine, 101000), true) &&
          expect(engine.orders[0].status == "active", "final drain activates due order");
+}
+
+bool testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() {
+  BacktestLatencyConfig config{};
+  config.seed = 77u;
+  config.marketData.baseUs = 2500u;
+  config.marketData.jitterUs = 1000u;
+  config.marketOrder.baseUs = 3100u;
+  config.marketOrder.jitterUs = 0u;
+
+  BacktestLatencyRuntime first{};
+  BacktestLatencyRuntime second{};
+  initLatencyRuntime(first, config);
+  initLatencyRuntime(second, config);
+
+  bool same = true;
+  bool varied = false;
+  std::uint64_t previous = 0u;
+  for (std::uint32_t i = 0u; i < 64u; ++i) {
+    const std::uint64_t a = sampleLatencyUs(first, BacktestLatencyChannel::MarketData);
+    const std::uint64_t b = sampleLatencyUs(second, BacktestLatencyChannel::MarketData);
+    same = same && a == b;
+    if (i != 0u && a != previous) varied = true;
+    previous = a;
+  }
+
+  return expect(same, "same latency seed produces same sequence") &&
+         expect(varied, "jittered latency sequence varies") &&
+         expect(sampleLatencyUs(first, BacktestLatencyChannel::MarketOrder) == 3100u,
+                "zero jitter market order latency returns base") &&
+         expect(latencyProfileMaxUs(config.marketData) == 10000u, "market data latency cap uses built-in spike bound");
+}
+
+bool testLatencyRuntimeSplitsMarketAndLimitOrderActivation() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  BacktestLatencyConfig config{};
+  config.seed = 5u;
+  config.marketOrder.baseUs = 100u;
+  config.limitOrder.baseUs = 700u;
+  initLatencyRuntime(engine.latency, config);
+
+  std::array<hft_trader::core::OrderIntent, 2> orders{reduceMarketIntent(30, Side::Buy()), orderIntent(31, Side::Buy(), kPx100 - 200000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, engine.latency);
+
+  return expect(engine.orders.size() == 2u, "market and limit orders are recorded") &&
+         expect(engine.orders[0].type == "market", "first order is market") &&
+         expect(engine.orders[0].activeTsNs == 101000, "market order uses market order latency") &&
+         expect(engine.orders[1].type == "limit", "second order is limit") &&
+         expect(engine.orders[1].activeTsNs == 701000, "limit order uses limit order latency");
 }
 
 bool testFillPublishesRuntimeUserEvent() {
@@ -841,6 +898,8 @@ int main() {
   ok = testStaleCancelDoesNotCancelReusedSlot() && ok;
   ok = testStaleAmendDoesNotMutateReusedSlot() && ok;
   ok = testPendingDrainActivatesLateOrder() && ok;
+  ok = testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() && ok;
+  ok = testLatencyRuntimeSplitsMarketAndLimitOrderActivation() && ok;
   ok = testFillPublishesRuntimeUserEvent() && ok;
   ok = testReduceOnlyMarketBuyDoesNotOpenWhenFlat() && ok;
   ok = testReduceOnlyMarketSellClosesLongAtBid() && ok;

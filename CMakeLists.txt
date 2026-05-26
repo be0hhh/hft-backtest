@@ -68,10 +68,15 @@ find_package(Threads REQUIRED)
 
 add_library(hft_backtest_core SHARED
   src/backtest_accounting.cpp
+  src/backtest_latency.cpp
   src/backtest_common.cpp
   src/backtest.cpp
   src/backtest_execution.cpp
+  src/backtest_metrics.cpp
   src/backtest_result_writer.cpp
+  src/backtest_sweep.cpp
+  src/backtest_sweep_search.cpp
+  src/backtest_sweep_writer.cpp
   src/session_loader.cpp
   src/strategy_metadata.cpp
   src/backtest_timeline.cpp
@@ -116,6 +121,32 @@ set_target_properties(hft-backtest-execution-tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_property(TARGET hft-backtest-execution-tests PROPERTY BUILD_RPATH
+  $ORIGIN
+  ${HFT_BACKTEST_TRADER_ROOT}/build
+  ${HFT_BACKTEST_CXET_ROOT}/lib
+)
+
+add_executable(hft-backtest-metrics-tests tests/backtest_metrics_tests.cpp)
+target_include_directories(hft-backtest-metrics-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(hft-backtest-metrics-tests PRIVATE hft_backtest_core)
+target_compile_features(hft-backtest-metrics-tests PRIVATE cxx_std_23)
+set_target_properties(hft-backtest-metrics-tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_property(TARGET hft-backtest-metrics-tests PROPERTY BUILD_RPATH
+  $ORIGIN
+  ${HFT_BACKTEST_TRADER_ROOT}/build
+  ${HFT_BACKTEST_CXET_ROOT}/lib
+)
+
+add_executable(hft-backtest-sweep-tests tests/backtest_sweep_tests.cpp)
+target_include_directories(hft-backtest-sweep-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(hft-backtest-sweep-tests PRIVATE hft_backtest_core)
+target_compile_features(hft-backtest-sweep-tests PRIVATE cxx_std_23)
+set_target_properties(hft-backtest-sweep-tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_property(TARGET hft-backtest-sweep-tests PROPERTY BUILD_RPATH
   $ORIGIN
   ${HFT_BACKTEST_TRADER_ROOT}/build
   ${HFT_BACKTEST_CXET_ROOT}/lib

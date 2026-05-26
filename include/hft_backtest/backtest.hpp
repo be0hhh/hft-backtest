@@ -3,12 +3,18 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "hft_backtest/api.hpp"
 #include "hft_backtest/status.hpp"
 #include "hft_backtest/strategy_metadata.hpp"
 
 namespace hft_backtest {
+
+struct BacktestLatencyProfile {
+  std::uint64_t baseUs{0};
+  std::uint64_t jitterUs{0};
+};
 
 struct BacktestRunRequest {
   std::filesystem::path sessionPath{};
@@ -18,12 +24,17 @@ struct BacktestRunRequest {
   std::string runId{};
   std::string strategy{};
   std::string indicatorProfile{};
+  std::uint64_t latencySeed{0};
+  BacktestLatencyProfile marketDataLatency{};
+  BacktestLatencyProfile marketOrderLatency{};
+  BacktestLatencyProfile limitOrderLatency{};
   std::uint64_t orderLatencyUs{1000};
   std::uint64_t amendLatencyUs{1000};
   std::uint64_t cancelLatencyUs{1000};
   std::int64_t initialBalanceE8{0};
   std::int64_t makerFeeBpsE8{0};
   std::int64_t takerFeeBpsE8{0};
+  bool writeArtifacts{true};
 };
 
 struct BacktestProgress {
@@ -55,6 +66,10 @@ struct BacktestRunResult {
   std::filesystem::path configPath{};
   std::filesystem::path resultPath{};
   std::string error{};
+  std::uint64_t latencySeed{0};
+  BacktestLatencyProfile marketDataLatency{};
+  BacktestLatencyProfile marketOrderLatency{};
+  BacktestLatencyProfile limitOrderLatency{};
   std::uint64_t orderLatencyUs{1000};
   std::uint64_t amendLatencyUs{1000};
   std::uint64_t cancelLatencyUs{1000};
@@ -78,7 +93,11 @@ struct BacktestRunResult {
   std::int64_t grossRealizedPnlE8{0};
   std::int64_t feesPaidE8{0};
   std::int64_t netRealizedPnlE8{0};
+  std::int64_t maxDrawdownE8{0};
+  std::int64_t mfeE8{0};
+  std::int64_t maeE8{0};
   std::int64_t openPositionQtyE8{0};
+  std::vector<std::int64_t> totalPnlCurveE8{};
   BacktestInputCoverage inputCoverage{};
   bool strategyClosed{false};
 };

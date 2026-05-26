@@ -1,6 +1,7 @@
 #include "hft_backtest/backtest.hpp"
 
 #include "backtest_engine.hpp"
+#include "backtest_metrics.hpp"
 #include "session_loader.hpp"
 
 #include "hft_trader/core/ControlState.hpp"
@@ -11,6 +12,7 @@
 #include "hft_trader/runtime/StrategyMarketDataRuntime.hpp"
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -329,14 +331,26 @@ bool runCycle(const StrategyDescriptor& descriptor,
     if (captureIndicatorTrace) appendStrategyIndicator(engine, tsNs, trace);
   }
   if (captureProbeTrace && !ok) return false;
-  detail::applyIntents(engine, ctx.io, tsNs, request.orderLatencyUs, request.amendLatencyUs, request.cancelLatencyUs);
+  detail::applyIntents(engine, ctx.io, tsNs, engine.latency);
   return true;
 }
 
+std::uint64_t hashRunSeed(const std::string& text) noexcept {
+  std::uint64_t out = 1469598103934665603ull;
+  for (char c : text) {
+    out ^= static_cast<unsigned char>(c);
+    out *= 1099511628211ull;
+  }
+  return out == 0u ? 88172645463325252ull : out;
+}
+
 std::uint64_t maxLatencyUs(const BacktestRunRequest& request) noexcept {
-  std::uint64_t out = request.orderLatencyUs;
-  if (request.amendLatencyUs > out) out = request.amendLatencyUs;
-  if (request.cancelLatencyUs > out) out = request.cancelLatencyUs;
+  const detail::BacktestLatencyConfig config = detail::latencyConfigFromRequest(request);
+  std::uint64_t out = detail::latencyProfileMaxUs(config.marketData);
+  const std::uint64_t marketOrder = detail::latencyProfileMaxUs(config.marketOrder);
+  const std::uint64_t limitOrder = detail::latencyProfileMaxUs(config.limitOrder);
+  if (marketOrder > out) out = marketOrder;
+  if (limitOrder > out) out = limitOrder;
   return out;
 }
 
@@ -415,6 +429,39 @@ std::int64_t nextWakeTs(const StrategyDescriptor& descriptor, const void* state)
   return toInt64Time(wake);
 }
 
+void applyMarketEventToSnapshots(detail::EngineState& engine,
+                                 const detail::SessionData& session,
+                                 const detail::TimelineEvent& event,
+                                 const Symbol& selectedSymbol,
+                                 const StrategyInstrumentSpec& instrument,
+                                 bool strategyVisible) {
+  hft_trader::core::StrategyMarketSnapshot& snapshot = strategyVisible ? engine.snapshot : engine.venueSnapshot;
+  hft_trader::core::LocalOrderBookState& orderBook = strategyVisible ? engine.orderBook : engine.venueOrderBook;
+  if (event.kind == 0) {
+    const auto delta = detail::toRuntime(session.depths[event.index]);
+    hft_trader::core::copyDepthSnapshot(snapshot, delta);
+    if (orderBook.initialized.raw != hft_trader::core::kAlgoFlagTrue.raw) {
+      hft_trader::core::LocalOrderBookConfig bookConfig{};
+      bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+      bookConfig.tickSizeRaw = instrument.tickSizeRaw;
+      hft_trader::core::applySnapshot(orderBook, detail::toRuntimeSnapshot(session.depths[event.index]), selectedSymbol, bookConfig);
+    } else {
+      (void)hft_trader::core::applyDelta(orderBook, delta);
+    }
+    hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
+  } else if (event.kind == 1) {
+    const auto trade = detail::toRuntime(session.trades[event.index]);
+    hft_trader::core::copyTradeSnapshot(snapshot, trade);
+    if (!strategyVisible) detail::tryFillOnTrade(engine, trade);
+  } else {
+    const auto ticker = detail::toRuntime(session.bookTickers[event.index]);
+    hft_trader::core::copyBookTickerSnapshot(snapshot, ticker);
+    (void)hft_trader::core::applyBookTicker(orderBook, ticker);
+    hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
+    if (!strategyVisible) detail::tryFillOnTop(engine, event.tsNs);
+  }
+}
+
 bool drainUserEvents(const StrategyDescriptor& descriptor,
                      void* state,
                      detail::EngineState& engine,
@@ -480,13 +527,15 @@ bool settleAfterReplay(const StrategyDescriptor& descriptor,
     untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
     if (!runUntil(descriptor, state, engine, shard, teardownControl, untilTs, request)) return false;
     if (engine.netQtyRaw != 0) {
-      if (!detail::forceClosePosition(engine, untilTs, request.orderLatencyUs)) return false;
+      if (!detail::forceClosePosition(engine, untilTs, engine.latency)) return false;
       untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
       if (!runUntil(descriptor, state, engine, shard, teardownControl, untilTs, request)) return false;
     }
-    detail::cancelOpenOrders(engine, untilTs, request.cancelLatencyUs);
+    detail::cancelOpenOrders(engine, untilTs, engine.latency);
   }
-  detail::cancelOpenOrders(engine, untilTs, request.cancelLatencyUs);
+  detail::cancelOpenOrders(engine, untilTs, engine.latency);
+  untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
+  if (!runUntil(descriptor, state, engine, shard, teardownControl, untilTs, request)) return false;
   return engine.netQtyRaw == 0 && engine.pending.empty();
 }
 
@@ -496,6 +545,10 @@ void populateResultPnl(BacktestRunResult& result, const detail::EngineState& eng
   result.grossRealizedPnlE8 = engine.grossRealizedPnlE8;
   result.feesPaidE8 = engine.feesPaidE8;
   result.netRealizedPnlE8 = engine.netRealizedPnlE8;
+  const detail::BacktestExcursionMetrics metrics = detail::calculateExcursionMetrics(engine);
+  result.maxDrawdownE8 = metrics.maxDrawdownE8;
+  result.mfeE8 = metrics.mfeE8;
+  result.maeE8 = metrics.maeE8;
   result.realizedPnlE8 = engine.netRealizedPnlE8;
   result.unrealizedPnlE8 = detail::unrealizedPnlE8(engine);
   result.totalPnlE8 = result.realizedPnlE8;
@@ -506,6 +559,11 @@ void populateResultPnl(BacktestRunResult& result, const detail::EngineState& eng
   result.reduceOnlyOrders = engine.reduceOnlyOrders;
   result.reduceOnlyFills = engine.reduceOnlyFills;
   result.inputCoverage = engine.inputCoverage;
+  result.totalPnlCurveE8.clear();
+  result.totalPnlCurveE8.reserve(engine.equityPoints.size());
+  for (const detail::JsonEquityPoint& point : engine.equityPoints) {
+    result.totalPnlCurveE8.push_back(point.totalPnlE8);
+  }
 }
 
 }  // namespace
@@ -519,11 +577,22 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.sessionPath = request.sessionPath;
   result.configPath = request.configPath;
   result.resultPath = resultPathFor(request, result.runId);
+  BacktestRunRequest effectiveRequest = request;
+  if (effectiveRequest.latencySeed == 0u) effectiveRequest.latencySeed = hashRunSeed(result.runId);
+  const detail::BacktestLatencyConfig latencyConfig = detail::latencyConfigFromRequest(effectiveRequest);
+  result.latencySeed = latencyConfig.seed;
+  result.marketDataLatency = latencyConfig.marketData;
+  result.marketOrderLatency = latencyConfig.marketOrder;
+  result.limitOrderLatency = latencyConfig.limitOrder;
   result.orderLatencyUs = request.orderLatencyUs;
   result.amendLatencyUs = request.amendLatencyUs;
   result.cancelLatencyUs = request.cancelLatencyUs;
   result.initialBalanceE8 = request.initialBalanceE8;
   result.walletBalanceE8 = request.initialBalanceE8;
+  auto writeArtifacts = [&](const detail::EngineState& engine) noexcept -> Status {
+    if (!request.writeArtifacts) return Status::Ok;
+    return detail::writeResult(result, engine);
+  };
 
   if (request.sessionPath.empty() || request.configPath.empty()) {
     result.status = Status::InvalidArgument;
@@ -541,7 +610,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!hft_trader::runtime::loadRuntimeConfig(request.configPath.string().c_str(), cfg, error)) {
     result.status = Status::InvalidArgument;
     result.error = error;
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
   result.strategy = request.strategy.empty() ? cfg.strategyType : request.strategy;
@@ -549,27 +618,27 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!resolveStrategyIndicatorProfile(request.indicatorProfile, indicatorProfile)) {
     result.status = Status::InvalidArgument;
     result.error = "unknown indicator profile";
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
   result.indicatorProfile = std::string{indicatorProfile.id};
   if (!strategyDeclaresIndicator(result.strategy, result.indicatorProfile)) {
     result.status = Status::InvalidArgument;
     result.error = "indicator profile is not supported by strategy";
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
   if (result.strategy != cfg.strategyType) {
     result.status = Status::ConfigMismatch;
     result.error = "requested strategy does not match config [strategy] type";
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
   const StrategyDescriptor* descriptor = hft_trader::runtime::findStrategyDescriptor(cfg.strategyType);
   if (!descriptor || !descriptor->resolveParams || !descriptor->initState || !descriptor->runCycle) {
     result.status = Status::Unsupported;
     result.error = "strategy descriptor is missing required callbacks";
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
 
@@ -577,7 +646,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!buildSessionLoadPlan(*descriptor, loadPlan, error)) {
     result.status = Status::Unsupported;
     result.error = error;
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
 
@@ -585,7 +654,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.status = detail::loadSession(request.sessionPath, loadPlan, session, error);
   if (!isOk(result.status)) {
     result.error = error;
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
 
@@ -608,7 +677,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!venue) {
     result.status = Status::ConfigMismatch;
     result.error = "config venue/symbol does not match recorder session";
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
 
@@ -616,7 +685,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!descriptor->resolveParams(cfg, *venue, params, error)) {
     result.status = Status::InvalidArgument;
     result.error = error;
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
   StrategyInstrumentSpec instrument{};
@@ -631,7 +700,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!descriptor->initState(state.data(), params, instrument)) {
     result.status = Status::InvalidArgument;
     result.error = "strategy initState failed";
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
   BacktestInputCoverage seedCoverage{};
@@ -639,14 +708,14 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (session.candles.empty()) {
       result.status = Status::CorruptData;
       result.error = "strategy requires candle history but candles channel is missing or empty";
-      (void)detail::writeResult(result, detail::EngineState{});
+      (void)writeArtifacts(detail::EngineState{});
       return result;
     }
     cxet::composite::TieredCandleHistory history{};
     if (!detail::buildTieredCandleHistory(session.candles, history)) {
       result.status = Status::CorruptData;
       result.error = "failed to build strategy candle history from recorder session";
-      (void)detail::writeResult(result, detail::EngineState{});
+      (void)writeArtifacts(detail::EngineState{});
       return result;
     }
     seedCoverage.seedM1Candles = history.m1Count.raw;
@@ -656,27 +725,28 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (!descriptor->seedHistory(state.data(), history, &stats)) {
       result.status = Status::InvalidArgument;
       result.error = "strategy seedHistory failed";
-      (void)detail::writeResult(result, detail::EngineState{});
+      (void)writeArtifacts(detail::EngineState{});
       return result;
     }
     if (isBacktestProbe(*descriptor) &&
         (seedCoverage.seedM1Candles == 0u || seedCoverage.seedM15Candles == 0u || seedCoverage.seedD1Candles == 0u)) {
       result.status = Status::CorruptData;
       result.error = "backtest_probe did not receive full m1/m15/d1 candle seed";
-      (void)detail::writeResult(result, detail::EngineState{});
+      (void)writeArtifacts(detail::EngineState{});
       return result;
     }
   }
   if (!seedTradeWarmupFromSession(*descriptor, state.data(), params, session, error)) {
     result.status = Status::CorruptData;
     result.error = error;
-    (void)detail::writeResult(result, detail::EngineState{});
+    (void)writeArtifacts(detail::EngineState{});
     return result;
   }
   seedCoverage.seedTradeRows = session.tradeWarmup.size();
 
   detail::EngineState engine{};
   configureStrategyIndicator(engine, indicatorProfile);
+  detail::initLatencyRuntime(engine.latency, latencyConfig);
   engine.inputCoverage = seedCoverage;
   engine.exchange = sessionExchange;
   engine.symbol = selectedSymbol;
@@ -686,7 +756,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
     bookConfig.tickSizeRaw = instrument.tickSizeRaw;
     hft_trader::core::applySnapshot(engine.orderBook, detail::toRuntimeSnapshot(session.snapshot), selectedSymbol, bookConfig);
+    hft_trader::core::applySnapshot(engine.venueOrderBook, detail::toRuntimeSnapshot(session.snapshot), selectedSymbol, bookConfig);
     hft_trader::core::bindOrderBookSnapshot(engine.snapshot, engine.orderBook);
+    hft_trader::core::bindOrderBookSnapshot(engine.venueSnapshot, engine.venueOrderBook);
   }
   hft_trader::core::SymbolShardConfig shard{};
   shard.shardId.raw = 1;
@@ -698,6 +770,16 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
 
   std::vector<detail::TimelineEvent> timeline;
   detail::buildTimeline(session, timeline);
+  std::vector<detail::TimelineEvent> deliveryTimeline = timeline;
+  for (detail::TimelineEvent& event : deliveryTimeline) {
+    event.deliveryTsNs = detail::delayedTs(event.tsNs, detail::sampleLatencyUs(engine.latency, detail::BacktestLatencyChannel::MarketData));
+  }
+  std::stable_sort(deliveryTimeline.begin(), deliveryTimeline.end(), [](const detail::TimelineEvent& lhs, const detail::TimelineEvent& rhs) noexcept {
+    if (lhs.deliveryTsNs != rhs.deliveryTsNs) return lhs.deliveryTsNs < rhs.deliveryTsNs;
+    if (lhs.tsNs != rhs.tsNs) return lhs.tsNs < rhs.tsNs;
+    if (lhs.ingestSeq != rhs.ingestSeq) return lhs.ingestSeq < rhs.ingestSeq;
+    return lhs.kind < rhs.kind;
+  });
   result.trades = session.trades.size();
   result.bookTickers = session.bookTickers.size();
   result.depths = session.depths.size();
@@ -710,9 +792,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!reportProgress(0, timeline.size(), "running", progressCallback, userData)) {
     result.status = Status::Cancelled;
     result.error = "cancelled";
-    (void)detail::writeResult(result, engine);
+    (void)writeArtifacts(engine);
     return result;
   }
+  std::size_t deliveryCursor = 0u;
   for (std::size_t i = 0; i < timeline.size(); ++i) {
     const detail::TimelineEvent& event = timeline[i];
     if (!runUntil(*descriptor, state.data(), engine, shard, control, event.tsNs, request)) {
@@ -721,65 +804,85 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       populateResultPnl(result, engine);
       result.orders = engine.orders.size();
       result.fills = engine.fills.size();
-      (void)detail::writeResult(result, engine);
+      (void)writeArtifacts(engine);
       return result;
     }
-    if (event.kind == 0) {
-      const auto delta = detail::toRuntime(session.depths[event.index]);
-      hft_trader::core::copyDepthSnapshot(engine.snapshot, delta);
-      if (engine.orderBook.initialized.raw != hft_trader::core::kAlgoFlagTrue.raw) {
-        hft_trader::core::LocalOrderBookConfig bookConfig{};
-        bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
-        bookConfig.tickSizeRaw = instrument.tickSizeRaw;
-        hft_trader::core::applySnapshot(engine.orderBook, detail::toRuntimeSnapshot(session.depths[event.index]), selectedSymbol, bookConfig);
-      } else {
-        (void)hft_trader::core::applyDelta(engine.orderBook, delta);
+    while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs < event.tsNs) {
+      const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
+      applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
+      if (!runCycle(*descriptor, state.data(), engine, shard, control, delivered.deliveryTsNs, request, nullptr)) {
+        result.status = Status::InvalidArgument;
+        result.error = "strategy runCycle failed on delivered market event";
+        populateResultPnl(result, engine);
+        result.orders = engine.orders.size();
+        result.fills = engine.fills.size();
+        (void)writeArtifacts(engine);
+        return result;
       }
-      hft_trader::core::bindOrderBookSnapshot(engine.snapshot, engine.orderBook);
-    } else if (event.kind == 1) {
-      const auto trade = detail::toRuntime(session.trades[event.index]);
-      hft_trader::core::copyTradeSnapshot(engine.snapshot, trade);
-      detail::tryFillOnTrade(engine, trade);
-    } else {
-      const auto ticker = detail::toRuntime(session.bookTickers[event.index]);
-      hft_trader::core::copyBookTickerSnapshot(engine.snapshot, ticker);
-      (void)hft_trader::core::applyBookTicker(engine.orderBook, ticker);
-      hft_trader::core::bindOrderBookSnapshot(engine.snapshot, engine.orderBook);
-      detail::tryFillOnTop(engine, event.tsNs);
+      (void)detail::appendRiskSnapshotIfDue(engine, delivered.deliveryTsNs);
     }
-    if (!runCycle(*descriptor, state.data(), engine, shard, control, event.tsNs, request, nullptr)) {
-      result.status = Status::InvalidArgument;
-      result.error = "strategy runCycle failed on market event";
-      populateResultPnl(result, engine);
-      result.orders = engine.orders.size();
-      result.fills = engine.fills.size();
-      (void)detail::writeResult(result, engine);
-      return result;
-    }
+    applyMarketEventToSnapshots(engine, session, event, selectedSymbol, instrument, false);
     (void)detail::appendRiskSnapshotIfDue(engine, event.tsNs);
+    while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs <= event.tsNs) {
+      const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
+      applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
+      if (!runCycle(*descriptor, state.data(), engine, shard, control, delivered.deliveryTsNs, request, nullptr)) {
+        result.status = Status::InvalidArgument;
+        result.error = "strategy runCycle failed on delivered market event";
+        populateResultPnl(result, engine);
+        result.orders = engine.orders.size();
+        result.fills = engine.fills.size();
+        (void)writeArtifacts(engine);
+        return result;
+      }
+      (void)detail::appendRiskSnapshotIfDue(engine, delivered.deliveryTsNs);
+    }
     if (!runUntil(*descriptor, state.data(), engine, shard, control, event.tsNs, request)) {
       result.status = Status::InvalidArgument;
       result.error = "strategy event loop did not settle after market event";
       populateResultPnl(result, engine);
       result.orders = engine.orders.size();
       result.fills = engine.fills.size();
-      (void)detail::writeResult(result, engine);
+      (void)writeArtifacts(engine);
       return result;
     }
     if ((i % 1024u) == 0u && !reportProgress(i, timeline.size(), "running", progressCallback, userData)) {
       result.status = Status::Cancelled;
       result.error = "cancelled";
-      (void)detail::writeResult(result, engine);
+      (void)writeArtifacts(engine);
       return result;
     }
   }
-  if (!settleAfterReplay(*descriptor, state.data(), engine, shard, control, result.lastTsNs, request)) {
+  while (deliveryCursor < deliveryTimeline.size()) {
+    const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
+    if (!runUntil(*descriptor, state.data(), engine, shard, control, delivered.deliveryTsNs, request)) {
+      result.status = Status::InvalidArgument;
+      result.error = "strategy event loop did not settle before delayed market event";
+      populateResultPnl(result, engine);
+      result.orders = engine.orders.size();
+      result.fills = engine.fills.size();
+      (void)writeArtifacts(engine);
+      return result;
+    }
+    applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
+    if (!runCycle(*descriptor, state.data(), engine, shard, control, delivered.deliveryTsNs, request, nullptr)) {
+      result.status = Status::InvalidArgument;
+      result.error = "strategy runCycle failed on delayed market event";
+      populateResultPnl(result, engine);
+      result.orders = engine.orders.size();
+      result.fills = engine.fills.size();
+      (void)writeArtifacts(engine);
+      return result;
+    }
+    (void)detail::appendRiskSnapshotIfDue(engine, delivered.deliveryTsNs);
+  }
+  if (!settleAfterReplay(*descriptor, state.data(), engine, shard, control, result.lastTsNs, effectiveRequest)) {
     result.status = Status::InvalidArgument;
     result.error = "strategy event loop did not settle after replay";
     populateResultPnl(result, engine);
     result.orders = engine.orders.size();
     result.fills = engine.fills.size();
-    (void)detail::writeResult(result, engine);
+      (void)writeArtifacts(engine);
     return result;
   }
   const std::int64_t finalTsNs = result.lastTsNs > 0 ? result.lastTsNs + 1 : result.lastTsNs;
@@ -791,11 +894,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.fills = engine.fills.size();
   if (result.strategy == "backtest_probe" && !validateBacktestProbeCoverage(result, engine, result.error)) {
     result.status = Status::CorruptData;
-    (void)detail::writeResult(result, engine);
+    (void)writeArtifacts(engine);
     return result;
   }
   result.status = Status::Ok;
-  Status writeStatus = detail::writeResult(result, engine);
+  Status writeStatus = writeArtifacts(engine);
   if (!isOk(writeStatus)) result.status = writeStatus;
   (void)reportProgress(timeline.size(), timeline.size(), "complete", progressCallback, userData);
   return result;

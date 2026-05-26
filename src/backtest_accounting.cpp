@@ -68,8 +68,8 @@ std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
   if (engine.netQtyRaw == 0 || engine.entryPriceE8 <= 0) return 0;
   const bool longPosition = engine.netQtyRaw > 0;
   const std::int64_t qty = longPosition ? engine.netQtyRaw : -engine.netQtyRaw;
-  const std::int64_t bid = engine.snapshot.lastBookTicker.bid.px.raw;
-  const std::int64_t ask = engine.snapshot.lastBookTicker.ask.px.raw;
+  const std::int64_t bid = engine.venueSnapshot.lastBookTicker.bid.px.raw;
+  const std::int64_t ask = engine.venueSnapshot.lastBookTicker.ask.px.raw;
   if (longPosition) return bid > 0 ? mulPriceQtyE8(bid - engine.entryPriceE8, qty) : 0;
   return ask > 0 ? mulPriceQtyE8(engine.entryPriceE8 - ask, qty) : 0;
 }
@@ -102,8 +102,8 @@ void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t rea
                                                   engine.walletBalanceE8,
                                                   engine.netQtyRaw,
                                                   engine.entryPriceE8,
-                                                  engine.snapshot.lastBookTicker.bid.px.raw,
-                                                  engine.snapshot.lastBookTicker.ask.px.raw,
+                                                  engine.venueSnapshot.lastBookTicker.bid.px.raw,
+                                                  engine.venueSnapshot.lastBookTicker.ask.px.raw,
                                                   static_cast<std::uint64_t>(engine.fills.size()),
                                                   reason});
   engine.lastRiskSnapshotTsNs = tsNs;

@@ -209,7 +209,10 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
   out << indent << q << "net_realized_pnl_e8" << q << ": " << result.netRealizedPnlE8 << ",\n";
   out << indent << q << "realized_pnl_e8" << q << ": " << result.realizedPnlE8 << ",\n";
   out << indent << q << "unrealized_pnl_e8" << q << ": " << result.unrealizedPnlE8 << ",\n";
-  out << indent << q << "total_pnl_e8" << q << ": " << result.totalPnlE8 << "\n";
+  out << indent << q << "total_pnl_e8" << q << ": " << result.totalPnlE8 << ",\n";
+  out << indent << q << "max_drawdown_e8" << q << ": " << result.maxDrawdownE8 << ",\n";
+  out << indent << q << "mfe_e8" << q << ": " << result.mfeE8 << ",\n";
+  out << indent << q << "mae_e8" << q << ": " << result.maeE8 << "\n";
 }
 
 bool writeRunConfig(const std::filesystem::path& resultDir, const std::filesystem::path& configPath) noexcept {
@@ -236,7 +239,16 @@ bool writeManifest(const std::filesystem::path& path, const BacktestRunResult& r
   out << "  " << q << "indicator_profile" << q << ": " << quote(result.indicatorProfile) << ",\n";
   out << "  " << q << "session_path" << q << ": " << quote(result.sessionPath.generic_string()) << ",\n";
   out << "  " << q << "config_path" << q << ": " << quote("config.ini") << ",\n";
-  out << "  " << q << "execution" << q << ": {" << q << "order_latency_us" << q << ": " << result.orderLatencyUs
+  out << "  " << q << "execution" << q << ": {"
+      << q << "latency_model" << q << ": " << q << "realistic_tail_v1" << q
+      << ", " << q << "latency_seed" << q << ": " << result.latencySeed
+      << ", " << q << "market_data" << q << ": {" << q << "base_us" << q << ": " << result.marketDataLatency.baseUs
+      << ", " << q << "jitter_us" << q << ": " << result.marketDataLatency.jitterUs << "}"
+      << ", " << q << "market_order" << q << ": {" << q << "base_us" << q << ": " << result.marketOrderLatency.baseUs
+      << ", " << q << "jitter_us" << q << ": " << result.marketOrderLatency.jitterUs << "}"
+      << ", " << q << "limit_order" << q << ": {" << q << "base_us" << q << ": " << result.limitOrderLatency.baseUs
+      << ", " << q << "jitter_us" << q << ": " << result.limitOrderLatency.jitterUs << "}"
+      << ", " << q << "order_latency_us" << q << ": " << result.orderLatencyUs
       << ", " << q << "amend_latency_us" << q << ": " << result.amendLatencyUs
       << ", " << q << "cancel_latency_us" << q << ": " << result.cancelLatencyUs << "},\n";
   out << "  " << q << "streams" << q << ": {\n";

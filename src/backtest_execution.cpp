@@ -160,8 +160,8 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
 }
 
 void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
-  const std::int64_t bid = engine.snapshot.lastBookTicker.bid.px.raw;
-  const std::int64_t ask = engine.snapshot.lastBookTicker.ask.px.raw;
+  const std::int64_t bid = engine.venueSnapshot.lastBookTicker.bid.px.raw;
+  const std::int64_t ask = engine.venueSnapshot.lastBookTicker.ask.px.raw;
   if (bid <= 0 || ask <= 0) return;
   for (OpenOrder& order : engine.open) {
     if (!order.state.valid || !order.active) continue;
@@ -202,7 +202,8 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
     if (action.kind == PendingActionKind::CancelAck && action.recordIndex < engine.orders.size()) {
       engine.orders[action.recordIndex].activeTsNs = action.activeTsNs;
       engine.orders[action.recordIndex].status = "acked";
-    } else if (action.kind == PendingActionKind::AmendAck && action.replaceCancelRecordIndex < engine.orders.size()) {
+    } else if (action.kind == PendingActionKind::AmendAck && action.replaceCancelRecordIndex < engine.orders.size() &&
+               engine.orders[action.replaceCancelRecordIndex].status != "acked") {
       engine.orders[action.replaceCancelRecordIndex].activeTsNs = action.activeTsNs;
       engine.orders[action.replaceCancelRecordIndex].status = "acked";
     }
@@ -224,6 +225,10 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
     } else if (action.kind == PendingActionKind::CancelAck) {
       if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "cancelled";
       order = OpenOrder{};
+    } else if (action.kind == PendingActionKind::ReplaceCancelAck) {
+      if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "cancelled";
+      if (action.replaceCancelRecordIndex < engine.orders.size()) engine.orders[action.replaceCancelRecordIndex].status = "acked";
+      order.active = false;
     } else if (action.kind == PendingActionKind::AmendAck) {
       if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "cancelled";
       order.state.clientIntentId = action.amend.clientIntentId;
@@ -252,7 +257,7 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
 
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs) {
   if (engine.netQtyRaw == 0) return true;
-  if (engine.snapshot.lastBookTicker.bid.px.raw <= 0 || engine.snapshot.lastBookTicker.ask.px.raw <= 0) return false;
+  if (engine.venueSnapshot.lastBookTicker.bid.px.raw <= 0 || engine.venueSnapshot.lastBookTicker.ask.px.raw <= 0) return false;
 
   hft_trader::core::OrderIntent intent{};
   intent.clientIntentId.raw = nextOrderId(engine);
@@ -268,6 +273,25 @@ bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t or
   applyIntents(engine, io, tsNs, orderLatencyUs, 0u, 0u);
   applyDueActions(engine, delayedTs(tsNs, orderLatencyUs));
   return engine.netQtyRaw == 0;
+}
+
+bool forceClosePosition(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency) {
+  if (engine.netQtyRaw == 0) return true;
+  if (engine.venueSnapshot.lastBookTicker.bid.px.raw <= 0 || engine.venueSnapshot.lastBookTicker.ask.px.raw <= 0) return false;
+
+  hft_trader::core::OrderIntent intent{};
+  intent.clientIntentId.raw = nextOrderId(engine);
+  intent.side = engine.netQtyRaw > 0 ? Side::Sell() : Side::Buy();
+  intent.orderType = canon::OrderType::Market;
+  intent.qty.raw = engine.netQtyRaw > 0 ? engine.netQtyRaw : -engine.netQtyRaw;
+  intent.reduceOnly = true;
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{intent};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, tsNs, latency);
+  return true;
 }
 
 void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, std::uint64_t cancelLatencyUs) {
@@ -288,6 +312,25 @@ void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, std::uint64_t canc
   io.cancelCount = cancelCount;
   applyIntents(engine, io, tsNs, 0u, 0u, cancelLatencyUs);
   applyDueActions(engine, delayedTs(tsNs, cancelLatencyUs));
+}
+
+void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency) {
+  std::array<hft_trader::core::CancelIntent, kMaxOrderStates> cancels{};
+  std::size_t cancelCount = 0;
+  std::uint64_t commandId = nextOrderId(engine);
+  for (const OpenOrder& order : engine.open) {
+    if (!order.state.valid || cancelCount >= cancels.size()) continue;
+    hft_trader::core::CancelIntent& intent = cancels[cancelCount++];
+    intent.clientIntentId.raw = commandId++;
+    intent.targetClientIntentId = order.state.clientIntentId;
+    intent.targetOrderType = order.state.orderType;
+  }
+  if (cancelCount == 0) return;
+
+  hft_trader::core::StrategyIo io{};
+  io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancelCount);
+  io.cancelCount = cancelCount;
+  applyIntents(engine, io, tsNs, latency);
 }
 
 void applyIntents(EngineState& engine,
@@ -321,9 +364,118 @@ void applyIntents(EngineState& engine,
   }
   for (std::size_t i = 0; i < io.amendCount; ++i) {
     const auto& intent = io.amendOut[i];
-    const std::int64_t activeTs = delayedTs(tsNs, amendLatencyUs);
+    const std::int64_t cancelTs = delayedTs(tsNs, cancelLatencyUs);
+    const std::int64_t activeTs = delayedTs(cancelTs, amendLatencyUs);
     const std::size_t cancelRecordIndex = engine.orders.size();
+    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, cancelTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
+    const std::size_t replacementRecordIndex = engine.orders.size();
+    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", "limit", "pending", intent.price.raw, intent.qty.raw, false});
+    const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
+    if (slotIndex != kNoRecordIndex) {
+      OpenOrder& order = engine.open[slotIndex];
+      order.state.amendPending = true;
+      order.state.cancelPending = true;
+      order.state.pendingClientIntentId = intent.clientIntentId;
+      order.state.desiredClientIntentId = intent.clientIntentId;
+      order.state.desiredPrice = intent.price;
+      order.state.desiredQty = intent.qty;
+      order.state.state = hft_trader::core::StrategyOrderLocalState::AmendPending;
+      PendingAction cancelAction{};
+      cancelAction.kind = PendingActionKind::ReplaceCancelAck;
+      cancelAction.slotIndex = slotIndex;
+      cancelAction.recordIndex = replacementRecordIndex;
+      cancelAction.replaceCancelRecordIndex = cancelRecordIndex;
+      cancelAction.activeTsNs = cancelTs;
+      cancelAction.targetClientIntentId = intent.targetClientIntentId;
+      cancelAction.commandClientIntentId = intent.clientIntentId;
+      cancelAction.amend = intent;
+      engine.pending.push_back(cancelAction);
+      PendingAction orderAction{};
+      orderAction.kind = PendingActionKind::AmendAck;
+      orderAction.slotIndex = slotIndex;
+      orderAction.recordIndex = replacementRecordIndex;
+      orderAction.replaceCancelRecordIndex = cancelRecordIndex;
+      orderAction.activeTsNs = activeTs;
+      orderAction.targetClientIntentId = intent.targetClientIntentId;
+      orderAction.commandClientIntentId = intent.clientIntentId;
+      orderAction.amend = intent;
+      engine.pending.push_back(orderAction);
+    } else {
+      engine.orders[cancelRecordIndex].status = "missing";
+      engine.orders[replacementRecordIndex].status = "missing";
+    }
+  }
+  for (std::size_t i = 0; i < io.orderCount; ++i) {
+    const auto& intent = io.orderOut[i];
+    const std::int64_t activeTs = delayedTs(tsNs, orderLatencyUs);
+    const std::size_t recordIndex = engine.orders.size();
+    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", intent.orderType == canon::OrderType::Market ? "market" : "limit", "pending", intent.price.raw, intent.qty.raw, intent.reduceOnly});
+    if (intent.reduceOnly) ++engine.reduceOnlyOrders;
+    const std::size_t slotIndex = findFreeIndex(engine);
+    if (slotIndex != kNoRecordIndex) {
+      OpenOrder& slot = engine.open[slotIndex];
+      slot.state.valid = true;
+      slot.state.clientIntentId = intent.clientIntentId;
+      slot.state.desiredClientIntentId = intent.clientIntentId;
+      slot.state.quoteSlotId = intent.quoteSlotId;
+      slot.state.side = intent.side;
+      slot.state.orderType = intent.orderType;
+      slot.state.price = intent.price;
+      slot.state.qty = intent.qty;
+      slot.state.state = hft_trader::core::StrategyOrderLocalState::LiveLocal;
+      slot.recordIndex = recordIndex;
+      slot.createdTsNs = tsNs;
+      slot.activeTsNs = activeTs;
+      slot.active = false;
+      slot.reduceOnly = intent.reduceOnly;
+      PendingAction action{};
+      action.kind = PendingActionKind::OrderAck;
+      action.slotIndex = slotIndex;
+      action.recordIndex = recordIndex;
+      action.activeTsNs = activeTs;
+      action.targetClientIntentId = intent.clientIntentId;
+      action.commandClientIntentId = intent.clientIntentId;
+      engine.pending.push_back(action);
+    } else {
+      engine.orders[recordIndex].status = "rejected";
+    }
+  }
+  applyDueActions(engine, tsNs);
+}
+
+void applyIntents(EngineState& engine,
+                  const hft_trader::core::StrategyIo& io,
+                  std::int64_t tsNs,
+                  BacktestLatencyRuntime& latency) {
+  for (std::size_t i = 0; i < io.cancelCount; ++i) {
+    const auto& intent = io.cancelOut[i];
+    const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
+    const std::size_t recordIndex = engine.orders.size();
     engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
+    const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
+    if (slotIndex != kNoRecordIndex) {
+      OpenOrder& order = engine.open[slotIndex];
+      order.state.cancelPending = true;
+      order.state.pendingClientIntentId = intent.clientIntentId;
+      order.state.state = hft_trader::core::StrategyOrderLocalState::CancelPending;
+      PendingAction action{};
+      action.kind = PendingActionKind::CancelAck;
+      action.slotIndex = slotIndex;
+      action.recordIndex = recordIndex;
+      action.activeTsNs = activeTs;
+      action.targetClientIntentId = intent.targetClientIntentId;
+      action.commandClientIntentId = intent.clientIntentId;
+      engine.pending.push_back(action);
+    } else {
+      engine.orders[recordIndex].status = "missing";
+    }
+  }
+  for (std::size_t i = 0; i < io.amendCount; ++i) {
+    const auto& intent = io.amendOut[i];
+    const std::int64_t cancelTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
+    const std::int64_t activeTs = delayedTs(cancelTs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
+    const std::size_t cancelRecordIndex = engine.orders.size();
+    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, cancelTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
     const std::size_t replacementRecordIndex = engine.orders.size();
     engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", "limit", "pending", intent.price.raw, intent.qty.raw, false});
     const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
@@ -353,7 +505,10 @@ void applyIntents(EngineState& engine,
   }
   for (std::size_t i = 0; i < io.orderCount; ++i) {
     const auto& intent = io.orderOut[i];
-    const std::int64_t activeTs = delayedTs(tsNs, orderLatencyUs);
+    const BacktestLatencyChannel channel = intent.orderType == canon::OrderType::Market
+        ? BacktestLatencyChannel::MarketOrder
+        : BacktestLatencyChannel::LimitOrder;
+    const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, channel));
     const std::size_t recordIndex = engine.orders.size();
     engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", intent.orderType == canon::OrderType::Market ? "market" : "limit", "pending", intent.price.raw, intent.qty.raw, intent.reduceOnly});
     if (intent.reduceOnly) ++engine.reduceOnlyOrders;
