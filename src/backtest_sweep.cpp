@@ -47,7 +47,7 @@ bool writePointConfig(const BacktestSweepRequest& request,
 }
 
 bool validateSweepRequest(const BacktestSweepRequest& request, std::string& error) {
-  if (request.baseRun.sessionPath.empty() || request.baseRun.configPath.empty()) {
+  if ((request.baseRun.sessionPath.empty() && request.baseRun.sessions.empty()) || request.baseRun.configPath.empty()) {
     error = "session_path and config_path are required";
     return false;
   }

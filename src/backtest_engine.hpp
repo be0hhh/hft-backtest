@@ -5,10 +5,10 @@
 #include "backtest_latency.hpp"
 #include "session_loader.hpp"
 
-#include "hft_trader/core/LocalOrderBook.hpp"
-#include "hft_trader/core/OrderState.hpp"
-#include "hft_trader/core/PositionState.hpp"
-#include "hft_trader/core/StrategyContract.hpp"
+#include "hft_trader/core/market/LocalOrderBook.hpp"
+#include "hft_trader/core/intents/OrderState.hpp"
+#include "hft_trader/core/intents/PositionState.hpp"
+#include "hft_trader/core/strategy/StrategyContract.hpp"
 
 #include "canon/PositionAndExchange.hpp"
 #include "canon/Subtypes.hpp"
@@ -47,6 +47,7 @@ enum class PendingActionKind : std::uint8_t {
 };
 
 struct JsonOrder {
+  std::uint32_t legIndex{0u};
   std::uint64_t id{0};
   std::uint64_t targetId{0};
   std::int64_t submitTsNs{0};
@@ -62,6 +63,7 @@ struct JsonOrder {
 };
 
 struct JsonFill {
+  std::uint32_t legIndex{0u};
   std::uint64_t orderId{0};
   std::int64_t entryTsNs{0};
   std::int64_t exitTsNs{0};
@@ -176,7 +178,9 @@ struct EngineState {
   hft_trader::core::LocalOrderBookState orderBook{};
   hft_trader::core::LocalOrderBookState venueOrderBook{};
   BacktestInputCoverage inputCoverage{};
+  std::uint32_t legIndex{0u};
   ExchangeId exchange{};
+  canon::MarketType market{};
   Symbol symbol{};
   std::vector<cxet::composite::UserDataEvent> userEvents{};
   BacktestLatencyRuntime latency{};
@@ -204,6 +208,7 @@ struct TimelineEvent {
   std::int64_t deliveryTsNs{0};
   std::int64_t ingestSeq{0};
   std::uint8_t kind{0};
+  std::uint8_t legIndex{0};
   std::size_t index{0};
 };
 
@@ -229,7 +234,9 @@ void appendEquityPoint(EngineState& engine, std::int64_t tsNs);
 void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t reason);
 bool appendRiskSnapshotIfDue(EngineState& engine, std::int64_t tsNs);
 
-std::vector<hft_trader::core::StrategyOrderState> visibleOrders(const EngineState& engine);
+std::size_t visibleOrders(const EngineState& engine,
+                          hft_trader::core::StrategyOrderState* out,
+                          std::size_t capacity) noexcept;
 std::int64_t delayedTs(std::int64_t tsNs, std::uint64_t latencyUs) noexcept;
 bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std::int64_t tsNs, bool taker);
 void tryFillOnTop(EngineState& engine, std::int64_t tsNs);
@@ -251,6 +258,7 @@ void applyIntents(EngineState& engine,
                   BacktestLatencyRuntime& latency);
 
 void buildTimeline(const SessionData& session, std::vector<TimelineEvent>& out);
+void buildTimeline(const std::vector<SessionData>& sessions, std::vector<TimelineEvent>& out);
 Status writeResult(const BacktestRunResult& result, const EngineState& engine) noexcept;
 
 }  // namespace hft_backtest::detail

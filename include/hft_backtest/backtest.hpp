@@ -16,8 +16,22 @@ struct BacktestLatencyProfile {
   std::uint64_t jitterUs{0};
 };
 
+struct BacktestSessionRequest {
+  std::filesystem::path path{};
+  std::string venue{};
+  std::string symbol{};
+};
+
+struct BacktestFeeSchedule {
+  std::string exchange{};
+  std::string market{};
+  std::int64_t makerFeeBpsE8{0};
+  std::int64_t takerFeeBpsE8{0};
+};
+
 struct BacktestRunRequest {
   std::filesystem::path sessionPath{};
+  std::vector<BacktestSessionRequest> sessions{};
   std::filesystem::path configPath{};
   std::filesystem::path outputPath{};
   std::string requestId{};
@@ -34,6 +48,7 @@ struct BacktestRunRequest {
   std::int64_t initialBalanceE8{0};
   std::int64_t makerFeeBpsE8{0};
   std::int64_t takerFeeBpsE8{0};
+  std::vector<BacktestFeeSchedule> feeSchedules{};
   bool writeArtifacts{true};
 };
 
@@ -54,6 +69,29 @@ struct BacktestInputCoverage {
   std::uint64_t seedM1Candles{0};
   std::uint64_t seedM15Candles{0};
   std::uint64_t seedD1Candles{0};
+};
+
+struct BacktestLegSummary {
+  std::filesystem::path sessionPath{};
+  std::string exchange{};
+  std::string market{};
+  std::string symbol{};
+  std::int64_t makerFeeBpsE8{0};
+  std::int64_t takerFeeBpsE8{0};
+  std::uint64_t orders{0};
+  std::uint64_t fills{0};
+  std::uint64_t userEvents{0};
+  std::uint64_t timerWakeEvents{0};
+  std::uint64_t reduceOnlyOrders{0};
+  std::uint64_t reduceOnlyFills{0};
+  std::int64_t grossRealizedPnlE8{0};
+  std::int64_t feesPaidE8{0};
+  std::int64_t netRealizedPnlE8{0};
+  std::int64_t unrealizedPnlE8{0};
+  std::int64_t totalPnlE8{0};
+  std::int64_t walletDeltaE8{0};
+  std::int64_t openPositionQtyE8{0};
+  bool strategyClosed{false};
 };
 
 struct BacktestRunResult {
@@ -98,6 +136,7 @@ struct BacktestRunResult {
   std::int64_t maeE8{0};
   std::int64_t openPositionQtyE8{0};
   std::vector<std::int64_t> totalPnlCurveE8{};
+  std::vector<BacktestLegSummary> legs{};
   BacktestInputCoverage inputCoverage{};
   bool strategyClosed{false};
 };

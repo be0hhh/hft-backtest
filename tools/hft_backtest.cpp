@@ -13,7 +13,7 @@
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--strategy NAME] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N]\n";
+  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {
@@ -33,6 +33,8 @@ bool parseI64Text(const char* first, const char* last, std::int64_t& out) noexce
   const auto parsed = std::from_chars(first, last, out);
   return parsed.ec == std::errc{} && parsed.ptr == last;
 }
+
+bool parseDecimalE8(const char* text, std::int64_t& out) noexcept;
 
 bool parseSweepParam(const char* text, hft_backtest::BacktestSweepParamRange& out) {
   if (!text || *text == '\0') return false;
@@ -59,6 +61,30 @@ bool parseSweepParam(const char* text, hft_backtest::BacktestSweepParamRange& ou
     if (mode == "grid" || mode == "sweep") out.mode = hft_backtest::BacktestSweepParamMode::Grid;
     else return false;
   }
+  return true;
+}
+
+bool parseFeeSchedule(const char* text, hft_backtest::BacktestFeeSchedule& out) noexcept {
+  if (!text || *text == '\0') return false;
+  const char* exchangeEnd = std::strchr(text, ':');
+  if (!exchangeEnd || exchangeEnd == text) return false;
+  const char* marketFirst = exchangeEnd + 1;
+  const char* marketEnd = std::strchr(marketFirst, ':');
+  if (!marketEnd || marketEnd == marketFirst) return false;
+  const char* makerFirst = marketEnd + 1;
+  const char* makerEnd = std::strchr(makerFirst, ':');
+  if (!makerEnd || makerEnd == makerFirst) return false;
+  const char* takerFirst = makerEnd + 1;
+  if (*takerFirst == '\0') return false;
+  std::string maker(makerFirst, static_cast<std::size_t>(makerEnd - makerFirst));
+  std::int64_t makerE8 = 0;
+  std::int64_t takerE8 = 0;
+  if (!parseDecimalE8(maker.c_str(), makerE8) || makerE8 < 0) return false;
+  if (!parseDecimalE8(takerFirst, takerE8) || takerE8 < 0) return false;
+  out.exchange.assign(text, static_cast<std::size_t>(exchangeEnd - text));
+  out.market.assign(marketFirst, static_cast<std::size_t>(marketEnd - marketFirst));
+  out.makerFeeBpsE8 = makerE8;
+  out.takerFeeBpsE8 = takerE8;
   return true;
 }
 
@@ -116,6 +142,12 @@ int main(int argc, char** argv) {
     };
     if (std::strcmp(arg, "--session") == 0) {
       if (const char* value = needValue(arg)) request.sessionPath = value;
+    } else if (std::strcmp(arg, "--leg-session") == 0) {
+      if (const char* value = needValue(arg)) {
+        hft_backtest::BacktestSessionRequest session{};
+        session.path = value;
+        request.sessions.push_back(session);
+      }
     } else if (std::strcmp(arg, "--config") == 0) {
       if (const char* value = needValue(arg)) request.configPath = value;
     } else if (std::strcmp(arg, "--strategy") == 0) {
@@ -164,6 +196,12 @@ int main(int argc, char** argv) {
       if (const char* value = needValue(arg); value && (!parseDecimalE8(value, request.makerFeeBpsE8) || request.makerFeeBpsE8 < 0)) return 2;
     } else if (std::strcmp(arg, "--taker-fee-bps") == 0) {
       if (const char* value = needValue(arg); value && (!parseDecimalE8(value, request.takerFeeBpsE8) || request.takerFeeBpsE8 < 0)) return 2;
+    } else if (std::strcmp(arg, "--fee") == 0) {
+      if (const char* value = needValue(arg)) {
+        hft_backtest::BacktestFeeSchedule schedule{};
+        if (!parseFeeSchedule(value, schedule)) return 2;
+        request.feeSchedules.push_back(std::move(schedule));
+      }
     } else if (std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--help") == 0) {
       printUsage();
       return 0;
@@ -173,7 +211,7 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if (request.sessionPath.empty() || request.configPath.empty()) {
+  if ((request.sessionPath.empty() && request.sessions.empty()) || request.configPath.empty()) {
     printUsage();
     return 2;
   }

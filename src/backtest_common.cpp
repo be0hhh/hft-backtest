@@ -49,7 +49,7 @@ ExchangeId exchangeFromText(const std::string& value) noexcept {
 }
 
 canon::MarketType marketFromText(const std::string& value) noexcept {
-  if (value == "futures" || value == "futures_usd") return canon::kMarketTypeFutures;
+  if (value == "futures" || value == "futures_usd" || value == "usdt" || value == "usdc" || value == "linear") return canon::kMarketTypeFutures;
   if (value == "spot") return canon::kMarketTypeSpot;
   if (value == "swap") return canon::kMarketTypeSwap;
   return canon::kMarketTypeUnknown;

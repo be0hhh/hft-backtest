@@ -8,6 +8,8 @@ inline constexpr StrategyMetadata kStrategies[] = {
         .id = "spread_maker1and2",
         .displayNameRu = "Спред-мейкер 1/2",
         .configTemplateFile = "1and2.ini",
+        .minSessionCount = 1u,
+        .maxSessionCount = 1u,
         .paramCount = 7u,
         .params = {
             StrategyParamMetadata{"distance_bps", "Дистанция котировки, bps", "На сколько базисных пунктов отступать от текущего bid/ask при выставлении лимитных заявок.", "250", StrategyParamKind::Uint, 0u, true, false, true},
@@ -25,6 +27,8 @@ inline constexpr StrategyMetadata kStrategies[] = {
         .id = "backtest_probe",
         .displayNameRu = "Диагностический backtest probe",
         .configTemplateFile = "probe.ini",
+        .minSessionCount = 1u,
+        .maxSessionCount = 1u,
         .indicatorCount = 2u,
         .indicators = {
             StrategyIndicatorMetadata{"trade_range", "Trade range"},

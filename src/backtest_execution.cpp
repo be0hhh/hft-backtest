@@ -1,6 +1,6 @@
 #include "backtest_engine.hpp"
 
-#include "hft_trader/runtime/ClientOrderId.hpp"
+#include "hft_trader/runtime/order/ClientOrderId.hpp"
 
 #include <array>
 #include <limits>
@@ -49,6 +49,8 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
                                              std::int64_t priceE8,
                                              std::int64_t qtyE8,
                                              std::int64_t tsNs,
+                                             std::int64_t feeE8,
+                                             std::int64_t realizedPnlE8,
                                              bool taker) noexcept {
   cxet::composite::UserDataEvent event{};
   event.exchangeId = engine.exchange;
@@ -68,6 +70,8 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
   event.qty.raw = qtyE8;
   event.filledQty.raw = qtyE8;
   event.lastFilledQty.raw = qtyE8;
+  event.fee.raw = feeE8;
+  event.realizedPnl.raw = realizedPnlE8;
   event.eventTime.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   event.updateTime = event.eventTime;
   event.reduceOnly = order.reduceOnly ? 1u : 0u;
@@ -121,13 +125,17 @@ bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
 
 }  // namespace
 
-std::vector<hft_trader::core::StrategyOrderState> visibleOrders(const EngineState& engine) {
-  std::vector<hft_trader::core::StrategyOrderState> out;
-  out.reserve(kMaxOrderStates);
+std::size_t visibleOrders(const EngineState& engine,
+                          hft_trader::core::StrategyOrderState* out,
+                          std::size_t capacity) noexcept {
+  if (!out || capacity == 0u) return 0u;
+  std::size_t count = 0u;
   for (const OpenOrder& order : engine.open) {
-    if (order.state.valid) out.push_back(order.state);
+    if (!order.state.valid) continue;
+    if (count >= capacity) break;
+    out[count++] = order.state;
   }
-  return out;
+  return count;
 }
 
 std::int64_t delayedTs(std::int64_t tsNs, std::uint64_t latencyUs) noexcept {
@@ -140,9 +148,12 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
   if (!order.state.valid || !order.active || order.state.qty.raw <= 0 || priceE8 <= 0) return false;
   const std::int64_t fillQty = reduceOnlyFillQty(engine, order);
   if (fillQty <= 0) return rejectOrder(engine, order, tsNs);
+  const std::int64_t feeBpsE8 = taker ? engine.takerFeeBpsE8 : engine.makerFeeBpsE8;
+  const std::int64_t feeE8 = feeForFillE8(priceE8, fillQty, feeBpsE8);
   std::int64_t netRealized = 0;
-  updatePosition(engine, order.state.side, priceE8, fillQty, tsNs, taker ? engine.takerFeeBpsE8 : engine.makerFeeBpsE8, netRealized);
-  engine.fills.push_back(JsonFill{order.state.clientIntentId.raw,
+  updatePosition(engine, order.state.side, priceE8, fillQty, tsNs, feeBpsE8, netRealized);
+  engine.fills.push_back(JsonFill{engine.legIndex,
+                                  order.state.clientIntentId.raw,
                                   order.activeTsNs,
                                   tsNs,
                                   order.state.side.raw == Side::Buy().raw ? "buy" : "sell",
@@ -153,7 +164,7 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
   appendEquityPoint(engine, tsNs);
   appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonFill);
   if (order.reduceOnly) ++engine.reduceOnlyFills;
-  engine.userEvents.push_back(makeFillEvent(engine, order, priceE8, fillQty, tsNs, taker));
+  engine.userEvents.push_back(makeFillEvent(engine, order, priceE8, fillQty, tsNs, feeE8, netRealized, taker));
   if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "filled";
   order = OpenOrder{};
   return true;
@@ -343,7 +354,7 @@ void applyIntents(EngineState& engine,
     const auto& intent = io.cancelOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, cancelLatencyUs);
     const std::size_t recordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
     const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
     if (slotIndex != kNoRecordIndex) {
       OpenOrder& order = engine.open[slotIndex];
@@ -367,9 +378,9 @@ void applyIntents(EngineState& engine,
     const std::int64_t cancelTs = delayedTs(tsNs, cancelLatencyUs);
     const std::int64_t activeTs = delayedTs(cancelTs, amendLatencyUs);
     const std::size_t cancelRecordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, cancelTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, cancelTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
     const std::size_t replacementRecordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", "limit", "pending", intent.price.raw, intent.qty.raw, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", "limit", "pending", intent.price.raw, intent.qty.raw, false});
     const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
     if (slotIndex != kNoRecordIndex) {
       OpenOrder& order = engine.open[slotIndex];
@@ -409,7 +420,7 @@ void applyIntents(EngineState& engine,
     const auto& intent = io.orderOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, orderLatencyUs);
     const std::size_t recordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", intent.orderType == canon::OrderType::Market ? "market" : "limit", "pending", intent.price.raw, intent.qty.raw, intent.reduceOnly});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", intent.orderType == canon::OrderType::Market ? "market" : "limit", "pending", intent.price.raw, intent.qty.raw, intent.reduceOnly});
     if (intent.reduceOnly) ++engine.reduceOnlyOrders;
     const std::size_t slotIndex = findFreeIndex(engine);
     if (slotIndex != kNoRecordIndex) {
@@ -451,7 +462,7 @@ void applyIntents(EngineState& engine,
     const auto& intent = io.cancelOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
     const std::size_t recordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
     const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
     if (slotIndex != kNoRecordIndex) {
       OpenOrder& order = engine.open[slotIndex];
@@ -475,9 +486,9 @@ void applyIntents(EngineState& engine,
     const std::int64_t cancelTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
     const std::int64_t activeTs = delayedTs(cancelTs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
     const std::size_t cancelRecordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, cancelTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, cancelTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
     const std::size_t replacementRecordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", "limit", "pending", intent.price.raw, intent.qty.raw, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", "limit", "pending", intent.price.raw, intent.qty.raw, false});
     const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
     if (slotIndex != kNoRecordIndex) {
       OpenOrder& order = engine.open[slotIndex];
@@ -510,7 +521,7 @@ void applyIntents(EngineState& engine,
         : BacktestLatencyChannel::LimitOrder;
     const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, channel));
     const std::size_t recordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", intent.orderType == canon::OrderType::Market ? "market" : "limit", "pending", intent.price.raw, intent.qty.raw, intent.reduceOnly});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", intent.orderType == canon::OrderType::Market ? "market" : "limit", "pending", intent.price.raw, intent.qty.raw, intent.reduceOnly});
     if (intent.reduceOnly) ++engine.reduceOnlyOrders;
     const std::size_t slotIndex = findFreeIndex(engine);
     if (slotIndex != kNoRecordIndex) {

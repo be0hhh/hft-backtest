@@ -57,6 +57,7 @@ bool writeOrders(const std::filesystem::path& path, const EngineState& engine) n
         << ',' << row.priceE8
         << ',' << row.qtyE8
         << ',' << (row.reduceOnly ? 1 : 0)
+        << ',' << row.legIndex
         << "]\n";
   }
   return out.good();
@@ -74,6 +75,7 @@ bool writeFills(const std::filesystem::path& path, const EngineState& engine) no
         << ',' << row.qtyE8
         << ',' << row.realizedPnlE8
         << ',' << (row.reduceOnly ? 1 : 0)
+        << ',' << row.legIndex
         << "]\n";
   }
   return out.good();
@@ -183,8 +185,8 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
   out << indent << q << "trades" << q << ": " << result.trades << ",\n";
   out << indent << q << "booktickers" << q << ": " << result.bookTickers << ",\n";
   out << indent << q << "depths" << q << ": " << result.depths << ",\n";
-  out << indent << q << "orders" << q << ": " << engine.orders.size() << ",\n";
-  out << indent << q << "fills" << q << ": " << engine.fills.size() << ",\n";
+  out << indent << q << "orders" << q << ": " << result.orders << ",\n";
+  out << indent << q << "fills" << q << ": " << result.fills << ",\n";
   out << indent << q << "user_events" << q << ": " << result.userEvents << ",\n";
   out << indent << q << "timer_wake_events" << q << ": " << result.timerWakeEvents << ",\n";
   out << indent << q << "reduce_only_orders" << q << ": " << result.reduceOnlyOrders << ",\n";
@@ -213,6 +215,40 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
   out << indent << q << "max_drawdown_e8" << q << ": " << result.maxDrawdownE8 << ",\n";
   out << indent << q << "mfe_e8" << q << ": " << result.mfeE8 << ",\n";
   out << indent << q << "mae_e8" << q << ": " << result.maeE8 << "\n";
+}
+
+void writeLegsArray(std::ostream& out, const BacktestRunResult& result, const char* indent) {
+  const char q = '"';
+  out << indent << q << "legs" << q << ": [";
+  for (std::size_t i = 0u; i < result.legs.size(); ++i) {
+    const BacktestLegSummary& leg = result.legs[i];
+    if (i != 0u) out << ',';
+    out << "\n" << indent << "  {"
+        << q << "leg_index" << q << ": " << i << ", "
+        << q << "session_path" << q << ": " << quote(leg.sessionPath.generic_string()) << ", "
+        << q << "exchange" << q << ": " << quote(leg.exchange) << ", "
+        << q << "market" << q << ": " << quote(leg.market) << ", "
+        << q << "symbol" << q << ": " << quote(leg.symbol) << ", "
+        << q << "maker_fee_bps_e8" << q << ": " << leg.makerFeeBpsE8 << ", "
+        << q << "taker_fee_bps_e8" << q << ": " << leg.takerFeeBpsE8 << ", "
+        << q << "orders" << q << ": " << leg.orders << ", "
+        << q << "fills" << q << ": " << leg.fills << ", "
+        << q << "user_events" << q << ": " << leg.userEvents << ", "
+        << q << "timer_wake_events" << q << ": " << leg.timerWakeEvents << ", "
+        << q << "reduce_only_orders" << q << ": " << leg.reduceOnlyOrders << ", "
+        << q << "reduce_only_fills" << q << ": " << leg.reduceOnlyFills << ", "
+        << q << "gross_realized_pnl_e8" << q << ": " << leg.grossRealizedPnlE8 << ", "
+        << q << "fees_paid_e8" << q << ": " << leg.feesPaidE8 << ", "
+        << q << "net_realized_pnl_e8" << q << ": " << leg.netRealizedPnlE8 << ", "
+        << q << "unrealized_pnl_e8" << q << ": " << leg.unrealizedPnlE8 << ", "
+        << q << "total_pnl_e8" << q << ": " << leg.totalPnlE8 << ", "
+        << q << "wallet_delta_e8" << q << ": " << leg.walletDeltaE8 << ", "
+        << q << "open_position_qty_e8" << q << ": " << leg.openPositionQtyE8 << ", "
+        << q << "strategy_closed" << q << ": " << (leg.strategyClosed ? "true" : "false")
+        << '}';
+  }
+  if (!result.legs.empty()) out << '\n' << indent;
+  out << ']';
 }
 
 bool writeRunConfig(const std::filesystem::path& resultDir, const std::filesystem::path& configPath) noexcept {
@@ -253,10 +289,10 @@ bool writeManifest(const std::filesystem::path& path, const BacktestRunResult& r
       << ", " << q << "cancel_latency_us" << q << ": " << result.cancelLatencyUs << "},\n";
   out << "  " << q << "streams" << q << ": {\n";
   out << "    " << q << "orders" << q << ": {" << q << "path" << q << ": " << q << "orders.jsonl" << q
-      << ", " << q << "row_schema" << q << ": " << q << "[id,target_id,submit_ts_ns,active_ts_ns,ts_ns,action,side,type,status,price_e8,qty_e8,reduce_only]" << q
+      << ", " << q << "row_schema" << q << ": " << q << "[id,target_id,submit_ts_ns,active_ts_ns,ts_ns,action,side,type,status,price_e8,qty_e8,reduce_only,leg_index]" << q
       << ", " << q << "rows" << q << ": " << engine.orders.size() << "},\n";
   out << "    " << q << "fills" << q << ": {" << q << "path" << q << ": " << q << "fills.jsonl" << q
-      << ", " << q << "row_schema" << q << ": " << q << "[order_id,entry_ts_ns,exit_ts_ns,side,price_e8,qty_e8,realized_pnl_e8,reduce_only]" << q
+      << ", " << q << "row_schema" << q << ": " << q << "[order_id,entry_ts_ns,exit_ts_ns,side,price_e8,qty_e8,realized_pnl_e8,reduce_only,leg_index]" << q
       << ", " << q << "rows" << q << ": " << engine.fills.size() << "},\n";
   out << "    " << q << "equity" << q << ": {" << q << "path" << q << ": " << q << "equity.jsonl" << q
       << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,gross_realized_pnl_e8,realized_pnl_e8,unrealized_pnl_e8,gross_total_pnl_e8,net_total_pnl_e8,total_pnl_e8,fees_paid_e8,wallet_balance_e8,position_qty_e8,fill_count]" << q
@@ -292,7 +328,12 @@ bool writeManifest(const std::filesystem::path& path, const BacktestRunResult& r
   out << "  },\n";
   out << "  " << q << "summary" << q << ": {\n";
   writeSummaryObject(out, result, engine, "    ");
-  out << "  },\n";
+  out << "  }";
+  if (!result.legs.empty()) {
+    out << ",\n";
+    writeLegsArray(out, result, "  ");
+  }
+  out << ",\n";
   out << "  " << q << "errors" << q << ": ";
   if (result.error.empty()) out << "[]\n";
   else out << "[{" << q << "message" << q << ": " << quote(result.error) << "}]\n";

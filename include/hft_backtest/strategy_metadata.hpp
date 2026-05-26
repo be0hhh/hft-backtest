@@ -46,6 +46,8 @@ struct StrategyMetadata {
   const char* id{nullptr};
   const char* displayNameRu{nullptr};
   const char* configTemplateFile{nullptr};
+  std::uint8_t minSessionCount{1u};
+  std::uint8_t maxSessionCount{1u};
   std::size_t paramCount{0u};
   StrategyParamMetadata params[kStrategyMetadataMaxParams]{};
   std::size_t paramGroupCount{0u};

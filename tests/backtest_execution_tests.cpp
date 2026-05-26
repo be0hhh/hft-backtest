@@ -640,8 +640,8 @@ bool testWriterCreatesV2RunDirectory() {
   }
 
   EngineState engine{};
-  engine.orders.push_back(JsonOrder{1, 0, 100, 110, 100, "order", "buy", "limit", "filled", kPx100, kQty1, false});
-  engine.fills.push_back(JsonFill{1, 110, 150, "buy", kPx100, kQty1, 0, false});
+  engine.orders.push_back(JsonOrder{0, 1, 0, 100, 110, 100, "order", "buy", "limit", "filled", kPx100, kQty1, false});
+  engine.fills.push_back(JsonFill{0, 1, 110, 150, "buy", kPx100, kQty1, 0, false});
   engine.equityPoints.push_back(JsonEquityPoint{150, 0, 0, 0, 0, 0, 0, 0, 100000000000ll, kQty1, 1});
   engine.riskSnapshots.push_back(JsonRiskSnapshot{150, 0, 0, 0, 0, 0, 0, 100000000000ll, kQty1, kPx100, kPx100 - 100000000ll, kPx100 + 100000000ll, 1, kRiskSnapshotReasonFill});
   engine.strategyIndicatorProfile = "trade_range";

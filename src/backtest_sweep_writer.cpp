@@ -2,6 +2,7 @@
 
 #include "backtest_engine.hpp"
 
+#include <filesystem>
 #include <fstream>
 #include <string_view>
 #include <system_error>
@@ -16,11 +17,17 @@ const char* paramModeName(BacktestSweepParamMode mode) noexcept {
   return "grid";
 }
 
+std::filesystem::path baseSessionPath(const BacktestSweepRequest& request) {
+  if (!request.baseRun.sessionPath.empty()) return request.baseRun.sessionPath;
+  if (!request.baseRun.sessions.empty()) return request.baseRun.sessions[0].path;
+  return {};
+}
+
 }  // namespace
 
 std::filesystem::path sweepResultPathFor(const BacktestSweepRequest& request, std::string_view sweepId) {
   if (!request.outputPath.empty()) return request.outputPath;
-  return request.baseRun.sessionPath / "backtests" / "sweeps" / std::string{sweepId};
+  return baseSessionPath(request) / "backtests" / "sweeps" / std::string{sweepId};
 }
 
 Status writeSweepRows(const BacktestSweepRequest& request,
@@ -87,7 +94,7 @@ Status writeSweepManifest(const BacktestSweepRequest& request,
   out << "  " << q << "schema_version" << q << ": 1,\n";
   out << "  " << q << "mode" << q << ": " << q << "whole_session_exploration" << q << ",\n";
   out << "  " << q << "sweep_id" << q << ": " << quote(result.sweepId) << ",\n";
-  out << "  " << q << "session_path" << q << ": " << quote(request.baseRun.sessionPath.generic_string()) << ",\n";
+  out << "  " << q << "session_path" << q << ": " << quote(baseSessionPath(request).generic_string()) << ",\n";
   out << "  " << q << "config_path" << q << ": " << quote(request.baseRun.configPath.generic_string()) << ",\n";
   out << "  " << q << "strategy" << q << ": " << quote(request.baseRun.strategy) << ",\n";
   out << "  " << q << "budget" << q << ": " << request.runBudget << ",\n";
