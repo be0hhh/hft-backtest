@@ -2,6 +2,7 @@
 
 #include "backtest_engine.hpp"
 #include "backtest_metrics.hpp"
+#include "backtest_prepared.hpp"
 #include "session_loader.hpp"
 
 #include "hft_trader/core/control/ControlState.hpp"
@@ -22,6 +23,28 @@
 #include <utility>
 #include <vector>
 
+namespace hft_backtest::detail {
+namespace {
+
+thread_local PreparedBacktestInput* gPreparedBacktestInput = nullptr;
+
+}  // namespace
+
+PreparedBacktestScope::PreparedBacktestScope(PreparedBacktestInput* input) noexcept
+    : previous_(gPreparedBacktestInput) {
+  gPreparedBacktestInput = input;
+}
+
+PreparedBacktestScope::~PreparedBacktestScope() {
+  gPreparedBacktestInput = previous_;
+}
+
+PreparedBacktestInput* activePreparedBacktestInput() noexcept {
+  return gPreparedBacktestInput;
+}
+
+}  // namespace hft_backtest::detail
+
 namespace hft_backtest {
 namespace {
 
@@ -39,6 +62,55 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
 detail::EngineState aggregateArtifactEngine(const std::vector<detail::EngineState>& engines,
                                             std::int64_t initialBalanceE8,
                                             std::int64_t finalTsNs);
+
+bool sameLoadPlan(const detail::SessionLoadPlan& lhs, const detail::SessionLoadPlan& rhs) noexcept {
+  return lhs.loadTrades == rhs.loadTrades &&
+         lhs.loadBookTickers == rhs.loadBookTickers &&
+         lhs.loadDepths == rhs.loadDepths &&
+         lhs.loadCandles == rhs.loadCandles &&
+         lhs.requireTrades == rhs.requireTrades &&
+         lhs.requireBookTickers == rhs.requireBookTickers &&
+         lhs.requireDepths == rhs.requireDepths &&
+         lhs.requireCandles == rhs.requireCandles;
+}
+
+std::vector<std::filesystem::path> sessionPathsFor(const BacktestRunRequest& request,
+                                                   bool hasExplicitSessions) {
+  std::vector<std::filesystem::path> out{};
+  if (hasExplicitSessions) {
+    out.reserve(request.sessions.size());
+    for (const BacktestSessionRequest& session : request.sessions) out.push_back(session.path);
+  } else {
+    out.push_back(request.sessionPath);
+  }
+  return out;
+}
+
+bool preparedMatches(const detail::PreparedBacktestInput& prepared,
+                     const BacktestRunRequest& request,
+                     bool hasExplicitSessions,
+                     const detail::SessionLoadPlan& loadPlan) {
+  if (!prepared.valid || prepared.hasExplicitSessions != hasExplicitSessions || !sameLoadPlan(prepared.loadPlan, loadPlan)) return false;
+  return prepared.sessionPaths == sessionPathsFor(request, hasExplicitSessions);
+}
+
+void storePreparedSessions(detail::PreparedBacktestInput& prepared,
+                           const BacktestRunRequest& request,
+                           bool hasExplicitSessions,
+                           const detail::SessionLoadPlan& loadPlan,
+                           std::vector<detail::SessionData>& sessions) {
+  prepared.valid = true;
+  prepared.timelineValid = false;
+  prepared.hasExplicitSessions = hasExplicitSessions;
+  prepared.loadPlan = loadPlan;
+  prepared.sessionPaths = sessionPathsFor(request, hasExplicitSessions);
+  prepared.sessions = std::move(sessions);
+  prepared.timeline.clear();
+}
+
+bool marketDataLatencyKeepsOrder(const detail::BacktestLatencyConfig& config) noexcept {
+  return config.marketData.jitterUs == 0u;
+}
 
 std::string makeRunId() {
   const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -642,11 +714,9 @@ bool seedTradeWarmupFromSession(const StrategyDescriptor& descriptor,
 }
 
 std::int64_t nextPendingTs(const detail::EngineState& engine) noexcept {
-  std::int64_t out = std::numeric_limits<std::int64_t>::max();
-  for (const detail::PendingAction& action : engine.pending) {
-    if (action.activeTsNs < out) out = action.activeTsNs;
-  }
-  return out;
+  return engine.pending.empty()
+      ? std::numeric_limits<std::int64_t>::max()
+      : engine.pending.front().activeTsNs;
 }
 
 std::int64_t nextWakeTs(const StrategyDescriptor& descriptor, const void* state) noexcept {
@@ -1015,25 +1085,50 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     return result;
   }
 
-  detail::SessionData session{};
-  std::vector<detail::SessionData> sessions;
-  if (hasExplicitSessions) {
-    sessions.resize(request.sessions.size());
+  detail::PreparedBacktestInput* preparedInput = detail::activePreparedBacktestInput();
+  const bool usePreparedSessions = preparedInput != nullptr &&
+                                   preparedMatches(*preparedInput, request, hasExplicitSessions, loadPlan);
+  std::vector<detail::SessionData> loadedSessions{};
+  const std::vector<detail::SessionData>* sessionsView = nullptr;
+  if (usePreparedSessions) {
+    sessionsView = &preparedInput->sessions;
+    result.status = Status::Ok;
+  } else if (hasExplicitSessions) {
+    loadedSessions.resize(request.sessions.size());
     for (std::size_t i = 0; i < request.sessions.size(); ++i) {
-      result.status = detail::loadSession(request.sessions[i].path, loadPlan, sessions[i], error);
+      result.status = detail::loadSession(request.sessions[i].path, loadPlan, loadedSessions[i], error);
       if (!isOk(result.status)) break;
     }
-    if (!sessions.empty()) session = sessions[0];
-    result.sessionPath = sessions.empty() ? std::filesystem::path{} : sessions[0].sessionPath;
+    if (isOk(result.status) && preparedInput != nullptr) {
+      storePreparedSessions(*preparedInput, request, hasExplicitSessions, loadPlan, loadedSessions);
+      sessionsView = &preparedInput->sessions;
+    } else {
+      sessionsView = &loadedSessions;
+    }
   } else {
-    result.status = detail::loadSession(request.sessionPath, loadPlan, session, error);
-    sessions.push_back(session);
+    loadedSessions.resize(1u);
+    result.status = detail::loadSession(request.sessionPath, loadPlan, loadedSessions[0], error);
+    if (isOk(result.status) && preparedInput != nullptr) {
+      storePreparedSessions(*preparedInput, request, hasExplicitSessions, loadPlan, loadedSessions);
+      sessionsView = &preparedInput->sessions;
+    } else {
+      sessionsView = &loadedSessions;
+    }
   }
   if (!isOk(result.status)) {
     result.error = error;
     (void)writeArtifacts(detail::EngineState{});
     return result;
   }
+  if (sessionsView == nullptr || sessionsView->empty()) {
+    result.status = Status::CorruptData;
+    result.error = "backtest session cache is empty";
+    (void)writeArtifacts(detail::EngineState{});
+    return result;
+  }
+  const std::vector<detail::SessionData>& sessions = *sessionsView;
+  const detail::SessionData& session = sessions[0];
+  result.sessionPath = session.sessionPath;
 
   const ExchangeId sessionExchange = detail::exchangeFromText(session.exchange);
   const canon::MarketType sessionMarket = detail::marketFromText(session.market);
@@ -1200,19 +1295,41 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   hft_trader::core::ShardControlState control{};
   control.shardId = shard.shardId;
 
-  std::vector<detail::TimelineEvent> timeline;
-  if (hasExplicitSessions) detail::buildTimeline(sessions, timeline);
-  else detail::buildTimeline(session, timeline);
-  std::vector<detail::TimelineEvent> deliveryTimeline = timeline;
-  for (detail::TimelineEvent& event : deliveryTimeline) {
-    event.deliveryTsNs = detail::delayedTs(event.tsNs, detail::sampleLatencyUs(engine.latency, detail::BacktestLatencyChannel::MarketData));
+  std::vector<detail::TimelineEvent> loadedTimeline;
+  const std::vector<detail::TimelineEvent>* timelineView = nullptr;
+  if (usePreparedSessions && preparedInput != nullptr && preparedInput->timelineValid) {
+    timelineView = &preparedInput->timeline;
+  } else if (preparedInput != nullptr && preparedMatches(*preparedInput, request, hasExplicitSessions, loadPlan)) {
+    if (hasExplicitSessions) detail::buildTimeline(preparedInput->sessions, preparedInput->timeline);
+    else detail::buildTimeline(preparedInput->sessions[0], preparedInput->timeline);
+    preparedInput->timelineValid = true;
+    timelineView = &preparedInput->timeline;
+  } else {
+    if (hasExplicitSessions) detail::buildTimeline(sessions, loadedTimeline);
+    else detail::buildTimeline(session, loadedTimeline);
+    timelineView = &loadedTimeline;
   }
-  std::stable_sort(deliveryTimeline.begin(), deliveryTimeline.end(), [](const detail::TimelineEvent& lhs, const detail::TimelineEvent& rhs) noexcept {
-    if (lhs.deliveryTsNs != rhs.deliveryTsNs) return lhs.deliveryTsNs < rhs.deliveryTsNs;
-    if (lhs.tsNs != rhs.tsNs) return lhs.tsNs < rhs.tsNs;
-    if (lhs.ingestSeq != rhs.ingestSeq) return lhs.ingestSeq < rhs.ingestSeq;
-    return lhs.kind < rhs.kind;
-  });
+  const std::vector<detail::TimelineEvent>& timeline = *timelineView;
+  std::vector<detail::TimelineEvent> loadedDeliveryTimeline;
+  const std::vector<detail::TimelineEvent>* deliveryTimelineView = nullptr;
+  if (latencyConfig.marketData.baseUs == 0u && latencyConfig.marketData.jitterUs == 0u) {
+    deliveryTimelineView = &timeline;
+  } else {
+    loadedDeliveryTimeline = timeline;
+    for (detail::TimelineEvent& event : loadedDeliveryTimeline) {
+      event.deliveryTsNs = detail::delayedTs(event.tsNs, detail::sampleLatencyUs(engine.latency, detail::BacktestLatencyChannel::MarketData));
+    }
+    if (!marketDataLatencyKeepsOrder(latencyConfig)) {
+      std::stable_sort(loadedDeliveryTimeline.begin(), loadedDeliveryTimeline.end(), [](const detail::TimelineEvent& lhs, const detail::TimelineEvent& rhs) noexcept {
+        if (lhs.deliveryTsNs != rhs.deliveryTsNs) return lhs.deliveryTsNs < rhs.deliveryTsNs;
+        if (lhs.tsNs != rhs.tsNs) return lhs.tsNs < rhs.tsNs;
+        if (lhs.ingestSeq != rhs.ingestSeq) return lhs.ingestSeq < rhs.ingestSeq;
+        return lhs.kind < rhs.kind;
+      });
+    }
+    deliveryTimelineView = &loadedDeliveryTimeline;
+  }
+  const std::vector<detail::TimelineEvent>& deliveryTimeline = *deliveryTimelineView;
   result.trades = 0;
   result.bookTickers = 0;
   result.depths = 0;

@@ -2,8 +2,10 @@
 
 #include "hft_trader/runtime/order/ClientOrderId.hpp"
 
+#include <algorithm>
 #include <array>
 #include <limits>
+#include <utility>
 
 namespace hft_backtest::detail {
 namespace {
@@ -44,6 +46,16 @@ std::uint64_t nextOrderId(const EngineState& engine) noexcept {
   }
   return out;
 }
+
+bool pendingEarlier(const PendingAction& lhs, const PendingAction& rhs) noexcept {
+  return lhs.activeTsNs > rhs.activeTsNs;
+}
+
+void pushPendingAction(EngineState& engine, PendingAction action) {
+  engine.pending.push_back(std::move(action));
+  std::push_heap(engine.pending.begin(), engine.pending.end(), pendingEarlier);
+}
+
 cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
                                              const OpenOrder& order,
                                              std::int64_t priceE8,
@@ -198,18 +210,11 @@ void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& 
 }
 
 void applyDueActions(EngineState& engine, std::int64_t tsNs) {
-  while (true) {
-    std::size_t actionIndex = kNoRecordIndex;
-    std::int64_t actionTs = std::numeric_limits<std::int64_t>::max();
-    for (std::size_t i = 0; i < engine.pending.size(); ++i) {
-      if (engine.pending[i].activeTsNs <= tsNs && engine.pending[i].activeTsNs < actionTs) {
-        actionIndex = i;
-        actionTs = engine.pending[i].activeTsNs;
-      }
-    }
-    if (actionIndex == kNoRecordIndex) break;
-    PendingAction action = engine.pending[actionIndex];
-    engine.pending.erase(engine.pending.begin() + static_cast<std::ptrdiff_t>(actionIndex));
+  while (!engine.pending.empty()) {
+    if (engine.pending.front().activeTsNs > tsNs) break;
+    std::pop_heap(engine.pending.begin(), engine.pending.end(), pendingEarlier);
+    PendingAction action = std::move(engine.pending.back());
+    engine.pending.pop_back();
     if (action.kind == PendingActionKind::CancelAck && action.recordIndex < engine.orders.size()) {
       engine.orders[action.recordIndex].activeTsNs = action.activeTsNs;
       engine.orders[action.recordIndex].status = "acked";
@@ -368,7 +373,7 @@ void applyIntents(EngineState& engine,
       action.activeTsNs = activeTs;
       action.targetClientIntentId = intent.targetClientIntentId;
       action.commandClientIntentId = intent.clientIntentId;
-      engine.pending.push_back(action);
+      pushPendingAction(engine, std::move(action));
     } else {
       engine.orders[recordIndex].status = "missing";
     }
@@ -400,7 +405,7 @@ void applyIntents(EngineState& engine,
       cancelAction.targetClientIntentId = intent.targetClientIntentId;
       cancelAction.commandClientIntentId = intent.clientIntentId;
       cancelAction.amend = intent;
-      engine.pending.push_back(cancelAction);
+      pushPendingAction(engine, std::move(cancelAction));
       PendingAction orderAction{};
       orderAction.kind = PendingActionKind::AmendAck;
       orderAction.slotIndex = slotIndex;
@@ -410,7 +415,7 @@ void applyIntents(EngineState& engine,
       orderAction.targetClientIntentId = intent.targetClientIntentId;
       orderAction.commandClientIntentId = intent.clientIntentId;
       orderAction.amend = intent;
-      engine.pending.push_back(orderAction);
+      pushPendingAction(engine, std::move(orderAction));
     } else {
       engine.orders[cancelRecordIndex].status = "missing";
       engine.orders[replacementRecordIndex].status = "missing";
@@ -446,7 +451,7 @@ void applyIntents(EngineState& engine,
       action.activeTsNs = activeTs;
       action.targetClientIntentId = intent.clientIntentId;
       action.commandClientIntentId = intent.clientIntentId;
-      engine.pending.push_back(action);
+      pushPendingAction(engine, std::move(action));
     } else {
       engine.orders[recordIndex].status = "rejected";
     }
@@ -476,7 +481,7 @@ void applyIntents(EngineState& engine,
       action.activeTsNs = activeTs;
       action.targetClientIntentId = intent.targetClientIntentId;
       action.commandClientIntentId = intent.clientIntentId;
-      engine.pending.push_back(action);
+      pushPendingAction(engine, std::move(action));
     } else {
       engine.orders[recordIndex].status = "missing";
     }
@@ -508,7 +513,7 @@ void applyIntents(EngineState& engine,
       action.targetClientIntentId = intent.targetClientIntentId;
       action.commandClientIntentId = intent.clientIntentId;
       action.amend = intent;
-      engine.pending.push_back(action);
+      pushPendingAction(engine, std::move(action));
     } else {
       engine.orders[cancelRecordIndex].status = "missing";
       engine.orders[replacementRecordIndex].status = "missing";
@@ -547,7 +552,7 @@ void applyIntents(EngineState& engine,
       action.activeTsNs = activeTs;
       action.targetClientIntentId = intent.clientIntentId;
       action.commandClientIntentId = intent.clientIntentId;
-      engine.pending.push_back(action);
+      pushPendingAction(engine, std::move(action));
     } else {
       engine.orders[recordIndex].status = "rejected";
     }

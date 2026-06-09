@@ -1,5 +1,6 @@
 #include "hft_backtest/backtest_sweep.hpp"
 
+#include "backtest_prepared.hpp"
 #include "backtest_sweep_internal.hpp"
 
 #include <chrono>
@@ -110,6 +111,8 @@ BacktestSweepResult runBacktestSweep(const BacktestSweepRequest& request,
   }
   std::vector<detail::BacktestSweepPointResult> points{};
   points.reserve(plan.size());
+  detail::PreparedBacktestInput preparedInput{};
+  detail::PreparedBacktestScope preparedScope(&preparedInput);
   if (!reportSweepProgress(0u, plan.size(), progressCallback, userData)) {
     result.status = Status::Cancelled;
     result.error = "cancelled";

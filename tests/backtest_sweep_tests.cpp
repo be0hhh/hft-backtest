@@ -128,6 +128,61 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
          expect(!std::filesystem::exists(request.outputPath / (request.sweepId + "-point-0") / "manifest.json"), "sweep does not write full run dirs per point");
 }
 
+bool testSweepCanRunTwiceInOneProcess() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_sweep_twice_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+            "  \"channels\": {\n"
+            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
+            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
+            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
+            "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
+            "  },\n"
+            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"},\n"
+            "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1, \"history_requested_end_ns\": 2500000000, \"history_rows\": 3}}\n"
+            "}\n");
+  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
+  writeText(dir / "snapshot_000.json", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000]\n");
+  writeText(dir / "jsonl" / "trades.jsonl",
+            "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n"
+            "[10020000000,100000000,0,1600000000,2,2,2,10020000000,0,\"BTCUSDT\",\"binance\",\"futures\",2,2]\n"
+            "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTCUSDT\",\"binance\",\"futures\",3,3]\n"
+            "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTCUSDT\",\"binance\",\"futures\",4,4]\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000,2,2]\n");
+  writeText(dir / "jsonl" / "candles.jsonl",
+            "[1,1000000000,10200000000,9800000000,500000000]\n"
+            "[2,900000000,10300000000,9700000000,600000000]\n"
+            "[3,800000000,10400000000,9600000000,700000000]\n");
+  writeText(dir / "probe.ini",
+            "[runtime]\nname=probe\nenv_path=.env\n"
+            "[strategy]\ntype=backtest_probe\nenabled=1\n"
+            "[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
+
+  auto makeRequest = [&](const std::filesystem::path& out, std::string_view sweepId) {
+    hft_backtest::BacktestSweepRequest request{};
+    request.baseRun.sessionPath = dir;
+    request.baseRun.configPath = dir / "probe.ini";
+    request.baseRun.strategy = "backtest_probe";
+    request.outputPath = out;
+    request.sweepId = std::string{sweepId};
+    request.runBudget = 2u;
+    request.searchSeed = 99u;
+    request.ranges.push_back(hft_backtest::BacktestSweepParamRange{"distance_bps", 100, 200, 100, hft_backtest::BacktestSweepParamMode::Grid});
+    request.ranges.push_back(hft_backtest::BacktestSweepParamRange{"trigger_bps", 5, 10, 5, hft_backtest::BacktestSweepParamMode::Grid});
+    return request;
+  };
+
+  const hft_backtest::BacktestSweepResult first = hft_backtest::runBacktestSweep(makeRequest(dir / "sweep-out-a", "sweep-a"), nullptr, nullptr);
+  const hft_backtest::BacktestSweepResult second = hft_backtest::runBacktestSweep(makeRequest(dir / "sweep-out-b", "sweep-b"), nullptr, nullptr);
+
+  return expect(first.status == hft_backtest::Status::Ok, "first sweep run completes") &&
+         expect(second.status == hft_backtest::Status::Ok, "second sweep run completes") &&
+         expect(first.pointsEvaluated == 2u && second.pointsEvaluated == 2u, "both sweep runs evaluate requested budget");
+}
+
 }  // namespace
 
 int main() {
@@ -135,5 +190,6 @@ int main() {
   ok = testSearchPlanHonorsBudgetAcrossManyParams() && ok;
   ok = testSearchPlanSamplesGridParamsDeterministically() && ok;
   ok = testSweepRunsSummaryOnlyAndWritesCompactArtifacts() && ok;
+  ok = testSweepCanRunTwiceInOneProcess() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
