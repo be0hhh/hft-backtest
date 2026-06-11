@@ -113,6 +113,7 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
   const std::string manifest = readText(result.manifestPath);
   const std::string rows = readText(result.rowsPath);
   const std::string curves = readText(result.curvesPath);
+  const std::string pointConfig = readText(result.resultPath / "point_configs" / "point-0.ini");
 
   return expect(result.status == hft_backtest::Status::Ok, "sweep run completes") &&
          expect(result.pointsEvaluated == 2u, "sweep evaluates requested budget") &&
@@ -125,6 +126,8 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
          expect(rows.find("\"score_e8\"") == std::string::npos, "rows omit score metric") &&
          expect(rows.find("\"random_seed\"") == std::string::npos, "rows omit random seed") &&
          expect(curves.find("\"curve_e8\"") != std::string::npos, "curves include compact pnl series") &&
+         expect(pointConfig.find("[runtime]\nname=probe") != std::string::npos, "point config keeps base config") &&
+         expect(pointConfig.find("distance_bps=") != std::string::npos, "point config writes distance override") &&
          expect(!std::filesystem::exists(request.outputPath / (request.sweepId + "-point-0") / "manifest.json"), "sweep does not write full run dirs per point");
 }
 

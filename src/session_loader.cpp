@@ -1,13 +1,56 @@
 #include "session_loader.hpp"
 
 #include <algorithm>
-#include <charconv>
+#include <cerrno>
+#include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string_view>
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 namespace hft_backtest::detail {
 namespace {
+
+class MappedFile {
+ public:
+  MappedFile() noexcept = default;
+  MappedFile(const MappedFile&) = delete;
+  MappedFile& operator=(const MappedFile&) = delete;
+
+  ~MappedFile() {
+    if (data_ && data_ != MAP_FAILED) (void)::munmap(data_, size_);
+    if (fd_ >= 0) (void)::close(fd_);
+  }
+
+  bool open(const std::filesystem::path& path) noexcept {
+    fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd_ < 0) return false;
+    struct stat st {};
+    if (::fstat(fd_, &st) != 0) return false;
+    if (st.st_size <= 0) {
+      size_ = 0u;
+      return true;
+    }
+    size_ = static_cast<std::size_t>(st.st_size);
+    data_ = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
+    return data_ != MAP_FAILED;
+  }
+
+  std::string_view view() const noexcept {
+    if (!data_ || data_ == MAP_FAILED || size_ == 0u) return {};
+    return std::string_view(static_cast<const char*>(data_), size_);
+  }
+
+ private:
+  int fd_{-1};
+  void* data_{nullptr};
+  std::size_t size_{0u};
+};
 
 bool readText(const std::filesystem::path& path, std::string& out) {
   std::ifstream in(path, std::ios::in | std::ios::binary);
@@ -35,11 +78,29 @@ bool consume(std::string_view text, std::size_t& pos, char expected) noexcept {
 
 bool parseI64(std::string_view text, std::size_t& pos, std::int64_t& out) noexcept {
   skipWs(text, pos);
-  const char* first = text.data() + pos;
-  const char* last = text.data() + text.size();
-  const auto [ptr, ec] = std::from_chars(first, last, out);
-  if (ec != std::errc{}) return false;
-  pos = static_cast<std::size_t>(ptr - text.data());
+  if (pos >= text.size()) return false;
+  const bool negative = text[pos] == '-';
+  if (negative || text[pos] == '+') ++pos;
+  if (pos >= text.size()) return false;
+  constexpr std::uint64_t kMaxPositive = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  constexpr std::uint64_t kMaxNegativeAbs = kMaxPositive + 1u;
+  const std::uint64_t limit = negative ? kMaxNegativeAbs : kMaxPositive;
+  std::uint64_t value = 0u;
+  bool any = false;
+  while (pos < text.size()) {
+    const unsigned digit = static_cast<unsigned>(static_cast<unsigned char>(text[pos]) - static_cast<unsigned char>('0'));
+    if (digit > 9u) break;
+    if (value > (limit - digit) / 10u) return false;
+    value = value * 10u + digit;
+    any = true;
+    ++pos;
+  }
+  if (!any) return false;
+  if (negative) {
+    out = value == kMaxNegativeAbs ? std::numeric_limits<std::int64_t>::min() : -static_cast<std::int64_t>(value);
+  } else {
+    out = static_cast<std::int64_t>(value);
+  }
   return true;
 }
 
@@ -136,19 +197,36 @@ Status loadJsonl(const std::filesystem::path& path,
     }
     return Status::Ok;
   }
-  std::ifstream in(path);
-  if (!in.is_open()) {
+  MappedFile file{};
+  if (!file.open(path)) {
     error = "failed to open ";
     error += path.generic_string();
+    if (errno != 0) {
+      error += ": ";
+      error += std::strerror(errno);
+    }
     return Status::IoError;
   }
-  std::string line;
+  const std::string_view text = file.view();
+  std::size_t expectedRows = 0u;
+  for (char c : text) {
+    if (c == '\n') ++expectedRows;
+  }
+  if (!text.empty() && text.back() != '\n') ++expectedRows;
+  out.reserve(expectedRows);
   std::uint64_t lineNo = 0;
-  while (std::getline(in, line)) {
+  std::size_t pos = 0u;
+  while (pos < text.size()) {
     ++lineNo;
-    if (line.empty()) continue;
+    const std::size_t lineStart = pos;
+    while (pos < text.size() && text[pos] != '\n') ++pos;
+    std::size_t lineEnd = pos;
+    if (pos < text.size() && text[pos] == '\n') ++pos;
+    if (lineEnd > lineStart && text[lineEnd - 1u] == '\r') --lineEnd;
+    if (lineEnd == lineStart) continue;
+    const std::string_view line{text.data() + lineStart, lineEnd - lineStart};
     Row row{};
-    if (!parse(std::string_view{line}, row)) {
+    if (!parse(line, row)) {
       error = "failed to parse ";
       error += path.generic_string();
       error += ":";

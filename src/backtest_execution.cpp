@@ -39,6 +39,14 @@ std::int64_t latencyNs(std::uint64_t latencyUs) noexcept {
   return static_cast<std::int64_t>(latencyUs * 1000u);
 }
 
+std::uint8_t recordSide(Side side) noexcept {
+  return side.raw == Side::Buy().raw ? kRecordSideBuy : kRecordSideSell;
+}
+
+std::uint8_t recordType(canon::OrderType type) noexcept {
+  return type == canon::OrderType::Market ? kRecordTypeMarket : kRecordTypeLimit;
+}
+
 std::uint64_t nextOrderId(const EngineState& engine) noexcept {
   std::uint64_t out = 1u;
   for (const JsonOrder& order : engine.orders) {
@@ -130,7 +138,7 @@ std::int64_t reduceOnlyFillQty(const EngineState& engine, const OpenOrder& order
 bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
   if (!order.state.valid) return false;
   engine.userEvents.push_back(makeRejectedOrderEvent(engine, order, tsNs));
-  if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "rejected";
+  if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusRejected;
   order = OpenOrder{};
   return false;
 }
@@ -168,7 +176,7 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
                                   order.state.clientIntentId.raw,
                                   order.activeTsNs,
                                   tsNs,
-                                  order.state.side.raw == Side::Buy().raw ? "buy" : "sell",
+                                  recordSide(order.state.side),
                                   priceE8,
                                   fillQty,
                                   netRealized,
@@ -177,7 +185,7 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
   appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonFill);
   if (order.reduceOnly) ++engine.reduceOnlyFills;
   engine.userEvents.push_back(makeFillEvent(engine, order, priceE8, fillQty, tsNs, feeE8, netRealized, taker));
-  if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "filled";
+  if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
   order = OpenOrder{};
   return true;
 }
@@ -217,17 +225,17 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
     engine.pending.pop_back();
     if (action.kind == PendingActionKind::CancelAck && action.recordIndex < engine.orders.size()) {
       engine.orders[action.recordIndex].activeTsNs = action.activeTsNs;
-      engine.orders[action.recordIndex].status = "acked";
+      engine.orders[action.recordIndex].status = kRecordStatusAcked;
     } else if (action.kind == PendingActionKind::AmendAck && action.replaceCancelRecordIndex < engine.orders.size() &&
-               engine.orders[action.replaceCancelRecordIndex].status != "acked") {
+               engine.orders[action.replaceCancelRecordIndex].status != kRecordStatusAcked) {
       engine.orders[action.replaceCancelRecordIndex].activeTsNs = action.activeTsNs;
-      engine.orders[action.replaceCancelRecordIndex].status = "acked";
+      engine.orders[action.replaceCancelRecordIndex].status = kRecordStatusAcked;
     }
     if (action.slotIndex >= engine.open.size()) continue;
     OpenOrder& order = engine.open[action.slotIndex];
     if (!matchesExpectedOrder(order, action)) {
-      if (action.kind == PendingActionKind::AmendAck && action.replaceCancelRecordIndex < engine.orders.size()) engine.orders[action.replaceCancelRecordIndex].status = "missing";
-      if (action.kind != PendingActionKind::OrderAck && action.recordIndex < engine.orders.size()) engine.orders[action.recordIndex].status = "missing";
+      if (action.kind == PendingActionKind::AmendAck && action.replaceCancelRecordIndex < engine.orders.size()) engine.orders[action.replaceCancelRecordIndex].status = kRecordStatusMissing;
+      if (action.kind != PendingActionKind::OrderAck && action.recordIndex < engine.orders.size()) engine.orders[action.recordIndex].status = kRecordStatusMissing;
       continue;
     }
     if (action.kind == PendingActionKind::OrderAck) {
@@ -235,18 +243,18 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
       order.activeTsNs = action.activeTsNs;
       if (order.recordIndex < engine.orders.size()) {
         engine.orders[order.recordIndex].activeTsNs = action.activeTsNs;
-        engine.orders[order.recordIndex].status = "active";
+        engine.orders[order.recordIndex].status = kRecordStatusActive;
       }
       tryFillOnTop(engine, action.activeTsNs);
     } else if (action.kind == PendingActionKind::CancelAck) {
-      if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "cancelled";
+      if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusCancelled;
       order = OpenOrder{};
     } else if (action.kind == PendingActionKind::ReplaceCancelAck) {
-      if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "cancelled";
-      if (action.replaceCancelRecordIndex < engine.orders.size()) engine.orders[action.replaceCancelRecordIndex].status = "acked";
+      if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusCancelled;
+      if (action.replaceCancelRecordIndex < engine.orders.size()) engine.orders[action.replaceCancelRecordIndex].status = kRecordStatusAcked;
       order.active = false;
     } else if (action.kind == PendingActionKind::AmendAck) {
-      if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = "cancelled";
+      if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusCancelled;
       order.state.clientIntentId = action.amend.clientIntentId;
       order.state.desiredClientIntentId = action.amend.clientIntentId;
       order.state.pendingClientIntentId = Id{};
@@ -264,7 +272,7 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
       order.activeTsNs = action.activeTsNs;
       if (order.recordIndex < engine.orders.size()) {
         engine.orders[order.recordIndex].activeTsNs = action.activeTsNs;
-        engine.orders[order.recordIndex].status = "active";
+        engine.orders[order.recordIndex].status = kRecordStatusActive;
       }
       tryFillOnTop(engine, action.activeTsNs);
     }
@@ -359,7 +367,7 @@ void applyIntents(EngineState& engine,
     const auto& intent = io.cancelOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, cancelLatencyUs);
     const std::size_t recordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, kRecordActionCancel, kRecordSideNone, kRecordTypeNone, kRecordStatusPending, 0, 0, false});
     const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
     if (slotIndex != kNoRecordIndex) {
       OpenOrder& order = engine.open[slotIndex];
@@ -375,7 +383,7 @@ void applyIntents(EngineState& engine,
       action.commandClientIntentId = intent.clientIntentId;
       pushPendingAction(engine, std::move(action));
     } else {
-      engine.orders[recordIndex].status = "missing";
+      engine.orders[recordIndex].status = kRecordStatusMissing;
     }
   }
   for (std::size_t i = 0; i < io.amendCount; ++i) {
@@ -383,9 +391,9 @@ void applyIntents(EngineState& engine,
     const std::int64_t cancelTs = delayedTs(tsNs, cancelLatencyUs);
     const std::int64_t activeTs = delayedTs(cancelTs, amendLatencyUs);
     const std::size_t cancelRecordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, cancelTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, cancelTs, tsNs, kRecordActionCancel, kRecordSideNone, kRecordTypeNone, kRecordStatusPending, 0, 0, false});
     const std::size_t replacementRecordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", "limit", "pending", intent.price.raw, intent.qty.raw, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, kRecordActionOrder, recordSide(intent.side), kRecordTypeLimit, kRecordStatusPending, intent.price.raw, intent.qty.raw, false});
     const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
     if (slotIndex != kNoRecordIndex) {
       OpenOrder& order = engine.open[slotIndex];
@@ -417,15 +425,15 @@ void applyIntents(EngineState& engine,
       orderAction.amend = intent;
       pushPendingAction(engine, std::move(orderAction));
     } else {
-      engine.orders[cancelRecordIndex].status = "missing";
-      engine.orders[replacementRecordIndex].status = "missing";
+      engine.orders[cancelRecordIndex].status = kRecordStatusMissing;
+      engine.orders[replacementRecordIndex].status = kRecordStatusMissing;
     }
   }
   for (std::size_t i = 0; i < io.orderCount; ++i) {
     const auto& intent = io.orderOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, orderLatencyUs);
     const std::size_t recordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", intent.orderType == canon::OrderType::Market ? "market" : "limit", "pending", intent.price.raw, intent.qty.raw, intent.reduceOnly});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, kRecordActionOrder, recordSide(intent.side), recordType(intent.orderType), kRecordStatusPending, intent.price.raw, intent.qty.raw, intent.reduceOnly});
     if (intent.reduceOnly) ++engine.reduceOnlyOrders;
     const std::size_t slotIndex = findFreeIndex(engine);
     if (slotIndex != kNoRecordIndex) {
@@ -453,7 +461,7 @@ void applyIntents(EngineState& engine,
       action.commandClientIntentId = intent.clientIntentId;
       pushPendingAction(engine, std::move(action));
     } else {
-      engine.orders[recordIndex].status = "rejected";
+      engine.orders[recordIndex].status = kRecordStatusRejected;
     }
   }
   applyDueActions(engine, tsNs);
@@ -467,7 +475,7 @@ void applyIntents(EngineState& engine,
     const auto& intent = io.cancelOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
     const std::size_t recordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, kRecordActionCancel, kRecordSideNone, kRecordTypeNone, kRecordStatusPending, 0, 0, false});
     const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
     if (slotIndex != kNoRecordIndex) {
       OpenOrder& order = engine.open[slotIndex];
@@ -483,7 +491,7 @@ void applyIntents(EngineState& engine,
       action.commandClientIntentId = intent.clientIntentId;
       pushPendingAction(engine, std::move(action));
     } else {
-      engine.orders[recordIndex].status = "missing";
+      engine.orders[recordIndex].status = kRecordStatusMissing;
     }
   }
   for (std::size_t i = 0; i < io.amendCount; ++i) {
@@ -491,9 +499,9 @@ void applyIntents(EngineState& engine,
     const std::int64_t cancelTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
     const std::int64_t activeTs = delayedTs(cancelTs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
     const std::size_t cancelRecordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, cancelTs, tsNs, "cancel", "", "", "pending", 0, 0, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, cancelTs, tsNs, kRecordActionCancel, kRecordSideNone, kRecordTypeNone, kRecordStatusPending, 0, 0, false});
     const std::size_t replacementRecordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", "limit", "pending", intent.price.raw, intent.qty.raw, false});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, kRecordActionOrder, recordSide(intent.side), kRecordTypeLimit, kRecordStatusPending, intent.price.raw, intent.qty.raw, false});
     const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
     if (slotIndex != kNoRecordIndex) {
       OpenOrder& order = engine.open[slotIndex];
@@ -515,8 +523,8 @@ void applyIntents(EngineState& engine,
       action.amend = intent;
       pushPendingAction(engine, std::move(action));
     } else {
-      engine.orders[cancelRecordIndex].status = "missing";
-      engine.orders[replacementRecordIndex].status = "missing";
+      engine.orders[cancelRecordIndex].status = kRecordStatusMissing;
+      engine.orders[replacementRecordIndex].status = kRecordStatusMissing;
     }
   }
   for (std::size_t i = 0; i < io.orderCount; ++i) {
@@ -526,7 +534,7 @@ void applyIntents(EngineState& engine,
         : BacktestLatencyChannel::LimitOrder;
     const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, channel));
     const std::size_t recordIndex = engine.orders.size();
-    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, "order", intent.side.raw == Side::Buy().raw ? "buy" : "sell", intent.orderType == canon::OrderType::Market ? "market" : "limit", "pending", intent.price.raw, intent.qty.raw, intent.reduceOnly});
+    engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, kRecordActionOrder, recordSide(intent.side), recordType(intent.orderType), kRecordStatusPending, intent.price.raw, intent.qty.raw, intent.reduceOnly});
     if (intent.reduceOnly) ++engine.reduceOnlyOrders;
     const std::size_t slotIndex = findFreeIndex(engine);
     if (slotIndex != kNoRecordIndex) {
@@ -554,7 +562,7 @@ void applyIntents(EngineState& engine,
       action.commandClientIntentId = intent.clientIntentId;
       pushPendingAction(engine, std::move(action));
     } else {
-      engine.orders[recordIndex].status = "rejected";
+      engine.orders[recordIndex].status = kRecordStatusRejected;
     }
   }
   applyDueActions(engine, tsNs);

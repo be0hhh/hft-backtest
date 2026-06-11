@@ -178,6 +178,33 @@ bool isBacktestProbe(const StrategyDescriptor& descriptor) noexcept {
   return descriptor.name && std::string_view{descriptor.name} == "backtest_probe";
 }
 
+void prefetchRead(const void* ptr) noexcept {
+#if defined(__GNUC__) || defined(__clang__)
+  __builtin_prefetch(ptr, 0, 1);
+#else
+  (void)ptr;
+#endif
+}
+
+std::size_t boundedReserve(std::size_t events, std::size_t divisor, std::size_t base) noexcept {
+  return events == 0u ? base : events / divisor + base;
+}
+
+void reserveEngineStorage(detail::EngineState& engine,
+                          std::size_t events,
+                          bool captureProbeTrace,
+                          bool captureIndicatorTrace) {
+  const std::size_t tradeRows = boundedReserve(events, 16u, 64u);
+  engine.pending.reserve(detail::kIntentCapacity);
+  engine.orders.reserve(tradeRows);
+  engine.fills.reserve(tradeRows);
+  engine.userEvents.reserve(tradeRows);
+  engine.equityPoints.reserve(boundedReserve(events, 64u, 16u));
+  engine.riskSnapshots.reserve(boundedReserve(events, 1024u, 8u));
+  if (captureProbeTrace) engine.probeMetrics.reserve(events + 8u);
+  if (captureIndicatorTrace) engine.strategyIndicator.reserve(events + 8u);
+}
+
 struct StrategyIndicatorProfileInfo {
   std::string_view id{};
   std::string_view title{};
@@ -1344,6 +1371,15 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
   if (result.firstTsNs == std::numeric_limits<std::int64_t>::max()) result.firstTsNs = session.firstTsNs;
   result.events = timeline.size();
+  const bool captureProbeTrace = isBacktestProbe(*descriptor);
+  const bool captureIndicatorTrace = !result.indicatorProfile.empty();
+  if (hasExplicitSessions) {
+    for (detail::EngineState& legEngine : legEngines) {
+      reserveEngineStorage(legEngine, timeline.size(), captureProbeTrace, captureIndicatorTrace);
+    }
+  } else {
+    reserveEngineStorage(engine, timeline.size(), captureProbeTrace, captureIndicatorTrace);
+  }
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
       detail::appendEquityPoint(legEngine, result.firstTsNs);
@@ -1374,6 +1410,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
   std::size_t deliveryCursor = 0u;
   for (std::size_t i = 0; i < timeline.size(); ++i) {
+    if (i + 1u < timeline.size()) prefetchRead(&timeline[i + 1u]);
+    if (deliveryCursor < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor]);
     const detail::TimelineEvent& event = timeline[i];
     const bool beforeOk = hasExplicitSessions
         ? runUntilMulti(*descriptor, state.data(), legEngines, shard, control, primaryLegIndex, event.tsNs, request)
@@ -1385,6 +1423,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       return result;
     }
     while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs < event.tsNs) {
+      if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
       const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
       if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, delivered, legSymbols, legInstruments, true);
       else applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
@@ -1411,6 +1450,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)detail::appendRiskSnapshotIfDue(engine, event.tsNs);
     }
     while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs <= event.tsNs) {
+      if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
       const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
       if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, delivered, legSymbols, legInstruments, true);
       else applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
@@ -1446,6 +1486,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
   }
   while (deliveryCursor < deliveryTimeline.size()) {
+    if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
     const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
     const bool beforeDelayedOk = hasExplicitSessions
         ? runUntilMulti(*descriptor, state.data(), legEngines, shard, control, primaryLegIndex, delivered.deliveryTsNs, request)

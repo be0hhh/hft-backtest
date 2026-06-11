@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -32,14 +33,20 @@ bool reportSweepProgress(std::uint64_t done,
   return cb(progress, userData);
 }
 
-bool writePointConfig(const BacktestSweepRequest& request,
+bool readBaseConfig(const std::filesystem::path& path, std::string& out) noexcept {
+  std::ifstream in(path, std::ios::in | std::ios::binary);
+  if (!in.is_open()) return false;
+  out.assign(std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{});
+  return in.good() || in.eof();
+}
+
+bool writePointConfig(const std::string& baseConfig,
+                      const BacktestSweepRequest& request,
                       const detail::BacktestSweepPoint& point,
                       const std::filesystem::path& path) noexcept {
-  std::ifstream in(request.baseRun.configPath, std::ios::in | std::ios::binary);
-  if (!in.is_open()) return false;
   std::ofstream out(path, std::ios::out | std::ios::trunc | std::ios::binary);
   if (!out.is_open()) return false;
-  out << in.rdbuf();
+  out << baseConfig;
   out << "\n[strategy]\n";
   for (std::size_t i = 0u; i < request.ranges.size(); ++i) {
     out << request.ranges[i].key << '=' << point.values[i] << '\n';
@@ -119,9 +126,16 @@ BacktestSweepResult runBacktestSweep(const BacktestSweepRequest& request,
     return result;
   }
 
+  std::string baseConfig{};
+  if (!readBaseConfig(request.baseRun.configPath, baseConfig)) {
+    result.status = Status::IoError;
+    result.error = "failed to read sweep base config";
+    return result;
+  }
+
   for (const detail::BacktestSweepPoint& point : plan) {
     const std::filesystem::path configPath = result.resultPath / "point_configs" / ("point-" + std::to_string(point.pointId) + ".ini");
-    if (!writePointConfig(request, point, configPath)) {
+    if (!writePointConfig(baseConfig, request, point, configPath)) {
       result.status = Status::IoError;
       result.error = "failed to write sweep point config";
       return result;

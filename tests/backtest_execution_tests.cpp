@@ -124,7 +124,7 @@ bool testStaleCancelDoesNotCancelReusedSlot() {
   applyDueActions(engine, 200000);
   return expect(engine.open[0].state.valid, "reused slot remains valid after stale cancel") &&
          expect(engine.open[0].state.clientIntentId.raw == 2, "stale cancel does not cancel replacement order") &&
-         expect(engine.orders[0].status == "filled", "original order remains filled");
+         expect(engine.orders[0].status == kRecordStatusFilled, "original order remains filled");
 }
 
 bool testStaleAmendDoesNotMutateReusedSlot() {
@@ -160,9 +160,9 @@ bool testPendingDrainActivatesLateOrder() {
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 100, 0, 0);
-  return expect(engine.orders[0].status == "pending", "late order initially pending") &&
+  return expect(engine.orders[0].status == kRecordStatusPending, "late order initially pending") &&
          (applyDueActions(engine, 101000), true) &&
-         expect(engine.orders[0].status == "active", "final drain activates due order");
+         expect(engine.orders[0].status == kRecordStatusActive, "final drain activates due order");
 }
 
 bool testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() {
@@ -212,9 +212,9 @@ bool testLatencyRuntimeSplitsMarketAndLimitOrderActivation() {
   applyIntents(engine, io, 1000, engine.latency);
 
   return expect(engine.orders.size() == 2u, "market and limit orders are recorded") &&
-         expect(engine.orders[0].type == "market", "first order is market") &&
+         expect(engine.orders[0].type == kRecordTypeMarket, "first order is market") &&
          expect(engine.orders[0].activeTsNs == 101000, "market order uses market order latency") &&
-         expect(engine.orders[1].type == "limit", "second order is limit") &&
+         expect(engine.orders[1].type == kRecordTypeLimit, "second order is limit") &&
          expect(engine.orders[1].activeTsNs == 701000, "limit order uses limit order latency");
 }
 
@@ -248,7 +248,7 @@ bool testReduceOnlyMarketBuyDoesNotOpenWhenFlat() {
   return expect(engine.netQtyRaw == 0, "reduce-only buy cannot open long when flat") &&
          expect(engine.fills.empty(), "invalid reduce-only order does not write fill") &&
          expect(engine.orders.size() == 1u, "invalid reduce-only order is recorded") &&
-         expect(engine.orders[0].status == "rejected", "invalid reduce-only order is rejected") &&
+         expect(engine.orders[0].status == kRecordStatusRejected, "invalid reduce-only order is rejected") &&
          expect(engine.userEvents.size() == 1u, "invalid reduce-only order publishes final user event") &&
          expect(engine.userEvents[0].orderStatus == canon::OrderStatus::Rejected, "invalid reduce-only event is rejected");
 }
@@ -384,8 +384,8 @@ bool testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() {
   return expect(closed, "force close reports success") &&
          expect(engine.netQtyRaw == 0, "force close flattens short") &&
          expect(engine.orders.size() == 1u, "force close writes one order") &&
-         expect(engine.orders[0].side == "buy", "short force close submits buy") &&
-         expect(engine.orders[0].type == "market", "force close uses market order") &&
+         expect(engine.orders[0].side == kRecordSideBuy, "short force close submits buy") &&
+         expect(engine.orders[0].type == kRecordTypeMarket, "force close uses market order") &&
          expect(engine.orders[0].reduceOnly, "force close order is reduce-only") &&
          expect(engine.orders[0].activeTsNs == 100200, "force close honors order latency") &&
          expect(engine.fills.size() == 1u, "force close writes fill") &&
@@ -405,10 +405,10 @@ bool testCancelOpenOrdersAtFinishWritesCancelAcks() {
   cancelOpenOrders(engine, 2000, 100);
 
   return expect(engine.orders.size() == 2u, "final cleanup writes cancel command") &&
-         expect(engine.orders[0].status == "cancelled", "final cleanup cancels active quote row") &&
-         expect(engine.orders[1].action == "cancel", "final cleanup uses cancel action") &&
+         expect(engine.orders[0].status == kRecordStatusCancelled, "final cleanup cancels active quote row") &&
+         expect(engine.orders[1].action == kRecordActionCancel, "final cleanup uses cancel action") &&
          expect(engine.orders[1].targetId == 1u, "final cleanup targets live client intent id") &&
-         expect(engine.orders[1].status == "acked", "final cleanup cancel is acked") &&
+         expect(engine.orders[1].status == kRecordStatusAcked, "final cleanup cancel is acked") &&
          expect(engine.orders[1].activeTsNs == 102000, "final cleanup honors cancel latency") &&
          expect(!engine.open[0].state.valid, "final cleanup clears open order state");
 }
@@ -433,12 +433,12 @@ bool testAmendFillBelongsToReplacementOrder() {
   tryFillOnTrade(engine, trade);
 
   return expect(engine.orders.size() == 3u, "amend scenario records order cancel and replacement") &&
-         expect(engine.orders[1].action == "cancel", "replace writes cancel leg") &&
-         expect(engine.orders[2].action == "order", "replace writes new order leg") &&
+         expect(engine.orders[1].action == kRecordActionCancel, "replace writes cancel leg") &&
+         expect(engine.orders[2].action == kRecordActionOrder, "replace writes new order leg") &&
          expect(engine.fills.size() == 1u, "replacement order fills once") &&
-         expect(engine.orders[0].status == "cancelled", "original order is cancelled by replace") &&
-         expect(engine.orders[1].status == "acked", "replace cancel leg is acked") &&
-         expect(engine.orders[2].status == "filled", "replacement row is marked filled") &&
+         expect(engine.orders[0].status == kRecordStatusCancelled, "original order is cancelled by replace") &&
+         expect(engine.orders[1].status == kRecordStatusAcked, "replace cancel leg is acked") &&
+         expect(engine.orders[2].status == kRecordStatusFilled, "replacement row is marked filled") &&
          expect(engine.fills[0].orderId == 2u, "fill belongs to replacement client intent id") &&
          expect(engine.fills[0].entryTsNs == 102000, "replacement entry uses amend latency without second order latency");
 }
@@ -469,14 +469,14 @@ bool testAmendChainFillBelongsToLastReplacementOrder() {
   tryFillOnTrade(engine, trade);
 
   return expect(engine.orders.size() == 5u, "amend chain records cancel and new order legs") &&
-         expect(engine.orders[1].action == "cancel", "first replace writes cancel leg") &&
-         expect(engine.orders[2].action == "order", "first replace writes new order leg") &&
-         expect(engine.orders[3].action == "cancel", "second replace writes cancel leg") &&
-         expect(engine.orders[4].action == "order", "second replace writes new order leg") &&
+         expect(engine.orders[1].action == kRecordActionCancel, "first replace writes cancel leg") &&
+         expect(engine.orders[2].action == kRecordActionOrder, "first replace writes new order leg") &&
+         expect(engine.orders[3].action == kRecordActionCancel, "second replace writes cancel leg") &&
+         expect(engine.orders[4].action == kRecordActionOrder, "second replace writes new order leg") &&
          expect(engine.fills.size() == 1u, "last replacement fills once") &&
-         expect(engine.orders[0].status == "cancelled", "original chain row is cancelled by first replace") &&
-         expect(engine.orders[2].status == "cancelled", "intermediate replacement row is cancelled by second replace") &&
-         expect(engine.orders[4].status == "filled", "last replacement row is filled") &&
+         expect(engine.orders[0].status == kRecordStatusCancelled, "original chain row is cancelled by first replace") &&
+         expect(engine.orders[2].status == kRecordStatusCancelled, "intermediate replacement row is cancelled by second replace") &&
+         expect(engine.orders[4].status == kRecordStatusFilled, "last replacement row is filled") &&
          expect(engine.fills[0].orderId == 12u, "fill belongs to last replacement id");
 }
 
@@ -502,10 +502,10 @@ bool testCancelAfterAmendCancelsReplacementOrder() {
   applyDueActions(engine, 220000);
 
   return expect(engine.orders.size() == 4u, "cancel after amend records order replace cancel and new order cancel") &&
-         expect(engine.orders[0].status == "cancelled", "original order is cancelled by replace") &&
-         expect(engine.orders[1].status == "acked", "replace cancel leg is acked") &&
-         expect(engine.orders[2].status == "cancelled", "replacement order is terminal-cancelled") &&
-         expect(engine.orders[3].status == "acked", "cancel command is acked") &&
+         expect(engine.orders[0].status == kRecordStatusCancelled, "original order is cancelled by replace") &&
+         expect(engine.orders[1].status == kRecordStatusAcked, "replace cancel leg is acked") &&
+         expect(engine.orders[2].status == kRecordStatusCancelled, "replacement order is terminal-cancelled") &&
+         expect(engine.orders[3].status == kRecordStatusAcked, "cancel command is acked") &&
          expect(!engine.open[0].state.valid, "replacement cancel clears active order");
 }
 
@@ -640,8 +640,8 @@ bool testWriterCreatesV2RunDirectory() {
   }
 
   EngineState engine{};
-  engine.orders.push_back(JsonOrder{0, 1, 0, 100, 110, 100, "order", "buy", "limit", "filled", kPx100, kQty1, false});
-  engine.fills.push_back(JsonFill{0, 1, 110, 150, "buy", kPx100, kQty1, 0, false});
+  engine.orders.push_back(JsonOrder{0, 1, 0, 100, 110, 100, kRecordActionOrder, kRecordSideBuy, kRecordTypeLimit, kRecordStatusFilled, kPx100, kQty1, false});
+  engine.fills.push_back(JsonFill{0, 1, 110, 150, kRecordSideBuy, kPx100, kQty1, 0, false});
   engine.equityPoints.push_back(JsonEquityPoint{150, 0, 0, 0, 0, 0, 0, 0, 100000000000ll, kQty1, 1});
   engine.riskSnapshots.push_back(JsonRiskSnapshot{150, 0, 0, 0, 0, 0, 0, 100000000000ll, kQty1, kPx100, kPx100 - 100000000ll, kPx100 + 100000000ll, 1, kRiskSnapshotReasonFill});
   engine.strategyIndicatorProfile = "trade_range";
@@ -666,8 +666,8 @@ bool testWriterCreatesV2RunDirectory() {
          expect(manifest.find("\"risk_snapshots\": {") != std::string::npos, "manifest declares risk snapshots stream") &&
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
          expect(manifest.find("\"profile\": \"trade_range\"") != std::string::npos, "indicator stream carries profile") &&
-         expect(orders == "[1,0,100,110,100,1,1,1,3,10000000000,100000000,0]\n", "orders stream uses compact arrays") &&
-         expect(fills == "[1,110,150,1,10000000000,100000000,0,0]\n", "fills stream uses compact arrays") &&
+         expect(orders == "[1,0,100,110,100,1,1,1,3,10000000000,100000000,0,0]\n", "orders stream uses compact arrays") &&
+         expect(fills == "[1,110,150,1,10000000000,100000000,0,0,0]\n", "fills stream uses compact arrays") &&
          expect(equity == "[150,0,0,0,0,0,0,0,100000000000,100000000,1]\n", "equity stream uses compact arrays") &&
          expect(risk == "[150,0,0,0,0,0,0,100000000000,100000000,10000000000,9900000000,10100000000,1,2]\n", "risk stream uses compact arrays") &&
          expect(indicator == "[150,42,44,1,7,3,1]\n", "strategy indicator stream uses compact arrays") &&

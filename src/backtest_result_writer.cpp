@@ -14,33 +14,6 @@ const char* resultStatusName(Status status) noexcept {
   }
 }
 
-std::uint8_t actionCode(const std::string& action) noexcept {
-  if (action == "order") return 1u;
-  if (action == "amend") return 2u;
-  if (action == "cancel") return 3u;
-  return 0u;
-}
-
-std::uint8_t sideCode(const std::string& side) noexcept {
-  return side == "buy" ? 1u : 0u;
-}
-
-std::uint8_t typeCode(const std::string& type) noexcept {
-  if (type == "limit") return 1u;
-  if (type == "market") return 2u;
-  return 0u;
-}
-
-std::uint8_t statusCode(const std::string& status) noexcept {
-  if (status == "pending") return 1u;
-  if (status == "active" || status == "acked" || status == "amended") return 2u;
-  if (status == "filled") return 3u;
-  if (status == "cancelled") return 4u;
-  if (status == "missing") return 5u;
-  if (status == "rejected") return 6u;
-  return 0u;
-}
-
 bool writeOrders(const std::filesystem::path& path, const EngineState& engine) noexcept {
   std::ofstream out(path, std::ios::out | std::ios::trunc);
   if (!out.is_open()) return false;
@@ -50,10 +23,10 @@ bool writeOrders(const std::filesystem::path& path, const EngineState& engine) n
         << ',' << row.submitTsNs
         << ',' << row.activeTsNs
         << ',' << row.tsNs
-        << ',' << static_cast<unsigned>(actionCode(row.action))
-        << ',' << static_cast<unsigned>(sideCode(row.side))
-        << ',' << static_cast<unsigned>(typeCode(row.type))
-        << ',' << static_cast<unsigned>(statusCode(row.status))
+        << ',' << static_cast<unsigned>(row.action)
+        << ',' << static_cast<unsigned>(row.side)
+        << ',' << static_cast<unsigned>(row.type)
+        << ',' << static_cast<unsigned>(row.status)
         << ',' << row.priceE8
         << ',' << row.qtyE8
         << ',' << (row.reduceOnly ? 1 : 0)
@@ -70,7 +43,7 @@ bool writeFills(const std::filesystem::path& path, const EngineState& engine) no
     out << '[' << row.orderId
         << ',' << row.entryTsNs
         << ',' << row.exitTsNs
-        << ',' << static_cast<unsigned>(sideCode(row.side))
+        << ',' << static_cast<unsigned>(row.side)
         << ',' << row.priceE8
         << ',' << row.qtyE8
         << ',' << row.realizedPnlE8

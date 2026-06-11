@@ -38,6 +38,24 @@ constexpr std::uint8_t kRiskSnapshotReasonStart = 1u;
 constexpr std::uint8_t kRiskSnapshotReasonFill = 2u;
 constexpr std::uint8_t kRiskSnapshotReasonInterval = 3u;
 constexpr std::uint8_t kRiskSnapshotReasonFinal = 4u;
+constexpr std::uint8_t kRecordActionNone = 0u;
+constexpr std::uint8_t kRecordActionOrder = 1u;
+constexpr std::uint8_t kRecordActionAmend = 2u;
+constexpr std::uint8_t kRecordActionCancel = 3u;
+constexpr std::uint8_t kRecordSideSell = 0u;
+constexpr std::uint8_t kRecordSideNone = 0u;
+constexpr std::uint8_t kRecordSideBuy = 1u;
+constexpr std::uint8_t kRecordTypeNone = 0u;
+constexpr std::uint8_t kRecordTypeLimit = 1u;
+constexpr std::uint8_t kRecordTypeMarket = 2u;
+constexpr std::uint8_t kRecordStatusNone = 0u;
+constexpr std::uint8_t kRecordStatusPending = 1u;
+constexpr std::uint8_t kRecordStatusAcked = 2u;
+constexpr std::uint8_t kRecordStatusActive = kRecordStatusAcked;
+constexpr std::uint8_t kRecordStatusFilled = 3u;
+constexpr std::uint8_t kRecordStatusCancelled = 4u;
+constexpr std::uint8_t kRecordStatusMissing = 5u;
+constexpr std::uint8_t kRecordStatusRejected = 6u;
 
 enum class PendingActionKind : std::uint8_t {
   OrderAck = 0,
@@ -53,10 +71,10 @@ struct JsonOrder {
   std::int64_t submitTsNs{0};
   std::int64_t activeTsNs{0};
   std::int64_t tsNs{0};
-  std::string action{};
-  std::string side{};
-  std::string type{};
-  std::string status{};
+  std::uint8_t action{kRecordActionNone};
+  std::uint8_t side{kRecordSideNone};
+  std::uint8_t type{kRecordTypeNone};
+  std::uint8_t status{kRecordStatusNone};
   std::int64_t priceE8{0};
   std::int64_t qtyE8{0};
   bool reduceOnly{false};
@@ -67,7 +85,7 @@ struct JsonFill {
   std::uint64_t orderId{0};
   std::int64_t entryTsNs{0};
   std::int64_t exitTsNs{0};
-  std::string side{};
+  std::uint8_t side{kRecordSideNone};
   std::int64_t priceE8{0};
   std::int64_t qtyE8{0};
   std::int64_t realizedPnlE8{0};
