@@ -191,8 +191,9 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
 }
 
 void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
-  const std::int64_t bid = engine.venueSnapshot.lastBookTicker.bid.px.raw;
-  const std::int64_t ask = engine.venueSnapshot.lastBookTicker.ask.px.raw;
+  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+  const std::int64_t bid = top.bid.px.raw;
+  const std::int64_t ask = top.ask.px.raw;
   if (bid <= 0 || ask <= 0) return;
   for (OpenOrder& order : engine.open) {
     if (!order.state.valid || !order.active) continue;
@@ -281,7 +282,8 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
 
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs) {
   if (engine.netQtyRaw == 0) return true;
-  if (engine.venueSnapshot.lastBookTicker.bid.px.raw <= 0 || engine.venueSnapshot.lastBookTicker.ask.px.raw <= 0) return false;
+  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+  if (top.bid.px.raw <= 0 || top.ask.px.raw <= 0) return false;
 
   hft_trader::core::OrderIntent intent{};
   intent.clientIntentId.raw = nextOrderId(engine);
@@ -301,7 +303,8 @@ bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t or
 
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency) {
   if (engine.netQtyRaw == 0) return true;
-  if (engine.venueSnapshot.lastBookTicker.bid.px.raw <= 0 || engine.venueSnapshot.lastBookTicker.ask.px.raw <= 0) return false;
+  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+  if (top.bid.px.raw <= 0 || top.ask.px.raw <= 0) return false;
 
   hft_trader::core::OrderIntent intent{};
   intent.clientIntentId.raw = nextOrderId(engine);

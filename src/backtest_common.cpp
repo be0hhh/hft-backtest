@@ -78,17 +78,21 @@ cxet::composite::BookTickerRuntimeV1 toRuntime(const BookTickerRow& row) noexcep
   return out;
 }
 
-cxet::composite::OrderBookDeltaRuntimeV1 toRuntime(const DepthRow& row) noexcept {
-  cxet::composite::OrderBookDeltaRuntimeV1 out{};
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+void toRuntime(const DepthRow& row,
+               cxet::composite::OrderBookTapeRuntimeV1& tape,
+               cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept {
+  cxet::composite::resetOrderBookTapeRuntimeHeader(tape);
+  cxet::composite::resetOrderBookTapeSidesRuntimeHeader(sides);
+  TimeNs ts{};
+  ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+  (void)cxet::composite::appendOrderBookTapeTimestamp(tape, ts);
   for (const PriceLevelRow& level : row.levels) {
     Price price{};
     Amount qty{};
     price.raw = level.priceE8;
     qty.raw = level.qtyE8;
-    (void)cxet::composite::appendOrderBookLevel(out, price, qty, sideFromRow(level.side));
+    (void)cxet::composite::appendOrderBookTapePriceQtyWithSide(tape, sides, price, qty, sideFromRow(level.side));
   }
-  return out;
 }
 
 cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const SnapshotDocument& row) noexcept {

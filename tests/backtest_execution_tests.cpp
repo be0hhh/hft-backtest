@@ -571,6 +571,60 @@ bool testLoadSessionFailsMissingRequiredDepth() {
          expect(error.find("depth") != std::string::npos, "missing required depth error names channel");
 }
 
+bool testLoadSessionPrefersDepthTapeSidecar() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_depth_tape_" + std::to_string(std::rand()));
+  std::filesystem::create_directories(dir / "jsonl");
+  writeText(dir / "manifest.json",
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
+            "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
+  writeText(dir / "jsonl" / "depth_tape.jsonl",
+            "[9223372036854776810,9900000000,100000000,10100000000,200000000]\n");
+  writeText(dir / "jsonl" / "depth_sidecar.jsonl", "[9223372036854776810,1,1,0,1]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9700000000,100000000,1],[10300000000,100000000,0],1002]\n");
+
+  SessionLoadPlan plan{};
+  plan.loadDepths = true;
+  plan.requireDepths = true;
+  SessionData data{};
+  std::string error;
+  const hft_backtest::Status status = loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::Ok, "loader accepts depth tape sidecar package") &&
+         expect(data.depths.size() == 1u, "depth tape sidecar yields one depth row") &&
+         expect(data.depths[0].tsNs == 1002, "depth tape sidecar decodes tagged timestamp") &&
+         expect(data.depths[0].levels.size() == 2u, "depth tape sidecar decodes levels") &&
+         expect(data.depths[0].levels[0].priceE8 == 9900000000ll, "depth tape sidecar wins over legacy depth") &&
+         expect(data.depths[0].levels[0].side == 1, "depth tape sidecar applies bid side") &&
+         expect(data.depths[0].levels[1].side == 0, "depth tape sidecar applies ask side");
+}
+
+bool testLoadSessionRejectsDepthTapeWithoutTaggedTimestamp() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_depth_tape_bad_tag_" + std::to_string(std::rand()));
+  std::filesystem::create_directories(dir / "jsonl");
+  writeText(dir / "manifest.json",
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
+            "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
+  writeText(dir / "jsonl" / "depth_tape.jsonl",
+            "[1002,9900000000,100000000]\n");
+  writeText(dir / "jsonl" / "depth_sidecar.jsonl", "[1002,1,1]\n");
+
+  SessionLoadPlan plan{};
+  plan.loadDepths = true;
+  plan.requireDepths = true;
+  SessionData data{};
+  std::string error;
+  const hft_backtest::Status status = loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::CorruptData,
+                "loader rejects depth tape without tagged timestamp") &&
+         expect(error.find("depth_tape") != std::string::npos,
+                "bad depth tape error names depth_tape");
+}
+
 bool testDepthRowBuildsInitialOrderBookSnapshot() {
   DepthRow row{};
   row.tsNs = 1002;
@@ -915,6 +969,8 @@ int main() {
   ok = testCancelAfterAmendCancelsReplacementOrder() && ok;
   ok = testLoadSessionUsesManifestChannelPathsAndMetadata() && ok;
   ok = testLoadSessionFailsMissingRequiredDepth() && ok;
+  ok = testLoadSessionPrefersDepthTapeSidecar() && ok;
+  ok = testLoadSessionRejectsDepthTapeWithoutTaggedTimestamp() && ok;
   ok = testDepthRowBuildsInitialOrderBookSnapshot() && ok;
   ok = testTieredCandleHistoryBuildsCounts() && ok;
   ok = testWriterCreatesV2RunDirectory() && ok;

@@ -11,6 +11,7 @@
 #include "hft_trader/runtime/GeneratedStrategyRegistry.hpp"
 #include "hft_trader/runtime/config/RuntimeConfig.hpp"
 #include "hft_trader/runtime/runner/StrategyMarketDataRuntime.hpp"
+#include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
 
 #include <array>
 #include <algorithm>
@@ -746,6 +747,18 @@ std::int64_t nextPendingTs(const detail::EngineState& engine) noexcept {
       : engine.pending.front().activeTsNs;
 }
 
+void applyBacktestReconstructedBbo(hft_trader::core::StrategyMarketSnapshot& snapshot,
+                                   hft_trader::core::LocalOrderBookState& orderBook,
+                                   const hft_trader::core::BboReconstructionState& bbo) noexcept {
+  const hft_trader::core::BboReconstructionView view = hft_trader::core::reconstructedBbo(bbo);
+  hft_trader::core::copyReconstructedBboSnapshot(snapshot, view);
+  if (hft_trader::core::validReconstructedBbo(view) &&
+      orderBook.initialized.raw == hft_trader::core::kAlgoFlagTrue.raw) {
+    (void)hft_trader::core::applyBboOverlay(orderBook, view.bookTicker, view.bidQtyKnown, view.askQtyKnown);
+    hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
+  }
+}
+
 std::int64_t nextWakeTs(const StrategyDescriptor& descriptor, const void* state) noexcept {
   if (!descriptor.nextWakeMono) return std::numeric_limits<std::int64_t>::max();
   const TimeNs wake = descriptor.nextWakeMono(state);
@@ -761,26 +774,33 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
                                  bool strategyVisible) {
   hft_trader::core::StrategyMarketSnapshot& snapshot = strategyVisible ? engine.snapshot : engine.venueSnapshot;
   hft_trader::core::LocalOrderBookState& orderBook = strategyVisible ? engine.orderBook : engine.venueOrderBook;
+  hft_trader::core::BboReconstructionState& bbo = strategyVisible ? engine.bboReconstruction : engine.venueBboReconstruction;
   if (event.kind == 0) {
-    const auto delta = detail::toRuntime(session.depths[event.index]);
-    hft_trader::core::copyDepthSnapshot(snapshot, delta);
+    cxet::composite::OrderBookTapeRuntimeV1 tape{};
+    cxet::composite::OrderBookTapeSidesRuntimeV1 sides{};
+    detail::toRuntime(session.depths[event.index], tape, sides);
+    hft_trader::core::copyDepthSnapshot(snapshot, tape, sides);
     if (orderBook.initialized.raw != hft_trader::core::kAlgoFlagTrue.raw) {
       hft_trader::core::LocalOrderBookConfig bookConfig{};
       bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
       bookConfig.tickSizeRaw = instrument.tickSizeRaw;
       hft_trader::core::applySnapshot(orderBook, detail::toRuntimeSnapshot(session.depths[event.index]), selectedSymbol, bookConfig);
     } else {
-      (void)hft_trader::core::applyDelta(orderBook, delta);
+      (void)hft_trader::core::applyTapeDelta(orderBook, tape, sides);
     }
+    applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
     hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
   } else if (event.kind == 1) {
     const auto trade = detail::toRuntime(session.trades[event.index]);
     hft_trader::core::copyTradeSnapshot(snapshot, trade);
+    (void)hft_trader::core::applyTrade(bbo, trade);
+    applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
     if (!strategyVisible) detail::tryFillOnTrade(engine, trade);
   } else {
     const auto ticker = detail::toRuntime(session.bookTickers[event.index]);
     hft_trader::core::copyBookTickerSnapshot(snapshot, ticker);
-    (void)hft_trader::core::applyBookTicker(orderBook, ticker);
+    (void)hft_trader::core::applyBookTicker(bbo, ticker);
+    applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
     hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
     if (!strategyVisible) detail::tryFillOnTop(engine, event.tsNs);
   }

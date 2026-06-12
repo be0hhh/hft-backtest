@@ -5,6 +5,7 @@
 #include "backtest_latency.hpp"
 #include "session_loader.hpp"
 
+#include "hft_trader/core/market/BboReconstruction.hpp"
 #include "hft_trader/core/market/LocalOrderBook.hpp"
 #include "hft_trader/core/intents/OrderState.hpp"
 #include "hft_trader/core/intents/PositionState.hpp"
@@ -13,8 +14,8 @@
 #include "canon/PositionAndExchange.hpp"
 #include "canon/Subtypes.hpp"
 #include "primitives/composite/BookTickerRuntimeV1.hpp"
-#include "primitives/composite/OrderBookDeltaRuntimeV1.hpp"
 #include "primitives/composite/OrderBookSnapshot.hpp"
+#include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
 #include "primitives/composite/TieredCandleHistory.hpp"
 #include "primitives/composite/TradeRuntimeV1.hpp"
 #include "primitives/composite/UserDataEvent.hpp"
@@ -195,6 +196,8 @@ struct EngineState {
   hft_trader::core::StrategyMarketSnapshot venueSnapshot{};
   hft_trader::core::LocalOrderBookState orderBook{};
   hft_trader::core::LocalOrderBookState venueOrderBook{};
+  hft_trader::core::BboReconstructionState bboReconstruction{};
+  hft_trader::core::BboReconstructionState venueBboReconstruction{};
   BacktestInputCoverage inputCoverage{};
   std::uint32_t legIndex{0u};
   ExchangeId exchange{};
@@ -221,6 +224,13 @@ struct EngineState {
   bool hasRiskSnapshot{false};
 };
 
+inline const cxet::composite::BookTickerRuntimeV1& effectiveBookTicker(
+    const hft_trader::core::StrategyMarketSnapshot& snapshot) noexcept {
+  return snapshot.hasReconstructedBbo.raw == hft_trader::core::kAlgoFlagTrue.raw
+             ? snapshot.reconstructedBookTicker
+             : snapshot.lastBookTicker;
+}
+
 struct TimelineEvent {
   std::int64_t tsNs{0};
   std::int64_t deliveryTsNs{0};
@@ -237,7 +247,9 @@ Side sideFromRow(std::int64_t raw) noexcept;
 
 cxet::composite::TradeRuntimeV1 toRuntime(const TradeRow& row) noexcept;
 cxet::composite::BookTickerRuntimeV1 toRuntime(const BookTickerRow& row) noexcept;
-cxet::composite::OrderBookDeltaRuntimeV1 toRuntime(const DepthRow& row) noexcept;
+void toRuntime(const DepthRow& row,
+               cxet::composite::OrderBookTapeRuntimeV1& tape,
+               cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept;
 cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const SnapshotDocument& row) noexcept;
 cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const DepthRow& row) noexcept;
 bool buildTieredCandleHistory(const std::vector<CandleRow>& rows,

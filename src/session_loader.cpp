@@ -1,5 +1,7 @@
 #include "session_loader.hpp"
 
+#include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -7,6 +9,7 @@
 #include <limits>
 #include <sstream>
 #include <string_view>
+#include <utility>
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -104,6 +107,24 @@ bool parseI64(std::string_view text, std::size_t& pos, std::int64_t& out) noexce
   return true;
 }
 
+bool parseU64(std::string_view text, std::size_t& pos, std::uint64_t& out) noexcept {
+  skipWs(text, pos);
+  if (pos >= text.size() || text[pos] == '-' || text[pos] == '+') return false;
+  std::uint64_t value = 0u;
+  bool any = false;
+  while (pos < text.size()) {
+    const unsigned digit = static_cast<unsigned>(static_cast<unsigned char>(text[pos]) - static_cast<unsigned char>('0'));
+    if (digit > 9u) break;
+    if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / 10u) return false;
+    value = value * 10u + digit;
+    any = true;
+    ++pos;
+  }
+  if (!any) return false;
+  out = value;
+  return true;
+}
+
 bool parseLevel(std::string_view text, std::size_t& pos, PriceLevelRow& out) noexcept {
   return consume(text, pos, '[') && parseI64(text, pos, out.priceE8) && consume(text, pos, ',') &&
          parseI64(text, pos, out.qtyE8) && consume(text, pos, ',') && parseI64(text, pos, out.side) &&
@@ -179,6 +200,70 @@ bool parseBookDocument(std::string_view line, std::vector<PriceLevelRow>& levels
   return true;
 }
 
+bool parseDepthTapeLine(std::string_view line, DepthRow& row, std::uint64_t& taggedTs) noexcept {
+  std::size_t pos = 0;
+  row = DepthRow{};
+  if (!consume(line, pos, '[') || !parseU64(line, pos, taggedTs)) return false;
+  if (!cxet::composite::isOrderBookTapeTimestampWord(taggedTs)) return false;
+  const TimeNs ts = cxet::composite::orderBookTapeTimestampFromWord(taggedTs);
+  if (ts.raw > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) return false;
+  row.tsNs = static_cast<std::int64_t>(ts.raw);
+  while (true) {
+    skipWs(line, pos);
+    if (pos >= line.size()) return false;
+    if (line[pos] == ']') {
+      ++pos;
+      skipWs(line, pos);
+      return pos == line.size();
+    }
+    if (!consume(line, pos, ',')) return false;
+    PriceLevelRow level{};
+    if (!parseI64(line, pos, level.priceE8) || !consume(line, pos, ',') || !parseI64(line, pos, level.qtyE8)) {
+      return false;
+    }
+    if (level.priceE8 < 0 || level.qtyE8 < 0) return false;
+    row.levels.push_back(level);
+  }
+}
+
+bool applyDepthSidecarLine(std::string_view line, std::uint64_t expectedTaggedTs, DepthRow& row) noexcept {
+  std::size_t pos = 0;
+  std::uint64_t taggedTs = 0u;
+  if (!consume(line, pos, '[') || !parseU64(line, pos, taggedTs) || taggedTs != expectedTaggedTs) return false;
+  std::size_t levelIndex = 0u;
+  while (true) {
+    skipWs(line, pos);
+    if (pos >= line.size()) return false;
+    if (line[pos] == ']') {
+      ++pos;
+      skipWs(line, pos);
+      return pos == line.size() && levelIndex == row.levels.size();
+    }
+    std::int64_t side = 0;
+    std::int64_t count = 0;
+    if (!consume(line, pos, ',') || !parseI64(line, pos, side) || !consume(line, pos, ',') ||
+        !parseI64(line, pos, count)) {
+      return false;
+    }
+    if ((side != 0 && side != 1) || count < 0) return false;
+    for (std::int64_t i = 0; i < count; ++i) {
+      if (levelIndex >= row.levels.size()) return false;
+      row.levels[levelIndex++].side = side;
+    }
+  }
+}
+
+bool readLine(std::string_view text, std::size_t& pos, std::string_view& line) noexcept {
+  if (pos >= text.size()) return false;
+  const std::size_t lineStart = pos;
+  while (pos < text.size() && text[pos] != '\n') ++pos;
+  std::size_t lineEnd = pos;
+  if (pos < text.size() && text[pos] == '\n') ++pos;
+  if (lineEnd > lineStart && text[lineEnd - 1u] == '\r') --lineEnd;
+  line = std::string_view{text.data() + lineStart, lineEnd - lineStart};
+  return true;
+}
+
 template<typename Row, typename ParseFn>
 Status loadJsonl(const std::filesystem::path& path,
                  std::string_view channel,
@@ -245,6 +330,65 @@ Status loadJsonl(const std::filesystem::path& path,
   return Status::Ok;
 }
 
+Status loadDepthTapeSidecarJsonl(const std::filesystem::path& tapePath,
+                                 const std::filesystem::path& sidecarPath,
+                                 bool required,
+                                 std::vector<DepthRow>& out,
+                                 std::string& error) {
+  out.clear();
+  if (!std::filesystem::exists(tapePath) || !std::filesystem::exists(sidecarPath)) {
+    if (required) {
+      error = "missing required depth_tape/depth_sidecar package";
+      return Status::CorruptData;
+    }
+    return Status::Ok;
+  }
+  MappedFile tapeFile{};
+  MappedFile sidecarFile{};
+  if (!tapeFile.open(tapePath) || !sidecarFile.open(sidecarPath)) {
+    error = "failed to open depth_tape/depth_sidecar package";
+    return Status::IoError;
+  }
+  const std::string_view tapeText = tapeFile.view();
+  const std::string_view sidecarText = sidecarFile.view();
+  std::size_t expectedRows = 0u;
+  for (char c : tapeText) {
+    if (c == '\n') ++expectedRows;
+  }
+  if (!tapeText.empty() && tapeText.back() != '\n') ++expectedRows;
+  out.reserve(expectedRows);
+
+  std::size_t tapePos = 0u;
+  std::size_t sidecarPos = 0u;
+  std::uint64_t lineNo = 0u;
+  while (tapePos < tapeText.size() || sidecarPos < sidecarText.size()) {
+    std::string_view tapeLine{};
+    std::string_view sidecarLine{};
+    const bool hasTape = readLine(tapeText, tapePos, tapeLine);
+    const bool hasSidecar = readLine(sidecarText, sidecarPos, sidecarLine);
+    ++lineNo;
+    if (hasTape != hasSidecar || tapeLine.empty() || sidecarLine.empty()) {
+      error = "depth_tape/depth_sidecar line count mismatch at line ";
+      error += std::to_string(lineNo);
+      return Status::CorruptData;
+    }
+    DepthRow row{};
+    std::uint64_t taggedTs = 0u;
+    if (!parseDepthTapeLine(tapeLine, row, taggedTs) || !applyDepthSidecarLine(sidecarLine, taggedTs, row)) {
+      error = "failed to parse depth_tape/depth_sidecar line ";
+      error += std::to_string(lineNo);
+      return Status::CorruptData;
+    }
+    out.push_back(std::move(row));
+  }
+  if (required && out.empty()) {
+    error = "required depth_tape/depth_sidecar package is empty: ";
+    error += tapePath.generic_string();
+    return Status::CorruptData;
+  }
+  return Status::Ok;
+}
+
 std::string extractStringAfter(std::string_view text, std::string_view key) {
   const std::size_t keyPos = text.find(key);
   if (keyPos == std::string_view::npos) return {};
@@ -299,6 +443,14 @@ std::string extractChannelPath(std::string_view manifest, std::string_view chann
   const std::string_view object = extractObjectAfter(manifest, key);
   if (object.empty()) return extractStringAfter(manifest, key);
   return extractStringAfter(object, "\"path\"");
+}
+
+std::string extractChannelSidecarPath(std::string_view manifest, std::string_view channel) {
+  std::string key{"\""};
+  key += channel;
+  key += "\"";
+  const std::string_view object = extractObjectAfter(manifest, key);
+  return object.empty() ? std::string{} : extractStringAfter(object, "\"sidecar_path\"");
 }
 
 std::string extractArtifactPath(std::string_view manifest, std::string_view keyName) {
@@ -402,6 +554,7 @@ Status loadSession(const std::filesystem::path& sessionPath,
   const std::string tradesPath = extractChannelPath(manifest, "trades");
   const std::string bookTickerPath = extractChannelPath(manifest, "bookticker");
   const std::string depthPath = extractChannelPath(manifest, "depth");
+  const std::string depthSidecarPath = extractChannelSidecarPath(manifest, "depth");
   const std::string candlesPath = extractChannelPath(manifest, "candles");
   loadTradeHistoryManifestFields(manifest, out);
   if (out.exchange.empty() || out.market.empty() || out.symbol.empty()) {
@@ -422,9 +575,24 @@ Status loadSession(const std::filesystem::path& sessionPath,
     if (!isOk(status)) return status;
   }
   if (plan.loadDepths) {
-    Status status = loadJsonl<DepthRow>(existingPath(sessionPath, depthPath, "depth.jsonl"), "depth", plan.requireDepths, out.depths, [](std::string_view line, DepthRow& row) noexcept {
-      return parseBookDocument(line, row.levels, row.tsNs, &row.ingestSeq);
-    }, error);
+    const std::filesystem::path declaredDepth = depthPath.empty()
+                                                    ? std::filesystem::path{}
+                                                    : sessionPath / std::filesystem::path{depthPath};
+    const bool declaredTape = !declaredDepth.empty() && declaredDepth.filename() == "depth_tape.jsonl";
+    const std::filesystem::path tapePath = declaredTape
+                                               ? existingPath(sessionPath, depthPath, "depth_tape.jsonl")
+                                               : existingPath(sessionPath, std::string_view{}, "depth_tape.jsonl");
+    const std::filesystem::path sidecarPath = !depthSidecarPath.empty()
+                                                  ? existingPath(sessionPath, depthSidecarPath, "depth_sidecar.jsonl")
+                                                  : existingPath(sessionPath, std::string_view{}, "depth_sidecar.jsonl");
+    Status status = Status::Ok;
+    if (std::filesystem::exists(tapePath) || std::filesystem::exists(sidecarPath)) {
+      status = loadDepthTapeSidecarJsonl(tapePath, sidecarPath, plan.requireDepths, out.depths, error);
+    } else {
+      status = loadJsonl<DepthRow>(existingPath(sessionPath, depthPath, "depth.jsonl"), "depth", plan.requireDepths, out.depths, [](std::string_view line, DepthRow& row) noexcept {
+        return parseBookDocument(line, row.levels, row.tsNs, &row.ingestSeq);
+      }, error);
+    }
     if (!isOk(status)) return status;
   }
   if (plan.loadCandles) {

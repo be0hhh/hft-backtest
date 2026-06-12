@@ -68,8 +68,9 @@ std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
   if (engine.netQtyRaw == 0 || engine.entryPriceE8 <= 0) return 0;
   const bool longPosition = engine.netQtyRaw > 0;
   const std::int64_t qty = longPosition ? engine.netQtyRaw : -engine.netQtyRaw;
-  const std::int64_t bid = engine.venueSnapshot.lastBookTicker.bid.px.raw;
-  const std::int64_t ask = engine.venueSnapshot.lastBookTicker.ask.px.raw;
+  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+  const std::int64_t bid = top.bid.px.raw;
+  const std::int64_t ask = top.ask.px.raw;
   if (longPosition) return bid > 0 ? mulPriceQtyE8(bid - engine.entryPriceE8, qty) : 0;
   return ask > 0 ? mulPriceQtyE8(engine.entryPriceE8 - ask, qty) : 0;
 }
@@ -92,6 +93,7 @@ void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t rea
   const std::int64_t unrealized = unrealizedPnlE8(engine);
   const std::int64_t grossTotal = engine.grossRealizedPnlE8 + unrealized;
   const std::int64_t netTotal = engine.netRealizedPnlE8 + unrealized;
+  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
   engine.riskSnapshots.push_back(JsonRiskSnapshot{tsNs,
                                                   engine.grossRealizedPnlE8,
                                                   engine.netRealizedPnlE8,
@@ -102,8 +104,8 @@ void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t rea
                                                   engine.walletBalanceE8,
                                                   engine.netQtyRaw,
                                                   engine.entryPriceE8,
-                                                  engine.venueSnapshot.lastBookTicker.bid.px.raw,
-                                                  engine.venueSnapshot.lastBookTicker.ask.px.raw,
+                                                  top.bid.px.raw,
+                                                  top.ask.px.raw,
                                                   static_cast<std::uint64_t>(engine.fills.size()),
                                                   reason});
   engine.lastRiskSnapshotTsNs = tsNs;
