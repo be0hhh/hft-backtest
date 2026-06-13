@@ -32,6 +32,14 @@ struct BookTickerRow {
   std::int64_t ingestSeq{0};
 };
 
+struct PriceLimitRow {
+  std::int64_t buyLimitE8{0};
+  std::int64_t sellLimitE8{0};
+  std::uint8_t enabled{0};
+  std::int64_t tsNs{0};
+  std::int64_t ingestSeq{0};
+};
+
 struct DepthRow {
   std::int64_t tsNs{0};
   std::int64_t ingestSeq{0};
@@ -60,10 +68,12 @@ struct InstrumentMetadata {
 struct SessionLoadPlan {
   bool loadTrades{true};
   bool loadBookTickers{true};
+  bool loadPriceLimits{true};
   bool loadDepths{true};
   bool loadCandles{false};
   bool requireTrades{false};
   bool requireBookTickers{false};
+  bool requirePriceLimits{false};
   bool requireDepths{false};
   bool requireCandles{false};
 };
@@ -76,6 +86,7 @@ struct SessionData {
   std::vector<TradeRow> trades{};
   std::vector<TradeRow> tradeWarmup{};
   std::vector<BookTickerRow> bookTickers{};
+  std::vector<PriceLimitRow> priceLimits{};
   std::vector<DepthRow> depths{};
   std::vector<CandleRow> candles{};
   SnapshotDocument snapshot{};

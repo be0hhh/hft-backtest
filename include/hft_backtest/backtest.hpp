@@ -63,6 +63,7 @@ struct BacktestInputCoverage {
   std::uint64_t strategyCycles{0};
   std::uint64_t cyclesWithTrade{0};
   std::uint64_t cyclesWithBookTicker{0};
+  std::uint64_t cyclesWithPriceLimit{0};
   std::uint64_t cyclesWithDepth{0};
   std::uint64_t cyclesWithOrderBook{0};
   std::uint64_t seedTradeRows{0};
@@ -113,6 +114,7 @@ struct BacktestRunResult {
   std::uint64_t cancelLatencyUs{1000};
   std::uint64_t trades{0};
   std::uint64_t bookTickers{0};
+  std::uint64_t priceLimits{0};
   std::uint64_t depths{0};
   std::uint64_t orders{0};
   std::uint64_t fills{0};

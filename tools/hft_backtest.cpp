@@ -13,7 +13,7 @@
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps]\n";
+  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {
@@ -152,6 +152,8 @@ int main(int argc, char** argv) {
       if (const char* value = needValue(arg)) request.configPath = value;
     } else if (std::strcmp(arg, "--strategy") == 0) {
       if (const char* value = needValue(arg)) request.strategy = value;
+    } else if (std::strcmp(arg, "--indicator-profile") == 0) {
+      if (const char* value = needValue(arg)) request.indicatorProfile = value;
     } else if (std::strcmp(arg, "--output") == 0) {
       if (const char* value = needValue(arg)) request.outputPath = value;
     } else if (std::strcmp(arg, "--run-id") == 0) {

@@ -168,6 +168,21 @@ bool parseBookTickerLine(std::string_view line, BookTickerRow& out) noexcept {
   return true;
 }
 
+bool parsePriceLimitLine(std::string_view line, PriceLimitRow& out) noexcept {
+  std::size_t pos = 0;
+  std::int64_t enabled = 0;
+  out = PriceLimitRow{};
+  if (!consume(line, pos, '[') || !parseI64(line, pos, out.buyLimitE8) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.sellLimitE8) || !consume(line, pos, ',') || !parseI64(line, pos, enabled) ||
+      !consume(line, pos, ',') || !parseI64(line, pos, out.tsNs)) {
+    return false;
+  }
+  out.enabled = enabled != 0 ? 1u : 0u;
+  std::int64_t captureSeq = 0;
+  if (consume(line, pos, ',') && (!parseI64(line, pos, captureSeq) || !consume(line, pos, ',') || !parseI64(line, pos, out.ingestSeq))) return false;
+  return true;
+}
+
 bool parseCandleLine(std::string_view line, CandleRow& out) noexcept {
   std::size_t pos = 0;
   out = CandleRow{};
@@ -527,6 +542,7 @@ void rebuildReplayRange(SessionData& out) noexcept {
   if (out.hasSnapshot) updateRange(out, out.snapshot.tsNs);
   for (const TradeRow& row : out.trades) updateRange(out, row.tsNs);
   for (const BookTickerRow& row : out.bookTickers) updateRange(out, row.tsNs);
+  for (const PriceLimitRow& row : out.priceLimits) updateRange(out, row.tsNs);
   for (const DepthRow& row : out.depths) updateRange(out, row.tsNs);
 }
 
@@ -553,6 +569,7 @@ Status loadSession(const std::filesystem::path& sessionPath,
   out.symbol = extractStringAfter(manifest, "\"symbols\"");
   const std::string tradesPath = extractChannelPath(manifest, "trades");
   const std::string bookTickerPath = extractChannelPath(manifest, "bookticker");
+  const std::string priceLimitPath = extractChannelPath(manifest, "price_limit");
   const std::string depthPath = extractChannelPath(manifest, "depth");
   const std::string depthSidecarPath = extractChannelSidecarPath(manifest, "depth");
   const std::string candlesPath = extractChannelPath(manifest, "candles");
@@ -572,6 +589,10 @@ Status loadSession(const std::filesystem::path& sessionPath,
   }
   if (plan.loadBookTickers) {
     Status status = loadJsonl<BookTickerRow>(existingPath(sessionPath, bookTickerPath, "bookticker.jsonl"), "bookticker", plan.requireBookTickers, out.bookTickers, parseBookTickerLine, error);
+    if (!isOk(status)) return status;
+  }
+  if (plan.loadPriceLimits) {
+    Status status = loadJsonl<PriceLimitRow>(existingPath(sessionPath, priceLimitPath, "price_limit.jsonl"), "price_limit", plan.requirePriceLimits, out.priceLimits, parsePriceLimitLine, error);
     if (!isOk(status)) return status;
   }
   if (plan.loadDepths) {

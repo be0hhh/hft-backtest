@@ -3,12 +3,16 @@
 namespace hft_backtest::detail {
 namespace {
 
+Side orderBookSideFromRow(std::int64_t raw) noexcept {
+  return raw == 0 ? Side::Buy() : Side::Sell();
+}
+
 void appendSnapshotLevel(cxet::composite::OrderBookSnapshot& out, const PriceLevelRow& level) noexcept {
   Price price{};
   Amount qty{};
   price.raw = level.priceE8;
   qty.raw = level.qtyE8;
-  (void)cxet::composite::appendOrderBookLevel(out, price, qty, sideFromRow(level.side));
+  (void)cxet::composite::appendOrderBookLevel(out, price, qty, orderBookSideFromRow(level.side));
 }
 
 bool appendCandle(cxet::composite::CandleLite* out, CountVal& count, const CandleRow& row) noexcept {
@@ -78,6 +82,15 @@ cxet::composite::BookTickerRuntimeV1 toRuntime(const BookTickerRow& row) noexcep
   return out;
 }
 
+cxet::composite::PriceLimitRuntimeV1 toRuntime(const PriceLimitRow& row) noexcept {
+  cxet::composite::PriceLimitRuntimeV1 out{};
+  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+  out.buyLimit.raw = row.buyLimitE8;
+  out.sellLimit.raw = row.sellLimitE8;
+  out.enabled = row.enabled;
+  return out;
+}
+
 void toRuntime(const DepthRow& row,
                cxet::composite::OrderBookTapeRuntimeV1& tape,
                cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept {
@@ -91,7 +104,7 @@ void toRuntime(const DepthRow& row,
     Amount qty{};
     price.raw = level.priceE8;
     qty.raw = level.qtyE8;
-    (void)cxet::composite::appendOrderBookTapePriceQtyWithSide(tape, sides, price, qty, sideFromRow(level.side));
+    (void)cxet::composite::appendOrderBookTapePriceQtyWithSide(tape, sides, price, qty, orderBookSideFromRow(level.side));
   }
 }
 

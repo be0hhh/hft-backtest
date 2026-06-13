@@ -67,10 +67,12 @@ detail::EngineState aggregateArtifactEngine(const std::vector<detail::EngineStat
 bool sameLoadPlan(const detail::SessionLoadPlan& lhs, const detail::SessionLoadPlan& rhs) noexcept {
   return lhs.loadTrades == rhs.loadTrades &&
          lhs.loadBookTickers == rhs.loadBookTickers &&
+         lhs.loadPriceLimits == rhs.loadPriceLimits &&
          lhs.loadDepths == rhs.loadDepths &&
          lhs.loadCandles == rhs.loadCandles &&
          lhs.requireTrades == rhs.requireTrades &&
          lhs.requireBookTickers == rhs.requireBookTickers &&
+         lhs.requirePriceLimits == rhs.requirePriceLimits &&
          lhs.requireDepths == rhs.requireDepths &&
          lhs.requireCandles == rhs.requireCandles;
 }
@@ -130,6 +132,7 @@ bool buildSessionLoadPlan(const StrategyDescriptor& descriptor, detail::SessionL
   out = detail::SessionLoadPlan{};
   out.loadTrades = false;
   out.loadBookTickers = false;
+  out.loadPriceLimits = false;
   out.loadDepths = false;
   out.loadCandles = descriptor.seedHistory != nullptr;
   out.requireCandles = descriptor.seedHistory != nullptr;
@@ -143,6 +146,9 @@ bool buildSessionLoadPlan(const StrategyDescriptor& descriptor, detail::SessionL
     } else if (stream == cxet::api::market::PublicMarketDataStream::BookTicker) {
       out.loadBookTickers = true;
       out.requireBookTickers = true;
+    } else if (stream == cxet::api::market::PublicMarketDataStream::PriceLimit) {
+      out.loadPriceLimits = true;
+      out.requirePriceLimits = true;
     } else if (stream == cxet::api::market::PublicMarketDataStream::Orderbook) {
       out.loadDepths = true;
       out.requireDepths = true;
@@ -317,6 +323,7 @@ void recordInputCoverage(detail::EngineState& engine) noexcept {
   ++engine.inputCoverage.strategyCycles;
   if (engine.snapshot.hasTrade.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithTrade;
   if (engine.snapshot.hasBookTicker.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithBookTicker;
+  if (engine.snapshot.hasPriceLimit.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithPriceLimit;
   if (engine.snapshot.hasDepth.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithDepth;
   if (engine.snapshot.hasOrderBook.raw == hft_trader::core::kAlgoFlagTrue.raw && engine.snapshot.orderBook) ++engine.inputCoverage.cyclesWithOrderBook;
 }
@@ -343,6 +350,7 @@ void appendProbeMetric(detail::EngineState& engine,
   row.volumeWindowReady = trace.volumeWindowReady;
   row.hasTrade = engine.snapshot.hasTrade.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
   row.hasBookTicker = engine.snapshot.hasBookTicker.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
+  row.hasPriceLimit = engine.snapshot.hasPriceLimit.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
   row.hasDepth = engine.snapshot.hasDepth.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
   row.hasOrderBook = engine.snapshot.hasOrderBook.raw == hft_trader::core::kAlgoFlagTrue.raw && engine.snapshot.orderBook ? 1u : 0u;
   engine.probeMetrics.push_back(row);
@@ -369,6 +377,7 @@ bool validateBacktestProbeCoverage(const BacktestRunResult& result, const detail
   if (coverage.strategyCycles == 0u) error = "backtest_probe did not run strategy cycles";
   else if (coverage.cyclesWithTrade == 0u) error = "backtest_probe did not observe trade input";
   else if (coverage.cyclesWithBookTicker == 0u) error = "backtest_probe did not observe bookticker input";
+  else if (coverage.cyclesWithPriceLimit == 0u) error = "backtest_probe did not observe price_limit input";
   else if (coverage.cyclesWithDepth == 0u) error = "backtest_probe did not observe depth input";
   else if (coverage.cyclesWithOrderBook == 0u) error = "backtest_probe did not observe reconstructed orderbook input";
   else if (coverage.seedTradeRows == 0u) error = "backtest_probe did not receive trade warmup rows";
@@ -602,6 +611,7 @@ BacktestInputCoverage addCoverage(BacktestInputCoverage lhs, const BacktestInput
   lhs.strategyCycles += rhs.strategyCycles;
   lhs.cyclesWithTrade += rhs.cyclesWithTrade;
   lhs.cyclesWithBookTicker += rhs.cyclesWithBookTicker;
+  lhs.cyclesWithPriceLimit += rhs.cyclesWithPriceLimit;
   lhs.cyclesWithDepth += rhs.cyclesWithDepth;
   lhs.cyclesWithOrderBook += rhs.cyclesWithOrderBook;
   lhs.seedTradeRows += rhs.seedTradeRows;
@@ -796,13 +806,16 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     (void)hft_trader::core::applyTrade(bbo, trade);
     applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
     if (!strategyVisible) detail::tryFillOnTrade(engine, trade);
-  } else {
+  } else if (event.kind == 2) {
     const auto ticker = detail::toRuntime(session.bookTickers[event.index]);
     hft_trader::core::copyBookTickerSnapshot(snapshot, ticker);
     (void)hft_trader::core::applyBookTicker(bbo, ticker);
     applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
     hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
     if (!strategyVisible) detail::tryFillOnTop(engine, event.tsNs);
+  } else {
+    const auto priceLimit = detail::toRuntime(session.priceLimits[event.index]);
+    hft_trader::core::copyPriceLimitSnapshot(snapshot, priceLimit);
   }
 }
 
@@ -1379,12 +1392,14 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   const std::vector<detail::TimelineEvent>& deliveryTimeline = *deliveryTimelineView;
   result.trades = 0;
   result.bookTickers = 0;
+  result.priceLimits = 0;
   result.depths = 0;
   result.firstTsNs = std::numeric_limits<std::int64_t>::max();
   result.lastTsNs = 0;
   for (const detail::SessionData& loadedSession : sessions) {
     result.trades += loadedSession.trades.size();
     result.bookTickers += loadedSession.bookTickers.size();
+    result.priceLimits += loadedSession.priceLimits.size();
     result.depths += loadedSession.depths.size();
     if (loadedSession.firstTsNs > 0 && loadedSession.firstTsNs < result.firstTsNs) result.firstTsNs = loadedSession.firstTsNs;
     if (loadedSession.lastTsNs > result.lastTsNs) result.lastTsNs = loadedSession.lastTsNs;

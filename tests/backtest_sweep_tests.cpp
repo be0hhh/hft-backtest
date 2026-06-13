@@ -74,6 +74,7 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
             "  \"channels\": {\n"
             "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
+            "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"},\n"
             "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
             "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
             "  },\n"
@@ -88,6 +89,7 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
             "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTCUSDT\",\"binance\",\"futures\",3,3]\n"
             "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTCUSDT\",\"binance\",\"futures\",4,4]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
+  writeText(dir / "jsonl" / "price_limit.jsonl", "[9500000000,10500000000,1,3000000000]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000,2,2]\n");
   writeText(dir / "jsonl" / "candles.jsonl",
             "[1,1000000000,10200000000,9800000000,500000000]\n"
@@ -140,6 +142,7 @@ bool testSweepCanRunTwiceInOneProcess() {
             "  \"channels\": {\n"
             "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
+            "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"},\n"
             "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
             "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
             "  },\n"
@@ -154,6 +157,7 @@ bool testSweepCanRunTwiceInOneProcess() {
             "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTCUSDT\",\"binance\",\"futures\",3,3]\n"
             "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTCUSDT\",\"binance\",\"futures\",4,4]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
+  writeText(dir / "jsonl" / "price_limit.jsonl", "[9500000000,10500000000,1,3000000000]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000,2,2]\n");
   writeText(dir / "jsonl" / "candles.jsonl",
             "[1,1000000000,10200000000,9800000000,500000000]\n"

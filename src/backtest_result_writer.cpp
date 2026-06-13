@@ -124,6 +124,7 @@ bool writeProbeMetrics(const std::filesystem::path& path, const EngineState& eng
         << ',' << static_cast<unsigned>(row.volumeWindowReady)
         << ',' << static_cast<unsigned>(row.hasTrade)
         << ',' << static_cast<unsigned>(row.hasBookTicker)
+        << ',' << static_cast<unsigned>(row.hasPriceLimit)
         << ',' << static_cast<unsigned>(row.hasDepth)
         << ',' << static_cast<unsigned>(row.hasOrderBook)
         << "]\n";
@@ -157,6 +158,7 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
   out << indent << q << "events" << q << ": " << result.events << ",\n";
   out << indent << q << "trades" << q << ": " << result.trades << ",\n";
   out << indent << q << "booktickers" << q << ": " << result.bookTickers << ",\n";
+  out << indent << q << "price_limits" << q << ": " << result.priceLimits << ",\n";
   out << indent << q << "depths" << q << ": " << result.depths << ",\n";
   out << indent << q << "orders" << q << ": " << result.orders << ",\n";
   out << indent << q << "fills" << q << ": " << result.fills << ",\n";
@@ -169,6 +171,7 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
       << q << "strategy_cycles" << q << ": " << result.inputCoverage.strategyCycles << ", "
       << q << "cycles_with_trade" << q << ": " << result.inputCoverage.cyclesWithTrade << ", "
       << q << "cycles_with_bookticker" << q << ": " << result.inputCoverage.cyclesWithBookTicker << ", "
+      << q << "cycles_with_price_limit" << q << ": " << result.inputCoverage.cyclesWithPriceLimit << ", "
       << q << "cycles_with_depth" << q << ": " << result.inputCoverage.cyclesWithDepth << ", "
       << q << "cycles_with_orderbook" << q << ": " << result.inputCoverage.cyclesWithOrderBook << ", "
       << q << "seed_trade_rows" << q << ": " << result.inputCoverage.seedTradeRows << ", "
@@ -287,7 +290,7 @@ bool writeManifest(const std::filesystem::path& path, const BacktestRunResult& r
   if (!engine.probeMetrics.empty()) {
     out << ",\n";
     out << "    " << q << "probe_metrics" << q << ": {" << q << "path" << q << ": " << q << "probe_metrics.jsonl" << q
-        << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,decision_kind,reason,side,orders,amends,cancels,best_bid,best_ask,trade_range_sample_bps,trade_range_ema_bps,trade_range_observed_seconds,rolling_per_minute_raw,volume_observed_seconds,trade_range_ready,volume_ready,has_trade,has_bookticker,has_depth,has_orderbook]" << q
+        << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,decision_kind,reason,side,orders,amends,cancels,best_bid,best_ask,trade_range_sample_bps,trade_range_ema_bps,trade_range_observed_seconds,rolling_per_minute_raw,volume_observed_seconds,trade_range_ready,volume_ready,has_trade,has_bookticker,has_price_limit,has_depth,has_orderbook]" << q
         << ", " << q << "rows" << q << ": " << engine.probeMetrics.size() << "}\n";
   } else {
     out << "\n";

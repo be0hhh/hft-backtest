@@ -518,6 +518,7 @@ bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
             "  \"channels\": {\n"
             "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
+            "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"},\n"
             "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
             "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
             "  },\n"
@@ -526,6 +527,7 @@ bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
   writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000}\n");
   writeText(dir / "jsonl" / "trades.jsonl", "[10000000000,100000000,1,1000]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,1001]\n");
+  writeText(dir / "jsonl" / "price_limit.jsonl", "[9500000000,10500000000,1,1001]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],1002]\n");
   writeText(dir / "jsonl" / "candles.jsonl", "[1,900,10200000000,9800000000,500000000]\n");
 
@@ -548,6 +550,7 @@ bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
          expect(data.symbol == "BTCUSDT", "loader reads first symbol identity") &&
          expect(data.trades.size() == 1u, "loader reads trades from channel path") &&
          expect(data.bookTickers.size() == 1u, "loader reads bookticker from channel path") &&
+         expect(data.priceLimits.size() == 1u, "loader reads price_limit from channel path") &&
          expect(data.depths.size() == 1u, "loader reads depth from channel path") &&
          expect(data.candles.size() == 1u, "loader reads candles from channel path") &&
          expect(data.instrument.tickSizeE8 == 1000000, "loader reads tick size metadata") &&
@@ -581,8 +584,8 @@ bool testLoadSessionPrefersDepthTapeSidecar() {
             "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
   writeText(dir / "jsonl" / "depth_tape.jsonl",
             "[9223372036854776810,9900000000,100000000,10100000000,200000000]\n");
-  writeText(dir / "jsonl" / "depth_sidecar.jsonl", "[9223372036854776810,1,1,0,1]\n");
-  writeText(dir / "jsonl" / "depth.jsonl", "[[9700000000,100000000,1],[10300000000,100000000,0],1002]\n");
+  writeText(dir / "jsonl" / "depth_sidecar.jsonl", "[9223372036854776810,0,1,1,1]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9700000000,100000000,0],[10300000000,100000000,1],1002]\n");
 
   SessionLoadPlan plan{};
   plan.loadDepths = true;
@@ -596,8 +599,8 @@ bool testLoadSessionPrefersDepthTapeSidecar() {
          expect(data.depths[0].tsNs == 1002, "depth tape sidecar decodes tagged timestamp") &&
          expect(data.depths[0].levels.size() == 2u, "depth tape sidecar decodes levels") &&
          expect(data.depths[0].levels[0].priceE8 == 9900000000ll, "depth tape sidecar wins over legacy depth") &&
-         expect(data.depths[0].levels[0].side == 1, "depth tape sidecar applies bid side") &&
-         expect(data.depths[0].levels[1].side == 0, "depth tape sidecar applies ask side");
+         expect(data.depths[0].levels[0].side == 0, "depth tape sidecar applies bid side") &&
+         expect(data.depths[0].levels[1].side == 1, "depth tape sidecar applies ask side");
 }
 
 bool testLoadSessionRejectsDepthTapeWithoutTaggedTimestamp() {
@@ -628,8 +631,11 @@ bool testLoadSessionRejectsDepthTapeWithoutTaggedTimestamp() {
 bool testDepthRowBuildsInitialOrderBookSnapshot() {
   DepthRow row{};
   row.tsNs = 1002;
-  row.levels.push_back(PriceLevelRow{9900000000ll, 100000000ll, 1});
-  row.levels.push_back(PriceLevelRow{10100000000ll, 200000000ll, 0});
+  row.levels.push_back(PriceLevelRow{9900000000ll, 100000000ll, 0});
+  row.levels.push_back(PriceLevelRow{10100000000ll, 200000000ll, 1});
+  cxet::composite::OrderBookTapeRuntimeV1 tape{};
+  cxet::composite::OrderBookTapeSidesRuntimeV1 sides{};
+  toRuntime(row, tape, sides);
   cxet::composite::OrderBookSnapshot snapshot = toRuntimeSnapshot(row);
 
   hft_trader::core::LocalOrderBookState book{};
@@ -642,6 +648,9 @@ bool testDepthRowBuildsInitialOrderBookSnapshot() {
 
   const hft_trader::core::LocalOrderBookView view = hft_trader::core::orderBook(book);
   return expect(snapshot.levelCount.raw == 2u, "depth row snapshot carries levels") &&
+         expect(sides.sideCount.raw == 2u, "depth row tape carries side count") &&
+         expect(sides.sides[0] == Side::Buy().raw, "depth row tape maps side zero to bid") &&
+         expect(sides.sides[1] == Side::Sell().raw, "depth row tape maps side one to ask") &&
          expect(book.initialized.raw == hft_trader::core::kAlgoFlagTrue.raw, "depth row snapshot initializes local orderbook") &&
          expect(hft_trader::core::bestBid(view).raw == 9900000000ll, "depth row snapshot sets best bid") &&
          expect(hft_trader::core::bestAsk(view).raw == 10100000000ll, "depth row snapshot sets best ask");
@@ -738,6 +747,7 @@ bool testBacktestProbeReportsFullInputCoverage() {
             "  \"channels\": {\n"
             "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
+            "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"},\n"
             "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
             "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
             "  },\n"
@@ -752,6 +762,7 @@ bool testBacktestProbeReportsFullInputCoverage() {
             "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTCUSDT\",\"binance\",\"futures\",3,3]\n"
             "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTCUSDT\",\"binance\",\"futures\",4,4]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
+  writeText(dir / "jsonl" / "price_limit.jsonl", "[9500000000,10500000000,1,3000000000]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000,2,2]\n");
   writeText(dir / "jsonl" / "candles.jsonl",
             "[1,1000000000,10200000000,9800000000,500000000]\n"
@@ -781,6 +792,7 @@ bool testBacktestProbeReportsFullInputCoverage() {
          expect(result.inputCoverage.strategyCycles > 0u, "probe strategy was invoked") &&
          expect(result.inputCoverage.cyclesWithTrade > 0u, "strategy context exposes trades") &&
          expect(result.inputCoverage.cyclesWithBookTicker > 0u, "strategy context exposes bookticker") &&
+         expect(result.inputCoverage.cyclesWithPriceLimit > 0u, "strategy context exposes price_limit") &&
          expect(result.inputCoverage.cyclesWithDepth > 0u, "strategy context exposes depth") &&
          expect(result.inputCoverage.cyclesWithOrderBook > 0u, "strategy context exposes reconstructed orderbook") &&
          expect(result.inputCoverage.seedTradeRows == 3u, "probe reports seeded trade warmup rows") &&
@@ -796,10 +808,11 @@ bool testBacktestProbeRequiresCalculatedTradeWarmup() {
                                     ("hft_backtest_probe_short_warmup_" + std::to_string(std::rand()));
   writeText(dir / "manifest.json",
             "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
-            "\"channels\":{\"trades\":{\"path\":\"jsonl/trades.jsonl\"},\"bookticker\":{\"path\":\"jsonl/bookticker.jsonl\"},\"depth\":{\"path\":\"jsonl/depth.jsonl\"},\"candles\":{\"path\":\"jsonl/candles.jsonl\"}},"
+            "\"channels\":{\"trades\":{\"path\":\"jsonl/trades.jsonl\"},\"bookticker\":{\"path\":\"jsonl/bookticker.jsonl\"},\"price_limit\":{\"path\":\"jsonl/price_limit.jsonl\"},\"depth\":{\"path\":\"jsonl/depth.jsonl\"},\"candles\":{\"path\":\"jsonl/candles.jsonl\"}},"
             "\"summary\":{\"trades\":{\"history_requested_start_ns\":1,\"history_requested_end_ns\":2500000000,\"history_rows\":1}}}\n");
   writeText(dir / "jsonl" / "trades.jsonl", "[10000000000,100000000,1,1500000000]\n[10050000000,100000000,1,2600000000]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\n");
+  writeText(dir / "jsonl" / "price_limit.jsonl", "[9500000000,10500000000,1,3000000000]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\n");
   writeText(dir / "jsonl" / "candles.jsonl",
             "[1,1000000000,10200000000,9800000000,500000000]\n"
@@ -826,10 +839,11 @@ bool testBacktestProbeRequiresCandleSeed() {
                                     ("hft_backtest_probe_no_candles_" + std::to_string(std::rand()));
   writeText(dir / "manifest.json",
             "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
-            "\"channels\":{\"trades\":{\"path\":\"jsonl/trades.jsonl\"},\"bookticker\":{\"path\":\"jsonl/bookticker.jsonl\"},\"depth\":{\"path\":\"jsonl/depth.jsonl\"}},"
+            "\"channels\":{\"trades\":{\"path\":\"jsonl/trades.jsonl\"},\"bookticker\":{\"path\":\"jsonl/bookticker.jsonl\"},\"price_limit\":{\"path\":\"jsonl/price_limit.jsonl\"},\"depth\":{\"path\":\"jsonl/depth.jsonl\"}},"
             "\"summary\":{\"trades\":{\"history_requested_start_ns\":1000000000,\"history_requested_end_ns\":2000000000,\"history_rows\":1}}}\n");
   writeText(dir / "jsonl" / "trades.jsonl", "[10000000000,100000000,1,1500000000]\n[10050000000,100000000,1,3100000000]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\n");
+  writeText(dir / "jsonl" / "price_limit.jsonl", "[9500000000,10500000000,1,3000000000]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\n");
   writeText(dir / "probe.ini",
             "[strategy]\ntype=backtest_probe\nenabled=1\n[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
@@ -856,6 +870,7 @@ bool testBacktestProbeRequiresAllCandleSeedTiers() {
             "  \"channels\": {\n"
             "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
+            "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"},\n"
             "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
             "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
             "  },\n"
@@ -869,6 +884,7 @@ bool testBacktestProbeRequiresAllCandleSeedTiers() {
             "[10050000000,100000000,1,2100000000]\n"
             "[10060000000,100000000,1,3100000000]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\n");
+  writeText(dir / "jsonl" / "price_limit.jsonl", "[9500000000,10500000000,1,3000000000]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\n");
   writeText(dir / "jsonl" / "candles.jsonl", "[1,1000000000,10200000000,9800000000,500000000]\n");
   writeText(dir / "probe.ini",
@@ -891,9 +907,10 @@ bool testBacktestProbeRequiresTradeWarmupCoverage() {
                                     ("hft_backtest_probe_no_warmup_" + std::to_string(std::rand()));
   writeText(dir / "manifest.json",
             "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
-            "\"channels\":{\"trades\":{\"path\":\"jsonl/trades.jsonl\"},\"bookticker\":{\"path\":\"jsonl/bookticker.jsonl\"},\"depth\":{\"path\":\"jsonl/depth.jsonl\"},\"candles\":{\"path\":\"jsonl/candles.jsonl\"}}}\n");
+            "\"channels\":{\"trades\":{\"path\":\"jsonl/trades.jsonl\"},\"bookticker\":{\"path\":\"jsonl/bookticker.jsonl\"},\"price_limit\":{\"path\":\"jsonl/price_limit.jsonl\"},\"depth\":{\"path\":\"jsonl/depth.jsonl\"},\"candles\":{\"path\":\"jsonl/candles.jsonl\"}}}\n");
   writeText(dir / "jsonl" / "trades.jsonl", "[10050000000,100000000,1,3100000000]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000]\n");
+  writeText(dir / "jsonl" / "price_limit.jsonl", "[9500000000,10500000000,1,3000000000]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000]\n");
   writeText(dir / "jsonl" / "candles.jsonl",
             "[1,1000000000,10200000000,9800000000,500000000]\n"

@@ -16,6 +16,7 @@
 #include "primitives/composite/BookTickerRuntimeV1.hpp"
 #include "primitives/composite/OrderBookSnapshot.hpp"
 #include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
+#include "primitives/composite/PriceLimitRuntimeV1.hpp"
 #include "primitives/composite/TieredCandleHistory.hpp"
 #include "primitives/composite/TradeRuntimeV1.hpp"
 #include "primitives/composite/UserDataEvent.hpp"
@@ -153,6 +154,7 @@ struct JsonProbeMetric {
   std::uint8_t volumeWindowReady{0u};
   std::uint8_t hasTrade{0u};
   std::uint8_t hasBookTicker{0u};
+  std::uint8_t hasPriceLimit{0u};
   std::uint8_t hasDepth{0u};
   std::uint8_t hasOrderBook{0u};
 };
@@ -247,6 +249,7 @@ Side sideFromRow(std::int64_t raw) noexcept;
 
 cxet::composite::TradeRuntimeV1 toRuntime(const TradeRow& row) noexcept;
 cxet::composite::BookTickerRuntimeV1 toRuntime(const BookTickerRow& row) noexcept;
+cxet::composite::PriceLimitRuntimeV1 toRuntime(const PriceLimitRow& row) noexcept;
 void toRuntime(const DepthRow& row,
                cxet::composite::OrderBookTapeRuntimeV1& tape,
                cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept;
