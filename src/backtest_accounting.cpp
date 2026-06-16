@@ -75,6 +75,10 @@ std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
   return ask > 0 ? mulPriceQtyE8(engine.entryPriceE8 - ask, qty) : 0;
 }
 
+std::int64_t equityE8(const EngineState& engine) noexcept {
+  return engine.walletBalanceE8 + unrealizedPnlE8(engine);
+}
+
 void appendEquityPoint(EngineState& engine, std::int64_t tsNs) {
   engine.equityPoints.push_back(JsonEquityPoint{tsNs,
                                                 engine.grossRealizedPnlE8,
@@ -120,6 +124,61 @@ bool appendRiskSnapshotIfDue(EngineState& engine, std::int64_t tsNs) {
   if (engine.hasRiskSnapshot && tsNs < engine.lastRiskSnapshotTsNs + kRiskSnapshotIntervalNs) return false;
   appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonInterval);
   return true;
+}
+
+void hardLiquidate(EngineState& engine, std::int64_t tsNs, std::int64_t breachedEquityE8) noexcept {
+  if (engine.liquidated) return;
+  engine.liquidated = true;
+  engine.liquidationTsNs = tsNs;
+  engine.liquidationEquityE8 = breachedEquityE8;
+  engine.pending.clear();
+  for (OpenOrder& order : engine.open) {
+    if (order.state.valid && order.recordIndex < engine.orders.size()) {
+      engine.orders[order.recordIndex].status = kRecordStatusCancelled;
+      engine.orders[order.recordIndex].tsNs = tsNs;
+    }
+    order = OpenOrder{};
+  }
+  engine.netQtyRaw = 0;
+  engine.entryPriceE8 = 0;
+  engine.walletBalanceE8 = 0;
+  if (engine.initialBalanceE8 > 0) {
+    engine.netRealizedPnlE8 = -engine.initialBalanceE8;
+    engine.grossRealizedPnlE8 = engine.netRealizedPnlE8 + engine.feesPaidE8;
+  }
+  engine.position.valid = true;
+  engine.position.netQty.raw = 0;
+  engine.position.entryPrice.raw = 0;
+  engine.position.unrealizedPnl.raw = 0;
+  engine.position.lastUpdateUtc.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
+  appendEquityPoint(engine, tsNs);
+  appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonLiquidation);
+}
+
+void stopForTraderRisk(EngineState& engine,
+                       std::int64_t tsNs,
+                       std::int64_t breachedEquityE8,
+                       std::int64_t thresholdEquityE8) noexcept {
+  if (engine.liquidated || engine.riskStopped) return;
+  engine.riskStopped = true;
+  engine.riskStopTsNs = tsNs;
+  engine.riskStopEquityE8 = breachedEquityE8;
+  engine.riskStopThresholdEquityE8 = thresholdEquityE8;
+  engine.pending.clear();
+  for (OpenOrder& order : engine.open) {
+    if (order.state.valid && order.recordIndex < engine.orders.size()) {
+      engine.orders[order.recordIndex].status = kRecordStatusCancelled;
+      engine.orders[order.recordIndex].tsNs = tsNs;
+    }
+    order = OpenOrder{};
+  }
+  engine.position.valid = true;
+  engine.position.netQty.raw = engine.netQtyRaw;
+  engine.position.entryPrice.raw = engine.entryPriceE8;
+  engine.position.unrealizedPnl.raw = unrealizedPnlE8(engine);
+  engine.position.lastUpdateUtc.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
+  appendEquityPoint(engine, tsNs);
+  appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonTraderRiskStop);
 }
 
 }  // namespace hft_backtest::detail

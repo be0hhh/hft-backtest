@@ -35,6 +35,34 @@ inline constexpr StrategyMetadata kStrategies[] = {
             StrategyIndicatorMetadata{"rolling_volume", "Rolling volume"},
         },
     },
+    StrategyMetadata{
+        .id = "range_reversion",
+        .displayNameRu = "Ренж-реверсия",
+        .configTemplateFile = "range_reversion.ini",
+        .minSessionCount = 1u,
+        .maxSessionCount = 1u,
+        .paramCount = 12u,
+        .params = {
+            StrategyParamMetadata{"range_window_ms", "Окно ренжа, мс", "Сколько миллисекунд держать в rolling high/low диапазоне.", "30000", StrategyParamKind::Uint, 0u, true, false, true},
+            StrategyParamMetadata{"range_bucket_ms", "Bucket ренжа, мс", "Размер временного bucket для сырого high/low перед сглаживанием.", "250", StrategyParamKind::Uint, 0u, true, false, true},
+            StrategyParamMetadata{"range_smooth_shift", "Сглаживание ренжа, shift", "Integer smoothing: граница += (raw - граница) >> shift. 0 означает без сглаживания.", "3", StrategyParamKind::Uint, 0u, true, false, true},
+            StrategyParamMetadata{"trend_lookback_ms", "Lookback тренда, мс", "Окно для диагностического trend score по наклону mid ренжа.", "5000", StrategyParamKind::Uint, 0u, true, false, true},
+            StrategyParamMetadata{"entry_edge_pct", "Вход от края, %", "Покупать у нижнего края и шортить у верхнего края, если позиция цены внутри ренжа ближе этого процента к границе.", "20", StrategyParamKind::Uint, 0u, true, false, true},
+            StrategyParamMetadata{"exit_neutral_band_pct", "Выход около mid, %", "Закрывать позицию reduce-only limit, когда цена возвращается в нейтральную зону вокруг середины ренжа.", "5", StrategyParamKind::Uint, 0u, true, false, true},
+            StrategyParamMetadata{"min_range_bps", "Минимальный ренж, bps", "Не торговать слишком узкий диапазон.", "3", StrategyParamKind::Uint, 0u, true, false, true},
+            StrategyParamMetadata{"max_spread_bps", "Максимальный spread, bps", "0 отключает фильтр; иначе стратегия не выставляется при большем spread.", "8", StrategyParamKind::Uint, 0u, true, false, true},
+            StrategyParamMetadata{"post_only_offset_ticks", "Post-only offset, ticks", "На сколько ticks отступать от bid/ask для maker limit.", "0", StrategyParamKind::Uint, 0u, true, false, true},
+            StrategyParamMetadata{"refresh_ms", "Минимальный интервал replace, мс", "0 означает обновлять лимитку сразу при новом сигнале.", "0", StrategyParamKind::Uint, 0u, true, false, true},
+            StrategyParamMetadata{"amount_qty", "Размер в котируемой валюте", "Размер заявки как сумма в quote currency.", "200", StrategyParamKind::DecimalQuoteAmount, 1u, true, false, true},
+            StrategyParamMetadata{"order_qty", "Размер в базовой валюте", "Фиксированное количество base asset. Используется вместо amount_qty.", "0.001", StrategyParamKind::DecimalAmount, 1u, true, false, false},
+        },
+        .paramGroupCount = 1u,
+        .paramGroups = {StrategyParamGroupMetadata{1u, "sizing_mode"}},
+        .indicatorCount = 1u,
+        .indicators = {
+            StrategyIndicatorMetadata{"range_position", "Range position"},
+        },
+    },
 };
 
 }  // namespace

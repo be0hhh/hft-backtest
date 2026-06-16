@@ -14,16 +14,28 @@ bool timelineLess(const TimelineEvent& lhs, const TimelineEvent& rhs) noexcept {
 }
 
 TimelineEvent makeEvent(const SessionData& session, std::uint8_t leg, std::uint8_t kind, std::size_t index) noexcept {
-  if (kind == 0u) return TimelineEvent{session.depths[index].tsNs, session.depths[index].tsNs, session.depths[index].ingestSeq, kind, leg, index};
-  if (kind == 1u) return TimelineEvent{session.trades[index].tsNs, session.trades[index].tsNs, session.trades[index].ingestSeq, kind, leg, index};
-  if (kind == 2u) return TimelineEvent{session.bookTickers[index].tsNs, session.bookTickers[index].tsNs, session.bookTickers[index].ingestSeq, kind, leg, index};
+  if (kind == kTimelineKindDepth) return TimelineEvent{session.depths[index].tsNs, session.depths[index].tsNs, session.depths[index].ingestSeq, kind, leg, index};
+  if (kind == kTimelineKindTrade) return TimelineEvent{session.trades[index].tsNs, session.trades[index].tsNs, session.trades[index].ingestSeq, kind, leg, index};
+  if (kind == kTimelineKindBookTicker) return TimelineEvent{session.bookTickers[index].tsNs, session.bookTickers[index].tsNs, session.bookTickers[index].ingestSeq, kind, leg, index};
+  if (kind == kTimelineKindPriceLimit) return TimelineEvent{session.priceLimits[index].tsNs, session.priceLimits[index].tsNs, session.priceLimits[index].ingestSeq, kind, leg, index};
+  if (kind == kTimelineKindLiquidation) return TimelineEvent{session.liquidations[index].tsNs, session.liquidations[index].tsNs, session.liquidations[index].ingestSeq, kind, leg, index};
+  if (kind == kTimelineKindMarkPrice) return TimelineEvent{session.markPrices[index].tsNs, session.markPrices[index].tsNs, session.markPrices[index].ingestSeq, kind, leg, index};
+  if (kind == kTimelineKindIndexPrice) return TimelineEvent{session.indexPrices[index].tsNs, session.indexPrices[index].tsNs, session.indexPrices[index].ingestSeq, kind, leg, index};
+  if (kind == kTimelineKindFunding) return TimelineEvent{session.funding[index].tsNs, session.funding[index].tsNs, session.funding[index].ingestSeq, kind, leg, index};
+  if (kind == kTimelineKindOpenInterest) return TimelineEvent{session.openInterest[index].tsNs, session.openInterest[index].tsNs, session.openInterest[index].ingestSeq, kind, leg, index};
   return TimelineEvent{session.priceLimits[index].tsNs, session.priceLimits[index].tsNs, session.priceLimits[index].ingestSeq, kind, leg, index};
 }
 
 std::size_t channelSize(const SessionData& session, std::uint8_t kind) noexcept {
-  if (kind == 0u) return session.depths.size();
-  if (kind == 1u) return session.trades.size();
-  if (kind == 2u) return session.bookTickers.size();
+  if (kind == kTimelineKindDepth) return session.depths.size();
+  if (kind == kTimelineKindTrade) return session.trades.size();
+  if (kind == kTimelineKindBookTicker) return session.bookTickers.size();
+  if (kind == kTimelineKindPriceLimit) return session.priceLimits.size();
+  if (kind == kTimelineKindLiquidation) return session.liquidations.size();
+  if (kind == kTimelineKindMarkPrice) return session.markPrices.size();
+  if (kind == kTimelineKindIndexPrice) return session.indexPrices.size();
+  if (kind == kTimelineKindFunding) return session.funding.size();
+  if (kind == kTimelineKindOpenInterest) return session.openInterest.size();
   return session.priceLimits.size();
 }
 
@@ -40,10 +52,10 @@ bool channelSorted(const SessionData& session, std::uint8_t leg, std::uint8_t ki
 }
 
 void appendUnsorted(const SessionData& session, std::uint8_t leg, std::vector<TimelineEvent>& out) {
-  for (std::size_t i = 0; i < session.depths.size(); ++i) out.push_back(makeEvent(session, leg, 0u, i));
-  for (std::size_t i = 0; i < session.trades.size(); ++i) out.push_back(makeEvent(session, leg, 1u, i));
-  for (std::size_t i = 0; i < session.bookTickers.size(); ++i) out.push_back(makeEvent(session, leg, 2u, i));
-  for (std::size_t i = 0; i < session.priceLimits.size(); ++i) out.push_back(makeEvent(session, leg, 3u, i));
+  for (std::uint8_t kind = 0u; kind < kTimelineKindCount; ++kind) {
+    const std::size_t n = channelSize(session, kind);
+    for (std::size_t i = 0; i < n; ++i) out.push_back(makeEvent(session, leg, kind, i));
+  }
 }
 
 void sortTimeline(std::vector<TimelineEvent>& out) {
@@ -77,7 +89,7 @@ bool buildMergedTimeline(const std::vector<const SessionData*>& sessions, std::v
     if (legIndex > static_cast<std::size_t>(std::numeric_limits<std::uint8_t>::max())) return false;
     const SessionData& session = *sessions[legIndex];
     const std::uint8_t leg = static_cast<std::uint8_t>(legIndex);
-    for (std::uint8_t kind = 0u; kind < 4u; ++kind) {
+    for (std::uint8_t kind = 0u; kind < kTimelineKindCount; ++kind) {
       if (!channelSorted(session, leg, kind)) return false;
       capacity += channelSize(session, kind);
     }
@@ -87,14 +99,11 @@ bool buildMergedTimeline(const std::vector<const SessionData*>& sessions, std::v
   out.reserve(capacity);
 
   std::vector<TimelineCursor> cursors{};
-  cursors.reserve(sessions.size() * 4u);
+  cursors.reserve(sessions.size() * kTimelineKindCount);
   for (std::size_t legIndex = 0u; legIndex < sessions.size(); ++legIndex) {
     const SessionData& session = *sessions[legIndex];
     const std::uint8_t leg = static_cast<std::uint8_t>(legIndex);
-    pushCursor(cursors, session, leg, 0u);
-    pushCursor(cursors, session, leg, 1u);
-    pushCursor(cursors, session, leg, 2u);
-    pushCursor(cursors, session, leg, 3u);
+    for (std::uint8_t kind = 0u; kind < kTimelineKindCount; ++kind) pushCursor(cursors, session, leg, kind);
   }
 
   while (out.size() < capacity) {
@@ -118,7 +127,9 @@ bool buildMergedTimeline(const std::vector<const SessionData*>& sessions, std::v
 void buildFallbackTimeline(const std::vector<const SessionData*>& sessions, std::vector<TimelineEvent>& out) {
   out.clear();
   std::size_t capacity = 0u;
-  for (const SessionData* session : sessions) capacity += session->depths.size() + session->trades.size() + session->bookTickers.size() + session->priceLimits.size();
+  for (const SessionData* session : sessions) {
+    for (std::uint8_t kind = 0u; kind < kTimelineKindCount; ++kind) capacity += channelSize(*session, kind);
+  }
   out.reserve(capacity);
   for (std::size_t legIndex = 0u; legIndex < sessions.size(); ++legIndex) {
     appendUnsorted(*sessions[legIndex], static_cast<std::uint8_t>(legIndex), out);

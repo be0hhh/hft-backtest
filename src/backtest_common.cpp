@@ -91,6 +91,57 @@ cxet::composite::PriceLimitRuntimeV1 toRuntime(const PriceLimitRow& row) noexcep
   return out;
 }
 
+cxet::composite::LiquidationEvent toRuntime(const LiquidationRow& row,
+                                            ExchangeId exchange,
+                                            const Symbol& symbol) noexcept {
+  cxet::composite::LiquidationEvent out{};
+  out.exchangeId = exchange;
+  out.symbol = symbol;
+  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+  out.side = sideFromRow(row.side);
+  out.price.raw = row.priceE8;
+  out.amount.raw = row.qtyE8;
+  out.avgPrice.raw = row.avgPriceE8 > 0 ? row.avgPriceE8 : row.priceE8;
+  out.lastFilledAmount.raw = row.filledQtyE8 > 0 ? row.filledQtyE8 : row.qtyE8;
+  out.filledAmount.raw = out.lastFilledAmount.raw;
+  out.orderType = static_cast<canon::OrderType>(row.orderType);
+  out.timeInForce = static_cast<canon::TimeInForce>(row.timeInForce);
+  out.orderStatus = static_cast<canon::OrderStatus>(row.status);
+  out.sourceMode = static_cast<cxet::composite::LiquidationSourceMode>(row.sourceMode);
+  return out;
+}
+
+cxet::composite::MarkPriceRuntimeV1 toRuntime(const MarkPriceRow& row) noexcept {
+  cxet::composite::MarkPriceRuntimeV1 out{};
+  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+  out.markPrice.raw = row.markPriceE8;
+  return out;
+}
+
+cxet::composite::IndexPriceRuntimeV1 toRuntime(const IndexPriceRow& row) noexcept {
+  cxet::composite::IndexPriceRuntimeV1 out{};
+  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+  out.indexPrice.raw = row.indexPriceE8;
+  return out;
+}
+
+cxet::composite::FundingRuntimeV1 toRuntime(const FundingRow& row) noexcept {
+  cxet::composite::FundingRuntimeV1 out{};
+  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+  out.fundingRate.raw = row.fundingRateE8;
+  out.fundingTs.raw = static_cast<std::uint64_t>(row.fundingTsNs > 0 ? row.fundingTsNs : 0);
+  out.nextFundingTs.raw = static_cast<std::uint64_t>(row.nextFundingTsNs > 0 ? row.nextFundingTsNs : 0);
+  return out;
+}
+
+cxet::composite::OpenInterestRuntimeV1 toRuntime(const OpenInterestRow& row) noexcept {
+  cxet::composite::OpenInterestRuntimeV1 out{};
+  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+  out.openInterest.raw = row.openInterestE8;
+  out.openInterestValue.raw = row.openInterestValueE8;
+  return out;
+}
+
 void toRuntime(const DepthRow& row,
                cxet::composite::OrderBookTapeRuntimeV1& tape,
                cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept {

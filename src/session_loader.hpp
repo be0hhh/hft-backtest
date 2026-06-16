@@ -40,6 +40,47 @@ struct PriceLimitRow {
   std::int64_t ingestSeq{0};
 };
 
+struct LiquidationRow {
+  std::int64_t priceE8{0};
+  std::int64_t qtyE8{0};
+  std::int64_t side{0};
+  std::int64_t tsNs{0};
+  std::int64_t avgPriceE8{0};
+  std::int64_t filledQtyE8{0};
+  std::int64_t orderType{0};
+  std::int64_t timeInForce{0};
+  std::int64_t status{0};
+  std::int64_t sourceMode{0};
+  std::int64_t ingestSeq{0};
+};
+
+struct MarkPriceRow {
+  std::int64_t tsNs{0};
+  std::int64_t markPriceE8{0};
+  std::int64_t ingestSeq{0};
+};
+
+struct IndexPriceRow {
+  std::int64_t tsNs{0};
+  std::int64_t indexPriceE8{0};
+  std::int64_t ingestSeq{0};
+};
+
+struct FundingRow {
+  std::int64_t tsNs{0};
+  std::int64_t fundingRateE8{0};
+  std::int64_t fundingTsNs{0};
+  std::int64_t nextFundingTsNs{0};
+  std::int64_t ingestSeq{0};
+};
+
+struct OpenInterestRow {
+  std::int64_t tsNs{0};
+  std::int64_t openInterestE8{0};
+  std::int64_t openInterestValueE8{0};
+  std::int64_t ingestSeq{0};
+};
+
 struct DepthRow {
   std::int64_t tsNs{0};
   std::int64_t ingestSeq{0};
@@ -62,7 +103,7 @@ struct SnapshotDocument {
 struct InstrumentMetadata {
   std::int64_t tickSizeE8{1};
   std::int64_t lotSizeE8{1};
-  std::int64_t contractBaseQtyE8{100000000};
+  std::int64_t contractBaseQtyE8{0};
 };
 
 struct SessionLoadPlan {
@@ -71,11 +112,21 @@ struct SessionLoadPlan {
   bool loadPriceLimits{true};
   bool loadDepths{true};
   bool loadCandles{false};
+  bool loadLiquidations{false};
+  bool loadMarkPrices{false};
+  bool loadIndexPrices{false};
+  bool loadFunding{false};
+  bool loadOpenInterest{false};
   bool requireTrades{false};
   bool requireBookTickers{false};
   bool requirePriceLimits{false};
   bool requireDepths{false};
   bool requireCandles{false};
+  bool requireLiquidations{false};
+  bool requireMarkPrices{false};
+  bool requireIndexPrices{false};
+  bool requireFunding{false};
+  bool requireOpenInterest{false};
 };
 
 struct SessionData {
@@ -89,6 +140,11 @@ struct SessionData {
   std::vector<PriceLimitRow> priceLimits{};
   std::vector<DepthRow> depths{};
   std::vector<CandleRow> candles{};
+  std::vector<LiquidationRow> liquidations{};
+  std::vector<MarkPriceRow> markPrices{};
+  std::vector<IndexPriceRow> indexPrices{};
+  std::vector<FundingRow> funding{};
+  std::vector<OpenInterestRow> openInterest{};
   SnapshotDocument snapshot{};
   bool hasSnapshot{false};
   InstrumentMetadata instrument{};

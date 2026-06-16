@@ -10,6 +10,7 @@
 #include "hft_trader/core/strategy/StrategyContract.hpp"
 #include "hft_trader/runtime/GeneratedStrategyRegistry.hpp"
 #include "hft_trader/runtime/config/RuntimeConfig.hpp"
+#include "hft_trader/runtime/risk/PortfolioRiskRuntime.hpp"
 #include "hft_trader/runtime/runner/StrategyMarketDataRuntime.hpp"
 #include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
 
@@ -19,6 +20,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -60,9 +62,10 @@ hft_trader::core::StrategyAccountState accountStateFromEngine(const detail::Engi
 BacktestInputCoverage addCoverage(BacktestInputCoverage lhs, const BacktestInputCoverage& rhs) noexcept;
 BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
                                         const detail::EngineState& engine) noexcept;
-detail::EngineState aggregateArtifactEngine(const std::vector<detail::EngineState>& engines,
-                                            std::int64_t initialBalanceE8,
-                                            std::int64_t finalTsNs);
+void populateAggregateArtifactEngine(const std::vector<detail::EngineState>& engines,
+                                     std::int64_t initialBalanceE8,
+                                     std::int64_t finalTsNs,
+                                     detail::EngineState& out);
 
 bool sameLoadPlan(const detail::SessionLoadPlan& lhs, const detail::SessionLoadPlan& rhs) noexcept {
   return lhs.loadTrades == rhs.loadTrades &&
@@ -70,11 +73,21 @@ bool sameLoadPlan(const detail::SessionLoadPlan& lhs, const detail::SessionLoadP
          lhs.loadPriceLimits == rhs.loadPriceLimits &&
          lhs.loadDepths == rhs.loadDepths &&
          lhs.loadCandles == rhs.loadCandles &&
+         lhs.loadLiquidations == rhs.loadLiquidations &&
+         lhs.loadMarkPrices == rhs.loadMarkPrices &&
+         lhs.loadIndexPrices == rhs.loadIndexPrices &&
+         lhs.loadFunding == rhs.loadFunding &&
+         lhs.loadOpenInterest == rhs.loadOpenInterest &&
          lhs.requireTrades == rhs.requireTrades &&
          lhs.requireBookTickers == rhs.requireBookTickers &&
          lhs.requirePriceLimits == rhs.requirePriceLimits &&
          lhs.requireDepths == rhs.requireDepths &&
-         lhs.requireCandles == rhs.requireCandles;
+         lhs.requireCandles == rhs.requireCandles &&
+         lhs.requireLiquidations == rhs.requireLiquidations &&
+         lhs.requireMarkPrices == rhs.requireMarkPrices &&
+         lhs.requireIndexPrices == rhs.requireIndexPrices &&
+         lhs.requireFunding == rhs.requireFunding &&
+         lhs.requireOpenInterest == rhs.requireOpenInterest;
 }
 
 std::vector<std::filesystem::path> sessionPathsFor(const BacktestRunRequest& request,
@@ -152,12 +165,29 @@ bool buildSessionLoadPlan(const StrategyDescriptor& descriptor, detail::SessionL
     } else if (stream == cxet::api::market::PublicMarketDataStream::Orderbook) {
       out.loadDepths = true;
       out.requireDepths = true;
+    } else if (stream == cxet::api::market::PublicMarketDataStream::Liquidations) {
+      out.loadLiquidations = true;
+    } else if (stream == cxet::api::market::PublicMarketDataStream::MarkPrice) {
+      out.loadMarkPrices = true;
+    } else if (stream == cxet::api::market::PublicMarketDataStream::IndexPrice) {
+      out.loadIndexPrices = true;
+    } else if (stream == cxet::api::market::PublicMarketDataStream::Funding) {
+      out.loadFunding = true;
+    } else if (stream == cxet::api::market::PublicMarketDataStream::OpenInterest) {
+      out.loadOpenInterest = true;
     } else {
       error = "strategy requires unsupported market data stream for backtest";
       return false;
     }
   }
   return true;
+}
+
+bool backtestStreamRequiredForReadiness(cxet::api::market::PublicMarketDataStream stream) noexcept {
+  return stream == cxet::api::market::PublicMarketDataStream::Trades ||
+         stream == cxet::api::market::PublicMarketDataStream::BookTicker ||
+         stream == cxet::api::market::PublicMarketDataStream::PriceLimit ||
+         stream == cxet::api::market::PublicMarketDataStream::Orderbook;
 }
 
 bool reportProgress(std::uint64_t done, std::uint64_t total, std::string stage, BacktestProgressCallback cb, void* userData) noexcept {
@@ -176,6 +206,7 @@ bool strategySnapshotReady(const StrategyDescriptor& descriptor,
   const std::size_t streamCount = hft_trader::runtime::descriptorStreamCount(descriptor);
   for (std::size_t i = 0u; i < streamCount; ++i) {
     const cxet::api::market::PublicMarketDataStream stream = hft_trader::runtime::descriptorStreamAt(descriptor, i);
+    if (!backtestStreamRequiredForReadiness(stream)) continue;
     if (!hft_trader::runtime::snapshotHasRequiredStream(snapshot, stream, &descriptor)) return false;
   }
   return true;
@@ -183,6 +214,10 @@ bool strategySnapshotReady(const StrategyDescriptor& descriptor,
 
 bool isBacktestProbe(const StrategyDescriptor& descriptor) noexcept {
   return descriptor.name && std::string_view{descriptor.name} == "backtest_probe";
+}
+
+bool isRangeReversion(const StrategyDescriptor& descriptor) noexcept {
+  return descriptor.name && std::string_view{descriptor.name} == "range_reversion";
 }
 
 void prefetchRead(const void* ptr) noexcept {
@@ -200,7 +235,8 @@ std::size_t boundedReserve(std::size_t events, std::size_t divisor, std::size_t 
 void reserveEngineStorage(detail::EngineState& engine,
                           std::size_t events,
                           bool captureProbeTrace,
-                          bool captureIndicatorTrace) {
+                          bool captureIndicatorTrace,
+                          bool captureRangeTrace) {
   const std::size_t tradeRows = boundedReserve(events, 16u, 64u);
   engine.pending.reserve(detail::kIntentCapacity);
   engine.orders.reserve(tradeRows);
@@ -210,6 +246,7 @@ void reserveEngineStorage(detail::EngineState& engine,
   engine.riskSnapshots.reserve(boundedReserve(events, 1024u, 8u));
   if (captureProbeTrace) engine.probeMetrics.reserve(events + 8u);
   if (captureIndicatorTrace) engine.strategyIndicator.reserve(events + 8u);
+  if (captureRangeTrace) engine.strategyRange.reserve(events + 8u);
 }
 
 struct StrategyIndicatorProfileInfo {
@@ -233,6 +270,10 @@ bool resolveStrategyIndicatorProfile(std::string_view id, StrategyIndicatorProfi
   }
   if (id == "wall_density") {
     out = StrategyIndicatorProfileInfo{"wall_density", "Wall density", "Current", "Max seen", "notional"};
+    return true;
+  }
+  if (id == "range_position") {
+    out = StrategyIndicatorProfileInfo{"range_position", "Range position", "Position", "Trend", "score"};
     return true;
   }
   return false;
@@ -312,6 +353,9 @@ void appendStrategyIndicator(detail::EngineState& engine,
   } else if (engine.strategyIndicatorProfile == "wall_density") {
     row.valueRaw = maxWallValue(trace, false);
     row.auxRaw = maxWallValue(trace, true);
+  } else if (engine.strategyIndicatorProfile == "range_position") {
+    row.valueRaw = static_cast<std::int64_t>(trace.rangePositionBps / 100u);
+    row.auxRaw = static_cast<std::int64_t>(trace.trendScoreRaw);
   }
   row.eventCode = indicatorEventCode(trace);
   row.reasonRaw = trace.reasonRaw;
@@ -319,6 +363,19 @@ void appendStrategyIndicator(detail::EngineState& engine,
   row.sideRaw = trace.sideRaw;
   engine.strategyIndicator.push_back(row);
 }
+
+void appendStrategyRange(detail::EngineState& engine,
+                         std::int64_t tsNs,
+                         const hft_trader::core::StrategyDecisionTrace& trace) {
+  if (trace.rangeReady == 0u || trace.rangeLowRaw <= 0 || trace.rangeHighRaw <= trace.rangeLowRaw) return;
+  detail::JsonStrategyRangePoint row{};
+  row.tsNs = tsNs;
+  row.lowRaw = trace.rangeLowRaw;
+  row.midRaw = trace.rangeMidRaw;
+  row.highRaw = trace.rangeHighRaw;
+  engine.strategyRange.push_back(row);
+}
+
 void recordInputCoverage(detail::EngineState& engine) noexcept {
   ++engine.inputCoverage.strategyCycles;
   if (engine.snapshot.hasTrade.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithTrade;
@@ -411,6 +468,7 @@ bool runCycle(const StrategyDescriptor& descriptor,
               std::int64_t tsNs,
               const BacktestRunRequest& request,
               const cxet::composite::UserDataEvent* userEvent) {
+  if (engine.liquidated || engine.riskStopped) return true;
   if (!strategySnapshotReady(descriptor, engine.snapshot)) return true;
   std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<hft_trader::core::AmendIntent, detail::kIntentCapacity> amendBuf{};
@@ -444,17 +502,23 @@ bool runCycle(const StrategyDescriptor& descriptor,
   hft_trader::core::StrategyDecisionTrace trace{};
   const bool captureProbeTrace = isBacktestProbe(descriptor);
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engine);
-  if (captureProbeTrace || captureIndicatorTrace) {
+  const bool captureRangeTrace = isRangeReversion(descriptor);
+  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
   const bool ok = descriptor.runCycle(state, ctx);
-  if (captureProbeTrace || captureIndicatorTrace) {
+  if (!hft_trader::core::canEmitNewOrder(control)) {
+    ctx.io.orderCount = 0u;
+    ctx.io.amendCount = 0u;
+  }
+  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace) {
     trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
     trace.amendCount = static_cast<std::uint32_t>(ctx.io.amendCount);
     trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
     if (captureProbeTrace) appendProbeMetric(engine, tsNs, trace);
     if (captureIndicatorTrace) appendStrategyIndicator(engine, tsNs, trace);
+    if (captureRangeTrace) appendStrategyRange(engine, tsNs, trace);
   }
   if (captureProbeTrace && !ok) return false;
   detail::applyIntents(engine, ctx.io, tsNs, engine.latency);
@@ -512,6 +576,9 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
                    const cxet::composite::UserDataEvent* userEvent) {
   (void)request;
   if (engines.empty()) return true;
+  for (const detail::EngineState& engine : engines) {
+    if (engine.liquidated || engine.riskStopped) return true;
+  }
   if (primaryLegIndex >= engines.size()) primaryLegIndex = 0u;
   for (const detail::EngineState& engine : engines) {
     if (!strategySnapshotReady(descriptor, engine.snapshot)) return true;
@@ -561,8 +628,28 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   ctx.io.cancelOut = Span<hft_trader::core::CancelIntent>(cancelBuf.data(), cancelBuf.size());
   ctx.io.clear();
   recordInputCoverage(engines[primaryLegIndex]);
+  hft_trader::core::StrategyDecisionTrace trace{};
+  const bool captureProbeTrace = isBacktestProbe(descriptor);
+  const bool captureIndicatorTrace = strategyIndicatorEnabled(engines[primaryLegIndex]);
+  const bool captureRangeTrace = isRangeReversion(descriptor);
+  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace) {
+    hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
+    ctx.decisionTrace = &trace;
+  }
   const bool ok = descriptor.runCycle(state, ctx);
-  if (!ok && isBacktestProbe(descriptor)) return false;
+  if (!hft_trader::core::canEmitNewOrder(control)) {
+    ctx.io.orderCount = 0u;
+    ctx.io.amendCount = 0u;
+  }
+  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace) {
+    trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
+    trace.amendCount = static_cast<std::uint32_t>(ctx.io.amendCount);
+    trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
+    if (captureProbeTrace) appendProbeMetric(engines[primaryLegIndex], tsNs, trace);
+    if (captureIndicatorTrace) appendStrategyIndicator(engines[primaryLegIndex], tsNs, trace);
+    if (captureRangeTrace) appendStrategyRange(engines[primaryLegIndex], tsNs, trace);
+  }
+  if (!ok && captureProbeTrace) return false;
   applyIntentsToLegs(engines, ctx.io, primaryLegIndex, tsNs);
   return true;
 }
@@ -599,7 +686,7 @@ hft_trader::core::StrategyAccountState accountStateFromEngine(const detail::Engi
   out.initialBalanceE8 = engine.initialBalanceE8;
   out.walletBalanceE8 = engine.walletBalanceE8;
   out.availableBalanceE8 = engine.walletBalanceE8;
-  out.equityE8 = engine.walletBalanceE8 + detail::unrealizedPnlE8(engine);
+  out.equityE8 = detail::equityE8(engine);
   out.makerFeeBpsE8 = engine.makerFeeBpsE8;
   out.takerFeeBpsE8 = engine.takerFeeBpsE8;
   out.hasBalance = engine.initialBalanceE8 != 0 || engine.walletBalanceE8 != 0;
@@ -647,10 +734,10 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
   return out;
 }
 
-detail::EngineState aggregateArtifactEngine(const std::vector<detail::EngineState>& engines,
-                                            std::int64_t initialBalanceE8,
-                                            std::int64_t finalTsNs) {
-  detail::EngineState out{};
+void populateAggregateArtifactEngine(const std::vector<detail::EngineState>& engines,
+                                     std::int64_t initialBalanceE8,
+                                     std::int64_t finalTsNs,
+                                     detail::EngineState& out) {
   out.initialBalanceE8 = initialBalanceE8;
   out.walletBalanceE8 = initialBalanceE8;
   for (const detail::EngineState& engine : engines) {
@@ -658,6 +745,7 @@ detail::EngineState aggregateArtifactEngine(const std::vector<detail::EngineStat
     out.fills.insert(out.fills.end(), engine.fills.begin(), engine.fills.end());
     out.probeMetrics.insert(out.probeMetrics.end(), engine.probeMetrics.begin(), engine.probeMetrics.end());
     out.strategyIndicator.insert(out.strategyIndicator.end(), engine.strategyIndicator.begin(), engine.strategyIndicator.end());
+    out.strategyRange.insert(out.strategyRange.end(), engine.strategyRange.begin(), engine.strategyRange.end());
     out.userEvents.insert(out.userEvents.end(), engine.userEvents.begin(), engine.userEvents.end());
     out.inputCoverage = addCoverage(out.inputCoverage, engine.inputCoverage);
     out.timerWakeEvents += engine.timerWakeEvents;
@@ -667,8 +755,25 @@ detail::EngineState aggregateArtifactEngine(const std::vector<detail::EngineStat
     out.grossRealizedPnlE8 += engine.grossRealizedPnlE8;
     out.netRealizedPnlE8 += engine.netRealizedPnlE8;
     out.feesPaidE8 += engine.feesPaidE8;
+    if (engine.liquidated) {
+      out.liquidated = true;
+      out.liquidationTsNs = engine.liquidationTsNs;
+      out.liquidationEquityE8 = engine.liquidationEquityE8;
+    }
+    if (engine.riskStopped) {
+      out.riskStopped = true;
+      out.riskStopTsNs = engine.riskStopTsNs;
+      out.riskStopEquityE8 = engine.riskStopEquityE8;
+      out.riskStopThresholdEquityE8 = engine.riskStopThresholdEquityE8;
+    }
+  }
+  if (out.liquidated && initialBalanceE8 > 0) {
+    out.netQtyRaw = 0;
+    out.netRealizedPnlE8 = -initialBalanceE8;
+    out.grossRealizedPnlE8 = out.netRealizedPnlE8 + out.feesPaidE8;
   }
   out.walletBalanceE8 = initialBalanceE8 + out.netRealizedPnlE8;
+  if (out.liquidated) out.walletBalanceE8 = 0;
   if (!engines.empty()) {
     out.strategyIndicatorProfile = engines[0].strategyIndicatorProfile;
     out.strategyIndicatorTitle = engines[0].strategyIndicatorTitle;
@@ -678,7 +783,6 @@ detail::EngineState aggregateArtifactEngine(const std::vector<detail::EngineStat
   }
   detail::appendEquityPoint(out, finalTsNs);
   detail::appendRiskSnapshot(out, finalTsNs, detail::kRiskSnapshotReasonFinal);
-  return out;
 }
 
 std::uint64_t maxLatencyUs(const BacktestRunRequest& request) noexcept {
@@ -776,6 +880,30 @@ std::int64_t nextWakeTs(const StrategyDescriptor& descriptor, const void* state)
   return toInt64Time(wake);
 }
 
+std::int64_t portfolioEquityE8(const std::vector<detail::EngineState>& engines,
+                               std::int64_t initialBalanceE8) noexcept {
+  std::int64_t out = initialBalanceE8;
+  for (const detail::EngineState& engine : engines) {
+    out += engine.netRealizedPnlE8 + detail::unrealizedPnlE8(engine);
+  }
+  return out;
+}
+
+hft_trader::core::StrategyAccountState portfolioAccountStateFromEngines(
+    const std::vector<detail::EngineState>& engines,
+    std::int64_t initialBalanceE8) noexcept {
+  hft_trader::core::StrategyAccountState out{};
+  out.initialBalanceE8 = initialBalanceE8;
+  out.walletBalanceE8 = initialBalanceE8;
+  for (const detail::EngineState& engine : engines) {
+    out.walletBalanceE8 += engine.netRealizedPnlE8;
+  }
+  out.availableBalanceE8 = out.walletBalanceE8;
+  out.equityE8 = portfolioEquityE8(engines, initialBalanceE8);
+  out.hasBalance = initialBalanceE8 != 0 || out.walletBalanceE8 != 0;
+  return out;
+}
+
 void applyMarketEventToSnapshots(detail::EngineState& engine,
                                  const detail::SessionData& session,
                                  const detail::TimelineEvent& event,
@@ -785,7 +913,7 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   hft_trader::core::StrategyMarketSnapshot& snapshot = strategyVisible ? engine.snapshot : engine.venueSnapshot;
   hft_trader::core::LocalOrderBookState& orderBook = strategyVisible ? engine.orderBook : engine.venueOrderBook;
   hft_trader::core::BboReconstructionState& bbo = strategyVisible ? engine.bboReconstruction : engine.venueBboReconstruction;
-  if (event.kind == 0) {
+  if (event.kind == detail::kTimelineKindDepth) {
     cxet::composite::OrderBookTapeRuntimeV1 tape{};
     cxet::composite::OrderBookTapeSidesRuntimeV1 sides{};
     detail::toRuntime(session.depths[event.index], tape, sides);
@@ -800,22 +928,37 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     }
     applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
     hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
-  } else if (event.kind == 1) {
+  } else if (event.kind == detail::kTimelineKindTrade) {
     const auto trade = detail::toRuntime(session.trades[event.index]);
     hft_trader::core::copyTradeSnapshot(snapshot, trade);
     (void)hft_trader::core::applyTrade(bbo, trade);
     applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
     if (!strategyVisible) detail::tryFillOnTrade(engine, trade);
-  } else if (event.kind == 2) {
+  } else if (event.kind == detail::kTimelineKindBookTicker) {
     const auto ticker = detail::toRuntime(session.bookTickers[event.index]);
     hft_trader::core::copyBookTickerSnapshot(snapshot, ticker);
     (void)hft_trader::core::applyBookTicker(bbo, ticker);
     applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
     hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
     if (!strategyVisible) detail::tryFillOnTop(engine, event.tsNs);
-  } else {
+  } else if (event.kind == detail::kTimelineKindPriceLimit) {
     const auto priceLimit = detail::toRuntime(session.priceLimits[event.index]);
     hft_trader::core::copyPriceLimitSnapshot(snapshot, priceLimit);
+  } else if (event.kind == detail::kTimelineKindLiquidation) {
+    const auto liquidation = detail::toRuntime(session.liquidations[event.index], engine.exchange, engine.symbol);
+    hft_trader::core::copyLiquidationSnapshot(snapshot, liquidation);
+  } else if (event.kind == detail::kTimelineKindMarkPrice) {
+    const auto markPrice = detail::toRuntime(session.markPrices[event.index]);
+    hft_trader::core::copyMarkPriceSnapshot(snapshot, markPrice);
+  } else if (event.kind == detail::kTimelineKindIndexPrice) {
+    const auto indexPrice = detail::toRuntime(session.indexPrices[event.index]);
+    hft_trader::core::copyIndexPriceSnapshot(snapshot, indexPrice);
+  } else if (event.kind == detail::kTimelineKindFunding) {
+    const auto funding = detail::toRuntime(session.funding[event.index]);
+    hft_trader::core::copyFundingSnapshot(snapshot, funding);
+  } else if (event.kind == detail::kTimelineKindOpenInterest) {
+    const auto openInterest = detail::toRuntime(session.openInterest[event.index]);
+    hft_trader::core::copyOpenInterestSnapshot(snapshot, openInterest);
   }
 }
 
@@ -847,6 +990,7 @@ bool drainUserEvents(const StrategyDescriptor& descriptor,
                      const hft_trader::core::SymbolShardConfig& shard,
                      const hft_trader::core::ShardControlState& control,
                      const BacktestRunRequest& request) {
+  if (engine.liquidated || engine.riskStopped) return true;
   std::uint32_t guard = 0u;
   while (engine.deliveredUserEvents < engine.userEvents.size()) {
     if (++guard > 4096u) return false;
@@ -864,6 +1008,7 @@ bool runUntil(const StrategyDescriptor& descriptor,
               const hft_trader::core::ShardControlState& control,
               std::int64_t untilTs,
               const BacktestRunRequest& request) {
+  if (engine.liquidated || engine.riskStopped) return true;
   std::uint32_t guard = 0u;
   while (true) {
     if (++guard > 8192u) return false;
@@ -897,7 +1042,10 @@ bool drainUserEventsMulti(const StrategyDescriptor& descriptor,
                           const hft_trader::core::SymbolShardConfig& shard,
                           const hft_trader::core::ShardControlState& control,
                           std::size_t primaryLegIndex,
-                          const BacktestRunRequest& request) {
+  const BacktestRunRequest& request) {
+  for (const detail::EngineState& engine : engines) {
+    if (engine.liquidated || engine.riskStopped) return true;
+  }
   std::uint32_t guard = 0u;
   bool progressed = true;
   while (progressed) {
@@ -923,6 +1071,9 @@ bool runUntilMulti(const StrategyDescriptor& descriptor,
                    std::size_t primaryLegIndex,
                    std::int64_t untilTs,
                    const BacktestRunRequest& request) {
+  for (const detail::EngineState& engine : engines) {
+    if (engine.liquidated || engine.riskStopped) return true;
+  }
   std::uint32_t guard = 0u;
   while (true) {
     if (++guard > 8192u) return false;
@@ -977,6 +1128,50 @@ bool settleAfterReplay(const StrategyDescriptor& descriptor,
   return engine.netQtyRaw == 0 && engine.pending.empty();
 }
 
+bool portfolioHasOpenState(const std::vector<detail::EngineState>& engines) noexcept {
+  for (const detail::EngineState& engine : engines) {
+    if (engine.netQtyRaw != 0 || !engine.pending.empty()) return true;
+  }
+  return false;
+}
+
+bool settleAfterReplayMulti(const StrategyDescriptor& descriptor,
+                            void* state,
+                            std::vector<detail::EngineState>& engines,
+                            const hft_trader::core::SymbolShardConfig& shard,
+                            const hft_trader::core::ShardControlState& control,
+                            std::size_t primaryLegIndex,
+                            std::int64_t lastTsNs,
+                            const BacktestRunRequest& request) {
+  std::int64_t untilTs = lastTsNs > 0 ? detail::delayedTs(lastTsNs, maxLatencyUs(request)) : lastTsNs;
+  if (!runUntilMulti(descriptor, state, engines, shard, control, primaryLegIndex, untilTs, request)) return false;
+  for (std::uint32_t i = 0u; i < 32u; ++i) {
+    const std::int64_t wakeTs = nextWakeTs(descriptor, state);
+    if (wakeTs == std::numeric_limits<std::int64_t>::max()) break;
+    untilTs = wakeTs;
+    if (!runUntilMulti(descriptor, state, engines, shard, control, primaryLegIndex, untilTs, request)) return false;
+    untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
+    if (!runUntilMulti(descriptor, state, engines, shard, control, primaryLegIndex, untilTs, request)) return false;
+    if (!portfolioHasOpenState(engines) && nextWakeTs(descriptor, state) == std::numeric_limits<std::int64_t>::max()) break;
+  }
+  hft_trader::core::ShardControlState teardownControl = control;
+  teardownControl.killActive = hft_trader::core::kAlgoFlagTrue;
+  for (std::uint32_t i = 0u; i < 8u && portfolioHasOpenState(engines); ++i) {
+    untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
+    if (!runUntilMulti(descriptor, state, engines, shard, teardownControl, primaryLegIndex, untilTs, request)) return false;
+    for (detail::EngineState& engine : engines) {
+      if (engine.netQtyRaw != 0 && !detail::forceClosePosition(engine, untilTs, engine.latency)) return false;
+    }
+    untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
+    if (!runUntilMulti(descriptor, state, engines, shard, teardownControl, primaryLegIndex, untilTs, request)) return false;
+    for (detail::EngineState& engine : engines) detail::cancelOpenOrders(engine, untilTs, engine.latency);
+  }
+  for (detail::EngineState& engine : engines) detail::cancelOpenOrders(engine, untilTs, engine.latency);
+  untilTs = detail::delayedTs(untilTs, maxLatencyUs(request));
+  if (!runUntilMulti(descriptor, state, engines, shard, teardownControl, primaryLegIndex, untilTs, request)) return false;
+  return !portfolioHasOpenState(engines);
+}
+
 void populateResultPnl(BacktestRunResult& result, const detail::EngineState& engine) noexcept {
   result.initialBalanceE8 = engine.initialBalanceE8;
   result.walletBalanceE8 = engine.walletBalanceE8;
@@ -992,6 +1187,13 @@ void populateResultPnl(BacktestRunResult& result, const detail::EngineState& eng
   result.totalPnlE8 = result.realizedPnlE8 + result.unrealizedPnlE8;
   result.openPositionQtyE8 = engine.netQtyRaw;
   result.strategyClosed = engine.netQtyRaw == 0;
+  result.liquidated = engine.liquidated;
+  result.liquidationTsNs = engine.liquidationTsNs;
+  result.liquidationEquityE8 = engine.liquidationEquityE8;
+  result.riskStopped = engine.riskStopped;
+  result.riskStopTsNs = engine.riskStopTsNs;
+  result.riskStopEquityE8 = engine.riskStopEquityE8;
+  result.riskStopThresholdEquityE8 = engine.riskStopThresholdEquityE8;
   result.userEvents = engine.userEvents.size();
   result.timerWakeEvents = engine.timerWakeEvents;
   result.reduceOnlyOrders = engine.reduceOnlyOrders;
@@ -1026,6 +1228,13 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
   result.inputCoverage = BacktestInputCoverage{};
   result.legs.clear();
   bool closed = true;
+  bool liquidated = false;
+  bool riskStopped = false;
+  std::int64_t liquidationTsNs = 0;
+  std::int64_t liquidationEquityE8 = 0;
+  std::int64_t riskStopTsNs = 0;
+  std::int64_t riskStopEquityE8 = 0;
+  std::int64_t riskStopThresholdEquityE8 = 0;
   for (std::size_t i = 0u; i < engines.size(); ++i) {
     const detail::EngineState& engine = engines[i];
     result.grossRealizedPnlE8 += engine.grossRealizedPnlE8;
@@ -1041,11 +1250,39 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
     result.reduceOnlyFills += engine.reduceOnlyFills;
     result.inputCoverage = addCoverage(result.inputCoverage, engine.inputCoverage);
     if (engine.netQtyRaw != 0 || !engine.pending.empty()) closed = false;
+    if (engine.liquidated) {
+      liquidated = true;
+      liquidationTsNs = engine.liquidationTsNs;
+      liquidationEquityE8 = engine.liquidationEquityE8;
+    }
+    if (engine.riskStopped) {
+      riskStopped = true;
+      riskStopTsNs = engine.riskStopTsNs;
+      riskStopEquityE8 = engine.riskStopEquityE8;
+      riskStopThresholdEquityE8 = engine.riskStopThresholdEquityE8;
+    }
     if (i < sessions.size()) result.legs.push_back(legSummaryFromEngine(sessions[i], engine));
   }
   result.realizedPnlE8 = result.netRealizedPnlE8;
   result.totalPnlE8 = result.realizedPnlE8 + result.unrealizedPnlE8;
   result.walletBalanceE8 = initialBalanceE8 + result.netRealizedPnlE8;
+  if (liquidated && initialBalanceE8 > 0) {
+    result.walletBalanceE8 = 0;
+    result.grossRealizedPnlE8 = -initialBalanceE8 + result.feesPaidE8;
+    result.netRealizedPnlE8 = -initialBalanceE8;
+    result.realizedPnlE8 = result.netRealizedPnlE8;
+    result.unrealizedPnlE8 = 0;
+    result.totalPnlE8 = result.netRealizedPnlE8;
+    result.openPositionQtyE8 = 0;
+    closed = true;
+  }
+  result.liquidated = liquidated;
+  result.liquidationTsNs = liquidationTsNs;
+  result.liquidationEquityE8 = liquidationEquityE8;
+  result.riskStopped = riskStopped;
+  result.riskStopTsNs = riskStopTsNs;
+  result.riskStopEquityE8 = riskStopEquityE8;
+  result.riskStopThresholdEquityE8 = riskStopThresholdEquityE8;
   result.strategyClosed = closed;
   result.totalPnlCurveE8.clear();
 }
@@ -1077,6 +1314,15 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (!request.writeArtifacts) return Status::Ok;
     return detail::writeResult(result, engine);
   };
+  auto writeEmptyArtifacts = [&]() noexcept -> Status {
+    if (!request.writeArtifacts) return Status::Ok;
+    try {
+      const auto empty = std::make_unique<detail::EngineState>();
+      return writeArtifacts(*empty);
+    } catch (...) {
+      return Status::IoError;
+    }
+  };
 
   const bool hasExplicitSessions = !request.sessions.empty();
   if ((!hasExplicitSessions && request.sessionPath.empty()) || request.configPath.empty()) {
@@ -1100,7 +1346,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!hft_trader::runtime::loadRuntimeConfig(request.configPath.string().c_str(), cfg, error)) {
     result.status = Status::InvalidArgument;
     result.error = error;
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
   std::size_t primaryLegIndex = 0u;
@@ -1113,27 +1359,27 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!resolveStrategyIndicatorProfile(request.indicatorProfile, indicatorProfile)) {
     result.status = Status::InvalidArgument;
     result.error = "unknown indicator profile";
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
   result.indicatorProfile = std::string{indicatorProfile.id};
   if (!strategyDeclaresIndicator(result.strategy, result.indicatorProfile)) {
     result.status = Status::InvalidArgument;
     result.error = "indicator profile is not supported by strategy";
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
   if (result.strategy != cfg.strategyType) {
     result.status = Status::ConfigMismatch;
     result.error = "requested strategy does not match config [strategy] type";
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
   const StrategyDescriptor* descriptor = hft_trader::runtime::findStrategyDescriptor(cfg.strategyType);
   if (!descriptor || !descriptor->resolveParams || !descriptor->initState || !descriptor->runCycle) {
     result.status = Status::Unsupported;
     result.error = "strategy descriptor is missing required callbacks";
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
 
@@ -1141,7 +1387,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!buildSessionLoadPlan(*descriptor, loadPlan, error)) {
     result.status = Status::Unsupported;
     result.error = error;
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
 
@@ -1177,13 +1423,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
   if (!isOk(result.status)) {
     result.error = error;
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
   if (sessionsView == nullptr || sessionsView->empty()) {
     result.status = Status::CorruptData;
     result.error = "backtest session cache is empty";
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
   const std::vector<detail::SessionData>& sessions = *sessionsView;
@@ -1209,7 +1455,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!venue) {
     result.status = Status::ConfigMismatch;
     result.error = "config venue/symbol does not match recorder session";
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
 
@@ -1217,7 +1463,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!descriptor->resolveParams(cfg, *venue, params, error)) {
     result.status = Status::InvalidArgument;
     result.error = error;
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
   StrategyInstrumentSpec instrument{};
@@ -1247,7 +1493,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!descriptor->initState(state.data(), params, instrument)) {
     result.status = Status::InvalidArgument;
     result.error = "strategy initState failed";
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
   BacktestInputCoverage seedCoverage{};
@@ -1255,14 +1501,14 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (session.candles.empty()) {
       result.status = Status::CorruptData;
       result.error = "strategy requires candle history but candles channel is missing or empty";
-      (void)writeArtifacts(detail::EngineState{});
+      (void)writeEmptyArtifacts();
       return result;
     }
     cxet::composite::TieredCandleHistory history{};
     if (!detail::buildTieredCandleHistory(session.candles, history)) {
       result.status = Status::CorruptData;
       result.error = "failed to build strategy candle history from recorder session";
-      (void)writeArtifacts(detail::EngineState{});
+      (void)writeEmptyArtifacts();
       return result;
     }
     seedCoverage.seedM1Candles = history.m1Count.raw;
@@ -1272,26 +1518,35 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (!descriptor->seedHistory(state.data(), history, &stats)) {
       result.status = Status::InvalidArgument;
       result.error = "strategy seedHistory failed";
-      (void)writeArtifacts(detail::EngineState{});
+      (void)writeEmptyArtifacts();
       return result;
     }
     if (isBacktestProbe(*descriptor) &&
         (seedCoverage.seedM1Candles == 0u || seedCoverage.seedM15Candles == 0u || seedCoverage.seedD1Candles == 0u)) {
       result.status = Status::CorruptData;
       result.error = "backtest_probe did not receive full m1/m15/d1 candle seed";
-      (void)writeArtifacts(detail::EngineState{});
+      (void)writeEmptyArtifacts();
       return result;
     }
   }
   if (!seedTradeWarmupFromSession(*descriptor, state.data(), params, session, error)) {
     result.status = Status::CorruptData;
     result.error = error;
-    (void)writeArtifacts(detail::EngineState{});
+    (void)writeEmptyArtifacts();
     return result;
   }
   seedCoverage.seedTradeRows = session.tradeWarmup.size();
 
-  detail::EngineState engine{};
+  std::unique_ptr<detail::EngineState> engineStorage;
+  try {
+    engineStorage = std::make_unique<detail::EngineState>();
+  } catch (...) {
+    result.status = Status::IoError;
+    result.error = "failed to allocate backtest engine state";
+    (void)writeEmptyArtifacts();
+    return result;
+  }
+  detail::EngineState& engine = *engineStorage;
   configureStrategyIndicator(engine, indicatorProfile);
   detail::initLatencyRuntime(engine.latency, latencyConfig);
   engine.inputCoverage = seedCoverage;
@@ -1394,6 +1649,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.bookTickers = 0;
   result.priceLimits = 0;
   result.depths = 0;
+  result.liquidations = 0;
+  result.markPrices = 0;
+  result.indexPrices = 0;
+  result.funding = 0;
+  result.openInterest = 0;
   result.firstTsNs = std::numeric_limits<std::int64_t>::max();
   result.lastTsNs = 0;
   for (const detail::SessionData& loadedSession : sessions) {
@@ -1401,6 +1661,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.bookTickers += loadedSession.bookTickers.size();
     result.priceLimits += loadedSession.priceLimits.size();
     result.depths += loadedSession.depths.size();
+    result.liquidations += loadedSession.liquidations.size();
+    result.markPrices += loadedSession.markPrices.size();
+    result.indexPrices += loadedSession.indexPrices.size();
+    result.funding += loadedSession.funding.size();
+    result.openInterest += loadedSession.openInterest.size();
     if (loadedSession.firstTsNs > 0 && loadedSession.firstTsNs < result.firstTsNs) result.firstTsNs = loadedSession.firstTsNs;
     if (loadedSession.lastTsNs > result.lastTsNs) result.lastTsNs = loadedSession.lastTsNs;
   }
@@ -1408,12 +1673,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.events = timeline.size();
   const bool captureProbeTrace = isBacktestProbe(*descriptor);
   const bool captureIndicatorTrace = !result.indicatorProfile.empty();
+  const bool captureRangeTrace = isRangeReversion(*descriptor);
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
-      reserveEngineStorage(legEngine, timeline.size(), captureProbeTrace, captureIndicatorTrace);
+      reserveEngineStorage(legEngine, timeline.size(), captureProbeTrace, captureIndicatorTrace, captureRangeTrace);
     }
   } else {
-    reserveEngineStorage(engine, timeline.size(), captureProbeTrace, captureIndicatorTrace);
+    reserveEngineStorage(engine, timeline.size(), captureProbeTrace, captureIndicatorTrace, captureRangeTrace);
   }
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
@@ -1424,17 +1690,83 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     detail::appendEquityPoint(engine, result.firstTsNs);
     detail::appendRiskSnapshot(engine, result.firstTsNs, detail::kRiskSnapshotReasonStart);
   }
+  hft_trader::core::StrategyAccountState riskAccount = hasExplicitSessions
+      ? portfolioAccountStateFromEngines(legEngines, request.initialBalanceE8)
+      : accountStateFromEngine(engine);
+  hft_trader::runtime::PortfolioRiskRuntimeState traderRiskState =
+      hft_trader::runtime::makePortfolioRiskRuntimeState(cfg.risk, &riskAccount, 1u);
   auto writeCurrentArtifacts = [&]() noexcept -> Status {
     if (hasExplicitSessions) {
       const std::int64_t tsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
       populatePortfolioResultPnl(result, sessions, legEngines, request.initialBalanceE8);
-      detail::EngineState aggregate = aggregateArtifactEngine(legEngines, request.initialBalanceE8, tsNs);
-      return writeArtifacts(aggregate);
+      try {
+        auto aggregate = std::make_unique<detail::EngineState>();
+        populateAggregateArtifactEngine(legEngines, request.initialBalanceE8, tsNs, *aggregate);
+        return writeArtifacts(*aggregate);
+      } catch (...) {
+        return Status::IoError;
+      }
     }
     populateResultPnl(result, engine);
     result.orders = engine.orders.size();
     result.fills = engine.fills.size();
     return writeArtifacts(engine);
+  };
+  auto tripHardLiquidation = [&](std::int64_t tsNs) noexcept -> bool {
+    if (request.initialBalanceE8 <= 0) return false;
+    if (hasExplicitSessions) {
+      for (const detail::EngineState& legEngine : legEngines) {
+        if (legEngine.liquidated) return true;
+      }
+      const std::int64_t equity = portfolioEquityE8(legEngines, request.initialBalanceE8);
+      if (equity > 0) return false;
+      for (detail::EngineState& legEngine : legEngines) detail::hardLiquidate(legEngine, tsNs, equity);
+      control.killActive = hft_trader::core::kAlgoFlagTrue;
+      control.haltReason = hft_trader::core::kHaltReasonManualKill;
+      result.liquidated = true;
+      result.liquidationTsNs = tsNs;
+      result.liquidationEquityE8 = equity;
+      return true;
+    }
+    if (engine.liquidated) return true;
+    const std::int64_t equity = detail::equityE8(engine);
+    if (equity > 0) return false;
+    detail::hardLiquidate(engine, tsNs, equity);
+    control.killActive = hft_trader::core::kAlgoFlagTrue;
+    control.haltReason = hft_trader::core::kHaltReasonManualKill;
+    result.liquidated = true;
+    result.liquidationTsNs = tsNs;
+    result.liquidationEquityE8 = equity;
+    return true;
+  };
+  auto tripTraderRiskStop = [&](std::int64_t tsNs) noexcept -> bool {
+    if (hasExplicitSessions) {
+      for (const detail::EngineState& legEngine : legEngines) {
+        if (legEngine.liquidated) return false;
+        if (legEngine.riskStopped) return true;
+      }
+      riskAccount = portfolioAccountStateFromEngines(legEngines, request.initialBalanceE8);
+    } else {
+      if (engine.liquidated) return false;
+      if (engine.riskStopped) return true;
+      riskAccount = accountStateFromEngine(engine);
+    }
+    const hft_trader::runtime::PortfolioRiskEvaluation eval =
+        hft_trader::runtime::evaluatePortfolioRisk(traderRiskState, &riskAccount, 1u, timeNsFromI64(tsNs));
+    if (!eval.breached) return false;
+    if (hasExplicitSessions) {
+      for (detail::EngineState& legEngine : legEngines) {
+        detail::stopForTraderRisk(legEngine, tsNs, eval.equityE8, eval.thresholdEquityE8);
+      }
+    } else {
+      detail::stopForTraderRisk(engine, tsNs, eval.equityE8, eval.thresholdEquityE8);
+    }
+    hft_trader::runtime::applyPortfolioRiskToControl(traderRiskState, control);
+    result.riskStopped = true;
+    result.riskStopTsNs = tsNs;
+    result.riskStopEquityE8 = eval.equityE8;
+    result.riskStopThresholdEquityE8 = eval.thresholdEquityE8;
+    return true;
   };
 
   if (!reportProgress(0, timeline.size(), "running", progressCallback, userData)) {
@@ -1444,6 +1776,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     return result;
   }
   std::size_t deliveryCursor = 0u;
+  bool replayStopped = false;
   for (std::size_t i = 0; i < timeline.size(); ++i) {
     if (i + 1u < timeline.size()) prefetchRead(&timeline[i + 1u]);
     if (deliveryCursor < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor]);
@@ -1456,6 +1789,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       result.error = "strategy event loop did not settle before market event";
       (void)writeCurrentArtifacts();
       return result;
+    }
+    if (tripHardLiquidation(event.tsNs) || tripTraderRiskStop(event.tsNs)) {
+      replayStopped = true;
+      break;
     }
     while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs < event.tsNs) {
       if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
@@ -1476,13 +1813,22 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       } else {
         (void)detail::appendRiskSnapshotIfDue(engine, delivered.deliveryTsNs);
       }
+      if (tripHardLiquidation(delivered.deliveryTsNs) || tripTraderRiskStop(delivered.deliveryTsNs)) {
+        replayStopped = true;
+        break;
+      }
     }
+    if (replayStopped) break;
     if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, event, legSymbols, legInstruments, false);
     else applyMarketEventToSnapshots(engine, session, event, selectedSymbol, instrument, false);
     if (hasExplicitSessions) {
       for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, event.tsNs);
     } else {
       (void)detail::appendRiskSnapshotIfDue(engine, event.tsNs);
+    }
+    if (tripHardLiquidation(event.tsNs) || tripTraderRiskStop(event.tsNs)) {
+      replayStopped = true;
+      break;
     }
     while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs <= event.tsNs) {
       if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
@@ -1503,7 +1849,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       } else {
         (void)detail::appendRiskSnapshotIfDue(engine, delivered.deliveryTsNs);
       }
+      if (tripHardLiquidation(delivered.deliveryTsNs) || tripTraderRiskStop(delivered.deliveryTsNs)) {
+        replayStopped = true;
+        break;
+      }
     }
+    if (replayStopped) break;
     const bool afterOk = hasExplicitSessions
         ? runUntilMulti(*descriptor, state.data(), legEngines, shard, control, primaryLegIndex, event.tsNs, request)
         : runUntil(*descriptor, state.data(), engine, shard, control, event.tsNs, request);
@@ -1513,6 +1864,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)writeCurrentArtifacts();
       return result;
     }
+    if (tripHardLiquidation(event.tsNs) || tripTraderRiskStop(event.tsNs)) {
+      replayStopped = true;
+      break;
+    }
     if ((i % 1024u) == 0u && !reportProgress(i, timeline.size(), "running", progressCallback, userData)) {
       result.status = Status::Cancelled;
       result.error = "cancelled";
@@ -1520,7 +1875,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       return result;
     }
   }
-  while (deliveryCursor < deliveryTimeline.size()) {
+  while (!replayStopped && deliveryCursor < deliveryTimeline.size()) {
     if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
     const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
     const bool beforeDelayedOk = hasExplicitSessions
@@ -1548,12 +1903,25 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     } else {
       (void)detail::appendRiskSnapshotIfDue(engine, delivered.deliveryTsNs);
     }
+    if (tripHardLiquidation(delivered.deliveryTsNs) || tripTraderRiskStop(delivered.deliveryTsNs)) {
+      replayStopped = true;
+      break;
+    }
   }
-  if (!hasExplicitSessions && !settleAfterReplay(*descriptor, state.data(), engine, shard, control, result.lastTsNs, effectiveRequest)) {
-    result.status = Status::InvalidArgument;
-    result.error = "strategy event loop did not settle after replay";
-    (void)writeCurrentArtifacts();
-    return result;
+  if (!replayStopped) {
+    const bool settled = hasExplicitSessions
+        ? settleAfterReplayMulti(*descriptor, state.data(), legEngines, shard, control, primaryLegIndex, result.lastTsNs, effectiveRequest)
+        : settleAfterReplay(*descriptor, state.data(), engine, shard, control, result.lastTsNs, effectiveRequest);
+    if (!settled) {
+      result.status = Status::InvalidArgument;
+      result.error = "strategy event loop did not settle after replay";
+      (void)writeCurrentArtifacts();
+      return result;
+    }
+  }
+  if (!replayStopped) {
+    const std::int64_t stopCheckTsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
+    (void)(tripHardLiquidation(stopCheckTsNs) || tripTraderRiskStop(stopCheckTsNs));
   }
   const std::int64_t finalTsNs = result.lastTsNs > 0 ? result.lastTsNs + 1 : result.lastTsNs;
   if (hasExplicitSessions) {
@@ -1562,7 +1930,16 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       detail::appendRiskSnapshot(legEngine, finalTsNs, detail::kRiskSnapshotReasonFinal);
     }
     populatePortfolioResultPnl(result, sessions, legEngines, request.initialBalanceE8);
-    engine = aggregateArtifactEngine(legEngines, request.initialBalanceE8, finalTsNs);
+    try {
+      auto aggregate = std::make_unique<detail::EngineState>();
+      populateAggregateArtifactEngine(legEngines, request.initialBalanceE8, finalTsNs, *aggregate);
+      engine = std::move(*aggregate);
+    } catch (...) {
+      result.status = Status::IoError;
+      result.error = "failed to allocate aggregate backtest engine state";
+      (void)writeEmptyArtifacts();
+      return result;
+    }
   } else {
     detail::appendEquityPoint(engine, finalTsNs);
     detail::appendRiskSnapshot(engine, finalTsNs, detail::kRiskSnapshotReasonFinal);

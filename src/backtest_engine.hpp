@@ -14,6 +14,11 @@
 #include "canon/PositionAndExchange.hpp"
 #include "canon/Subtypes.hpp"
 #include "primitives/composite/BookTickerRuntimeV1.hpp"
+#include "primitives/composite/FundingRuntimeV1.hpp"
+#include "primitives/composite/IndexPriceRuntimeV1.hpp"
+#include "primitives/composite/LiquidationEvent.hpp"
+#include "primitives/composite/MarkPriceRuntimeV1.hpp"
+#include "primitives/composite/OpenInterestRuntimeV1.hpp"
 #include "primitives/composite/OrderBookSnapshot.hpp"
 #include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
 #include "primitives/composite/PriceLimitRuntimeV1.hpp"
@@ -40,6 +45,18 @@ constexpr std::uint8_t kRiskSnapshotReasonStart = 1u;
 constexpr std::uint8_t kRiskSnapshotReasonFill = 2u;
 constexpr std::uint8_t kRiskSnapshotReasonInterval = 3u;
 constexpr std::uint8_t kRiskSnapshotReasonFinal = 4u;
+constexpr std::uint8_t kRiskSnapshotReasonLiquidation = 5u;
+constexpr std::uint8_t kRiskSnapshotReasonTraderRiskStop = 6u;
+constexpr std::uint8_t kTimelineKindDepth = 0u;
+constexpr std::uint8_t kTimelineKindTrade = 1u;
+constexpr std::uint8_t kTimelineKindBookTicker = 2u;
+constexpr std::uint8_t kTimelineKindPriceLimit = 3u;
+constexpr std::uint8_t kTimelineKindLiquidation = 4u;
+constexpr std::uint8_t kTimelineKindMarkPrice = 5u;
+constexpr std::uint8_t kTimelineKindIndexPrice = 6u;
+constexpr std::uint8_t kTimelineKindFunding = 7u;
+constexpr std::uint8_t kTimelineKindOpenInterest = 8u;
+constexpr std::uint8_t kTimelineKindCount = 9u;
 constexpr std::uint8_t kRecordActionNone = 0u;
 constexpr std::uint8_t kRecordActionOrder = 1u;
 constexpr std::uint8_t kRecordActionAmend = 2u;
@@ -135,6 +152,13 @@ struct JsonStrategyIndicatorPoint {
   std::uint8_t sideRaw{0u};
 };
 
+struct JsonStrategyRangePoint {
+  std::int64_t tsNs{0};
+  std::int64_t lowRaw{0};
+  std::int64_t midRaw{0};
+  std::int64_t highRaw{0};
+};
+
 struct JsonProbeMetric {
   std::int64_t tsNs{0};
   std::uint8_t decisionKind{0u};
@@ -186,6 +210,7 @@ struct EngineState {
   std::vector<JsonRiskSnapshot> riskSnapshots{};
   std::vector<JsonProbeMetric> probeMetrics{};
   std::vector<JsonStrategyIndicatorPoint> strategyIndicator{};
+  std::vector<JsonStrategyRangePoint> strategyRange{};
   std::string strategyIndicatorProfile{};
   std::string strategyIndicatorTitle{};
   std::string strategyIndicatorValueLabel{};
@@ -223,7 +248,14 @@ struct EngineState {
   std::int64_t takerFeeBpsE8{0};
   std::int64_t lastRiskSnapshotTsNs{std::numeric_limits<std::int64_t>::min()};
   std::int64_t lastRiskSnapshotUnrealizedPnlE8{0};
+  std::int64_t liquidationTsNs{0};
+  std::int64_t liquidationEquityE8{0};
+  std::int64_t riskStopTsNs{0};
+  std::int64_t riskStopEquityE8{0};
+  std::int64_t riskStopThresholdEquityE8{0};
   bool hasRiskSnapshot{false};
+  bool liquidated{false};
+  bool riskStopped{false};
 };
 
 inline const cxet::composite::BookTickerRuntimeV1& effectiveBookTicker(
@@ -250,6 +282,13 @@ Side sideFromRow(std::int64_t raw) noexcept;
 cxet::composite::TradeRuntimeV1 toRuntime(const TradeRow& row) noexcept;
 cxet::composite::BookTickerRuntimeV1 toRuntime(const BookTickerRow& row) noexcept;
 cxet::composite::PriceLimitRuntimeV1 toRuntime(const PriceLimitRow& row) noexcept;
+cxet::composite::LiquidationEvent toRuntime(const LiquidationRow& row,
+                                            ExchangeId exchange,
+                                            const Symbol& symbol) noexcept;
+cxet::composite::MarkPriceRuntimeV1 toRuntime(const MarkPriceRow& row) noexcept;
+cxet::composite::IndexPriceRuntimeV1 toRuntime(const IndexPriceRow& row) noexcept;
+cxet::composite::FundingRuntimeV1 toRuntime(const FundingRow& row) noexcept;
+cxet::composite::OpenInterestRuntimeV1 toRuntime(const OpenInterestRow& row) noexcept;
 void toRuntime(const DepthRow& row,
                cxet::composite::OrderBookTapeRuntimeV1& tape,
                cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept;
@@ -263,9 +302,15 @@ std::int64_t feeForFillE8(std::int64_t priceE8, std::int64_t qtyE8, std::int64_t
 void initializeAccounting(EngineState& engine, const BacktestRunRequest& request) noexcept;
 void updatePosition(EngineState& engine, Side side, std::int64_t priceE8, std::int64_t qtyE8, std::int64_t tsNs, std::int64_t feeBpsE8, std::int64_t& netRealized) noexcept;
 std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept;
+std::int64_t equityE8(const EngineState& engine) noexcept;
 void appendEquityPoint(EngineState& engine, std::int64_t tsNs);
 void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t reason);
 bool appendRiskSnapshotIfDue(EngineState& engine, std::int64_t tsNs);
+void hardLiquidate(EngineState& engine, std::int64_t tsNs, std::int64_t equityE8) noexcept;
+void stopForTraderRisk(EngineState& engine,
+                       std::int64_t tsNs,
+                       std::int64_t equityE8,
+                       std::int64_t thresholdEquityE8) noexcept;
 
 std::size_t visibleOrders(const EngineState& engine,
                           hft_trader::core::StrategyOrderState* out,

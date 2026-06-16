@@ -183,6 +183,116 @@ bool parsePriceLimitLine(std::string_view line, PriceLimitRow& out) noexcept {
   return true;
 }
 
+bool skipJsonString(std::string_view text, std::size_t& pos) noexcept {
+  skipWs(text, pos);
+  if (pos >= text.size() || text[pos] != '"') return false;
+  ++pos;
+  bool escaped = false;
+  while (pos < text.size()) {
+    const char c = text[pos++];
+    if (escaped) {
+      escaped = false;
+    } else if (c == '\\') {
+      escaped = true;
+    } else if (c == '"') {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool skipJsonAtom(std::string_view text, std::size_t& pos) noexcept {
+  skipWs(text, pos);
+  if (pos >= text.size()) return false;
+  if (text[pos] == '"') return skipJsonString(text, pos);
+  std::int64_t ignored = 0;
+  const std::size_t before = pos;
+  if (parseI64(text, pos, ignored)) return true;
+  pos = before;
+  if (text.compare(pos, 4, "true") == 0) {
+    pos += 4;
+    return true;
+  }
+  if (text.compare(pos, 5, "false") == 0) {
+    pos += 5;
+    return true;
+  }
+  if (text.compare(pos, 4, "null") == 0) {
+    pos += 4;
+    return true;
+  }
+  return false;
+}
+
+bool parseOptionalIngestSeq(std::string_view line, std::size_t& pos, std::int64_t& out) noexcept {
+  if (!consume(line, pos, ',')) return true;
+  std::int64_t first = 0;
+  if (!parseI64(line, pos, first)) return false;
+  if (consume(line, pos, ',')) return parseI64(line, pos, out);
+  out = first;
+  return true;
+}
+
+bool parseLiquidationLine(std::string_view line, LiquidationRow& out) noexcept {
+  std::size_t pos = 0;
+  out = LiquidationRow{};
+  if (!consume(line, pos, '[') || !parseI64(line, pos, out.priceE8) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.qtyE8) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.side) || (out.side != 0 && out.side != 1) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.tsNs)) return false;
+  if (consume(line, pos, ',')) {
+    if (!parseI64(line, pos, out.avgPriceE8) || !consume(line, pos, ',') || !parseI64(line, pos, out.filledQtyE8)) return false;
+    if (consume(line, pos, ',')) {
+      if (!skipJsonAtom(line, pos) || !consume(line, pos, ',') || !skipJsonAtom(line, pos) ||
+          !consume(line, pos, ',') || !skipJsonAtom(line, pos) || !consume(line, pos, ',') ||
+          !parseI64(line, pos, out.orderType) || !consume(line, pos, ',') ||
+          !parseI64(line, pos, out.timeInForce) || !consume(line, pos, ',') ||
+          !parseI64(line, pos, out.status) || !consume(line, pos, ',') ||
+          !parseI64(line, pos, out.sourceMode)) return false;
+      if (!parseOptionalIngestSeq(line, pos, out.ingestSeq)) return false;
+    }
+  }
+  return true;
+}
+
+bool parseMarkPriceLine(std::string_view line, MarkPriceRow& out) noexcept {
+  std::size_t pos = 0;
+  out = MarkPriceRow{};
+  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.markPriceE8)) return false;
+  return parseOptionalIngestSeq(line, pos, out.ingestSeq);
+}
+
+bool parseIndexPriceLine(std::string_view line, IndexPriceRow& out) noexcept {
+  std::size_t pos = 0;
+  out = IndexPriceRow{};
+  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.indexPriceE8)) return false;
+  return parseOptionalIngestSeq(line, pos, out.ingestSeq);
+}
+
+bool parseFundingLine(std::string_view line, FundingRow& out) noexcept {
+  std::size_t pos = 0;
+  out = FundingRow{};
+  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.fundingRateE8) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.fundingTsNs) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.nextFundingTsNs)) return false;
+  return parseOptionalIngestSeq(line, pos, out.ingestSeq);
+}
+
+bool parseOpenInterestLine(std::string_view line, OpenInterestRow& out) noexcept {
+  std::size_t pos = 0;
+  out = OpenInterestRow{};
+  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.openInterestE8)) return false;
+  if (consume(line, pos, ',')) {
+    if (!parseI64(line, pos, out.openInterestValueE8)) return false;
+    if (!parseOptionalIngestSeq(line, pos, out.ingestSeq)) return false;
+  }
+  return true;
+}
+
 bool parseCandleLine(std::string_view line, CandleRow& out) noexcept {
   std::size_t pos = 0;
   out = CandleRow{};
@@ -544,6 +654,11 @@ void rebuildReplayRange(SessionData& out) noexcept {
   for (const BookTickerRow& row : out.bookTickers) updateRange(out, row.tsNs);
   for (const PriceLimitRow& row : out.priceLimits) updateRange(out, row.tsNs);
   for (const DepthRow& row : out.depths) updateRange(out, row.tsNs);
+  for (const LiquidationRow& row : out.liquidations) updateRange(out, row.tsNs);
+  for (const MarkPriceRow& row : out.markPrices) updateRange(out, row.tsNs);
+  for (const IndexPriceRow& row : out.indexPrices) updateRange(out, row.tsNs);
+  for (const FundingRow& row : out.funding) updateRange(out, row.tsNs);
+  for (const OpenInterestRow& row : out.openInterest) updateRange(out, row.tsNs);
 }
 
 }  // namespace
@@ -573,6 +688,11 @@ Status loadSession(const std::filesystem::path& sessionPath,
   const std::string depthPath = extractChannelPath(manifest, "depth");
   const std::string depthSidecarPath = extractChannelSidecarPath(manifest, "depth");
   const std::string candlesPath = extractChannelPath(manifest, "candles");
+  const std::string liquidationsPath = extractChannelPath(manifest, "liquidations");
+  const std::string markPricePath = extractChannelPath(manifest, "mark_price");
+  const std::string indexPricePath = extractChannelPath(manifest, "index_price");
+  const std::string fundingPath = extractChannelPath(manifest, "funding");
+  const std::string openInterestPath = extractChannelPath(manifest, "open_interest");
   loadTradeHistoryManifestFields(manifest, out);
   if (out.exchange.empty() || out.market.empty() || out.symbol.empty()) {
     error = "manifest identity is incomplete";
@@ -618,6 +738,26 @@ Status loadSession(const std::filesystem::path& sessionPath,
   }
   if (plan.loadCandles) {
     Status status = loadJsonl<CandleRow>(existingPath(sessionPath, candlesPath, "candles.jsonl"), "candles", plan.requireCandles, out.candles, parseCandleLine, error);
+    if (!isOk(status)) return status;
+  }
+  if (plan.loadLiquidations) {
+    Status status = loadJsonl<LiquidationRow>(existingPath(sessionPath, liquidationsPath, "liquidations.jsonl"), "liquidations", plan.requireLiquidations, out.liquidations, parseLiquidationLine, error);
+    if (!isOk(status)) return status;
+  }
+  if (plan.loadMarkPrices) {
+    Status status = loadJsonl<MarkPriceRow>(existingPath(sessionPath, markPricePath, "mark_price.jsonl"), "mark_price", plan.requireMarkPrices, out.markPrices, parseMarkPriceLine, error);
+    if (!isOk(status)) return status;
+  }
+  if (plan.loadIndexPrices) {
+    Status status = loadJsonl<IndexPriceRow>(existingPath(sessionPath, indexPricePath, "index_price.jsonl"), "index_price", plan.requireIndexPrices, out.indexPrices, parseIndexPriceLine, error);
+    if (!isOk(status)) return status;
+  }
+  if (plan.loadFunding) {
+    Status status = loadJsonl<FundingRow>(existingPath(sessionPath, fundingPath, "funding.jsonl"), "funding", plan.requireFunding, out.funding, parseFundingLine, error);
+    if (!isOk(status)) return status;
+  }
+  if (plan.loadOpenInterest) {
+    Status status = loadJsonl<OpenInterestRow>(existingPath(sessionPath, openInterestPath, "open_interest.jsonl"), "open_interest", plan.requireOpenInterest, out.openInterest, parseOpenInterestLine, error);
     if (!isOk(status)) return status;
   }
 

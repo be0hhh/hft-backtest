@@ -165,6 +165,7 @@ std::int64_t delayedTs(std::int64_t tsNs, std::uint64_t latencyUs) noexcept {
 }
 
 bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std::int64_t tsNs, bool taker) {
+  if (engine.liquidated || engine.riskStopped) return false;
   if (!order.state.valid || !order.active || order.state.qty.raw <= 0 || priceE8 <= 0) return false;
   const std::int64_t fillQty = reduceOnlyFillQty(engine, order);
   if (fillQty <= 0) return rejectOrder(engine, order, tsNs);
@@ -191,6 +192,7 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
 }
 
 void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
+  if (engine.liquidated || engine.riskStopped) return;
   const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
   const std::int64_t bid = top.bid.px.raw;
   const std::int64_t ask = top.ask.px.raw;
@@ -208,6 +210,7 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
 }
 
 void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& trade) {
+  if (engine.liquidated || engine.riskStopped) return;
   for (OpenOrder& order : engine.open) {
     if (!order.state.valid || !order.active || order.state.orderType == canon::OrderType::Market) continue;
     if (trade.side.raw == Side::Buy().raw && order.state.side.raw == Side::Sell().raw && trade.price.raw >= order.state.price.raw) {
@@ -219,6 +222,7 @@ void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& 
 }
 
 void applyDueActions(EngineState& engine, std::int64_t tsNs) {
+  if (engine.liquidated || engine.riskStopped) return;
   while (!engine.pending.empty()) {
     if (engine.pending.front().activeTsNs > tsNs) break;
     std::pop_heap(engine.pending.begin(), engine.pending.end(), pendingEarlier);
@@ -366,6 +370,7 @@ void applyIntents(EngineState& engine,
                   std::uint64_t orderLatencyUs,
                   std::uint64_t amendLatencyUs,
                   std::uint64_t cancelLatencyUs) {
+  if (engine.liquidated || engine.riskStopped) return;
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
     const auto& intent = io.cancelOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, cancelLatencyUs);
@@ -474,6 +479,7 @@ void applyIntents(EngineState& engine,
                   const hft_trader::core::StrategyIo& io,
                   std::int64_t tsNs,
                   BacktestLatencyRuntime& latency) {
+  if (engine.liquidated || engine.riskStopped) return;
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
     const auto& intent = io.cancelOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));

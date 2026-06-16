@@ -372,6 +372,87 @@ bool testRiskSnapshotCadenceLimitsOpenPositionMtmRows() {
          expect(engine.riskSnapshots[1].reason == kRiskSnapshotReasonInterval, "cadence row is marked interval");
 }
 
+bool testHardLiquidationClearsStateAndBlocksNewOrders() {
+  hft_backtest::BacktestRunRequest request{};
+  request.initialBalanceE8 = 5000000000ll;
+
+  EngineState engine{};
+  initializeAccounting(engine, request);
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(40, Side::Buy(), kPx100 - 200000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 100, 0, 0);
+
+  std::int64_t netRealized = 0;
+  updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0, netRealized);
+  setTop(engine, kPx100 - 6000000000ll, kPx100 - 5900000000ll);
+  const std::int64_t breachedEquity = equityE8(engine);
+
+  hardLiquidate(engine, 2000, breachedEquity);
+  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
+  io.clear();
+  orders[0] = orderIntent(41, Side::Sell(), kPx100 + 200000000ll);
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 3000, 0, 0, 0);
+
+  return expect(breachedEquity <= 0, "test setup breaches 100 percent equity loss") &&
+         expect(engine.liquidated, "engine records hard liquidation") &&
+         expect(engine.liquidationTsNs == 2000, "liquidation stores timestamp") &&
+         expect(engine.liquidationEquityE8 == breachedEquity, "liquidation stores breached equity") &&
+         expect(engine.walletBalanceE8 == 0, "liquidation zeroes wallet") &&
+         expect(engine.position.valid && engine.position.netQty.raw == 0, "liquidation flattens strategy position view") &&
+         expect(engine.netQtyRaw == 0, "liquidation clears accounting position") &&
+         expect(engine.pending.empty(), "liquidation clears pending actions") &&
+         expect(visibleOrders(engine, visible.data(), visible.size()) == 0u, "liquidation exposes no open orders") &&
+         expect(engine.riskSnapshots.back().reason == kRiskSnapshotReasonLiquidation, "liquidation writes risk snapshot reason") &&
+         expect(engine.orders.size() == 1u, "liquidated engine ignores later order intents");
+}
+
+bool testTraderRiskStopCancelsOrdersKeepsPositionAndBlocksNewOrders() {
+  hft_backtest::BacktestRunRequest request{};
+  request.initialBalanceE8 = 5000000000ll;
+
+  EngineState engine{};
+  initializeAccounting(engine, request);
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(50, Side::Buy(), kPx100 - 200000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0, 0);
+
+  std::int64_t netRealized = 0;
+  updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0, netRealized);
+  setTop(engine, kPx100 - 3000000000ll, kPx100 - 2900000000ll);
+  const std::int64_t breachedEquity = equityE8(engine);
+  const std::int64_t thresholdEquity = 3000000000ll;
+
+  stopForTraderRisk(engine, 2000, breachedEquity, thresholdEquity);
+  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
+  io.clear();
+  orders[0] = orderIntent(51, Side::Sell(), kPx100 + 200000000ll);
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 3000, 0, 0, 0);
+
+  return expect(breachedEquity < thresholdEquity, "test setup breaches trader risk threshold") &&
+         expect(!engine.liquidated, "trader risk stop is not hard liquidation") &&
+         expect(engine.riskStopped, "engine records trader risk stop") &&
+         expect(engine.riskStopTsNs == 2000, "risk stop stores timestamp") &&
+         expect(engine.riskStopEquityE8 == breachedEquity, "risk stop stores breached equity") &&
+         expect(engine.riskStopThresholdEquityE8 == thresholdEquity, "risk stop stores threshold equity") &&
+         expect(engine.walletBalanceE8 == request.initialBalanceE8, "risk stop keeps wallet balance") &&
+         expect(engine.position.valid && engine.position.netQty.raw == kQty1, "risk stop keeps strategy position view") &&
+         expect(engine.netQtyRaw == kQty1, "risk stop keeps accounting position") &&
+         expect(engine.pending.empty(), "risk stop clears pending actions") &&
+         expect(visibleOrders(engine, visible.data(), visible.size()) == 0u, "risk stop exposes no open orders") &&
+         expect(engine.riskSnapshots.back().reason == kRiskSnapshotReasonTraderRiskStop, "risk stop writes risk snapshot reason") &&
+         expect(engine.orders.size() == 1u, "risk-stopped engine ignores later order intents");
+}
+
 bool testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() {
   EngineState engine{};
   engine.takerFeeBpsE8 = 0;
@@ -939,6 +1020,13 @@ bool metadataHasParam(const hft_backtest::StrategyMetadata& metadata, std::strin
   return false;
 }
 
+bool metadataHasIndicator(const hft_backtest::StrategyMetadata& metadata, std::string_view key) noexcept {
+  for (std::size_t i = 0; i < metadata.indicatorCount; ++i) {
+    if (metadata.indicators[i].id && key == metadata.indicators[i].id) return true;
+  }
+  return false;
+}
+
 bool testStrategyMetadataExposesOnlySupportedSpreadMakerParams() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("spread_maker1and2");
   return expect(metadata != nullptr, "spread_maker1and2 metadata is exported") &&
@@ -962,6 +1050,18 @@ bool testBacktestProbeMetadataHasTraceIndicators() {
          expect(metadata->indicators[0].id != nullptr && std::string_view{metadata->indicators[0].id} == "trade_range", "backtest_probe exposes trade_range indicator") &&
          expect(metadata->indicators[1].id != nullptr && std::string_view{metadata->indicators[1].id} == "rolling_volume", "backtest_probe exposes rolling_volume indicator");
 }
+
+bool testRangeReversionMetadataExposesRangeControls() {
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("range_reversion");
+  return expect(metadata != nullptr, "range_reversion metadata is exported") &&
+         expect(metadata->minSessionCount == 1u && metadata->maxSessionCount == 1u, "range_reversion is single-session") &&
+         expect(metadataHasParam(*metadata, "range_window_ms"), "range metadata contains range_window_ms") &&
+         expect(metadataHasParam(*metadata, "range_bucket_ms"), "range metadata contains range_bucket_ms") &&
+         expect(metadataHasParam(*metadata, "entry_edge_pct"), "range metadata contains entry_edge_pct") &&
+         expect(metadataHasParam(*metadata, "exit_neutral_band_pct"), "range metadata contains exit_neutral_band_pct") &&
+         expect(metadataHasParam(*metadata, "amount_qty"), "range metadata contains amount_qty") &&
+         expect(metadataHasIndicator(*metadata, "range_position"), "range metadata exposes range_position indicator");
+}
 }  // namespace
 
 int main() {
@@ -979,6 +1079,8 @@ int main() {
   ok = testEquityPointCapturesRealizedOnlyPnl() && ok;
   ok = testRiskSnapshotCapturesCompactMarkToMarketPnl() && ok;
   ok = testRiskSnapshotCadenceLimitsOpenPositionMtmRows() && ok;
+  ok = testHardLiquidationClearsStateAndBlocksNewOrders() && ok;
+  ok = testTraderRiskStopCancelsOrdersKeepsPositionAndBlocksNewOrders() && ok;
   ok = testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() && ok;
   ok = testCancelOpenOrdersAtFinishWritesCancelAcks() && ok;
   ok = testAmendFillBelongsToReplacementOrder() && ok;
@@ -998,5 +1100,6 @@ int main() {
   ok = testBacktestProbeRequiresTradeWarmupCoverage() && ok;
   ok = testStrategyMetadataExposesOnlySupportedSpreadMakerParams() && ok;
   ok = testBacktestProbeMetadataHasTraceIndicators() && ok;
+  ok = testRangeReversionMetadataExposesRangeControls() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

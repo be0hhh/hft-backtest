@@ -44,6 +44,54 @@ void writeManifest(const std::filesystem::path& dir) {
             "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
 }
 
+bool testLoadSessionReadsOptionalReferenceStreams() {
+  const std::filesystem::path dir = makeSessionDir("reference_streams");
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+            "  \"channels\": {\n"
+            "    \"liquidations\": {\"path\": \"jsonl/liquidations.jsonl\"},\n"
+            "    \"mark_price\": {\"path\": \"jsonl/mark_price.jsonl\"},\n"
+            "    \"index_price\": {\"path\": \"jsonl/index_price.jsonl\"},\n"
+            "    \"funding\": {\"path\": \"jsonl/funding.jsonl\"},\n"
+            "    \"open_interest\": {\"path\": \"jsonl/open_interest.jsonl\"}\n"
+            "  }\n"
+            "}\n");
+  writeText(dir / "jsonl" / "liquidations.jsonl",
+            "[10000000000,200000000,1,1000,10010000000,150000000,\"BTCUSDT\",\"binance\",\"futures\",1,2,3,2,11,21]\n");
+  writeText(dir / "jsonl" / "mark_price.jsonl", "[2000,10020000000]\n");
+  writeText(dir / "jsonl" / "index_price.jsonl", "[2100,10000000000]\n");
+  writeText(dir / "jsonl" / "funding.jsonl", "[2200,1234,2200,5800]\n");
+  writeText(dir / "jsonl" / "open_interest.jsonl", "[2300,800000000,90000000000]\n");
+
+  hft_backtest::detail::SessionData data{};
+  hft_backtest::detail::SessionLoadPlan plan{};
+  plan.loadTrades = false;
+  plan.loadBookTickers = false;
+  plan.loadDepths = false;
+  plan.loadLiquidations = true;
+  plan.loadMarkPrices = true;
+  plan.loadIndexPrices = true;
+  plan.loadFunding = true;
+  plan.loadOpenInterest = true;
+  std::string error{};
+
+  const hft_backtest::Status status = hft_backtest::detail::loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::Ok, "optional reference streams load") &&
+         expect(data.liquidations.size() == 1u, "liquidation row parsed") &&
+         expect(data.liquidations[0].tsNs == 1000, "liquidation timestamp parsed") &&
+         expect(data.liquidations[0].avgPriceE8 == 10010000000ll, "liquidation avg price parsed") &&
+         expect(data.liquidations[0].filledQtyE8 == 150000000ll, "liquidation filled qty parsed") &&
+         expect(data.liquidations[0].ingestSeq == 21, "liquidation ingest seq parsed") &&
+         expect(data.markPrices.size() == 1u && data.markPrices[0].markPriceE8 == 10020000000ll, "mark price parsed") &&
+         expect(data.indexPrices.size() == 1u && data.indexPrices[0].indexPriceE8 == 10000000000ll, "index price parsed") &&
+         expect(data.funding.size() == 1u && data.funding[0].fundingRateE8 == 1234, "funding parsed") &&
+         expect(data.openInterest.size() == 1u && data.openInterest[0].openInterestE8 == 800000000ll, "open interest parsed") &&
+         expect(data.firstTsNs == 1000, "reference stream first timestamp tracked") &&
+         expect(data.lastTsNs == 2300, "reference stream last timestamp tracked");
+}
+
 bool testLoadSessionParsesCrLfAndFinalLineWithoutNewline() {
   const std::filesystem::path dir = makeSessionDir("crlf");
   writeManifest(dir);
@@ -120,6 +168,29 @@ bool testBuildTimelineMergesSortedChannelsInStableOrder() {
          expect(out[3].kind == 0u && out[3].tsNs == 400, "depth fourth");
 }
 
+bool testBuildTimelineIncludesOptionalReferenceStreams() {
+  hft_backtest::detail::SessionData session{};
+  session.depths.push_back(hft_backtest::detail::DepthRow{100, 1, {}});
+  session.trades.push_back(hft_backtest::detail::TradeRow{0, 0, 1, 200, 2});
+  session.bookTickers.push_back(hft_backtest::detail::BookTickerRow{0, 0, 0, 0, 300, 3});
+  session.priceLimits.push_back(hft_backtest::detail::PriceLimitRow{0, 0, 1u, 400, 4});
+  session.liquidations.push_back(hft_backtest::detail::LiquidationRow{0, 0, 1, 500, 0, 0, 0, 0, 0, 0, 5});
+  session.markPrices.push_back(hft_backtest::detail::MarkPriceRow{600, 0, 6});
+  session.indexPrices.push_back(hft_backtest::detail::IndexPriceRow{700, 0, 7});
+  session.funding.push_back(hft_backtest::detail::FundingRow{800, 0, 0, 0, 8});
+  session.openInterest.push_back(hft_backtest::detail::OpenInterestRow{900, 0, 0, 9});
+
+  std::vector<hft_backtest::detail::TimelineEvent> out{};
+  hft_backtest::detail::buildTimeline(session, out);
+
+  return expect(out.size() == 9u, "timeline has every optional reference event") &&
+         expect(out[4].kind == hft_backtest::detail::kTimelineKindLiquidation && out[4].tsNs == 500, "liquidation event included") &&
+         expect(out[5].kind == hft_backtest::detail::kTimelineKindMarkPrice && out[5].tsNs == 600, "mark price event included") &&
+         expect(out[6].kind == hft_backtest::detail::kTimelineKindIndexPrice && out[6].tsNs == 700, "index price event included") &&
+         expect(out[7].kind == hft_backtest::detail::kTimelineKindFunding && out[7].tsNs == 800, "funding event included") &&
+         expect(out[8].kind == hft_backtest::detail::kTimelineKindOpenInterest && out[8].tsNs == 900, "open interest event included");
+}
+
 bool testBuildTimelineFallbackSortsUnorderedChannel() {
   hft_backtest::detail::SessionData session{};
   session.trades.push_back(hft_backtest::detail::TradeRow{0, 0, 1, 300, 3});
@@ -139,9 +210,11 @@ bool testBuildTimelineFallbackSortsUnorderedChannel() {
 
 int main() {
   bool ok = true;
+  ok = testLoadSessionReadsOptionalReferenceStreams() && ok;
   ok = testLoadSessionParsesCrLfAndFinalLineWithoutNewline() && ok;
   ok = testLoadSessionRejectsI64Overflow() && ok;
   ok = testBuildTimelineMergesSortedChannelsInStableOrder() && ok;
+  ok = testBuildTimelineIncludesOptionalReferenceStreams() && ok;
   ok = testBuildTimelineFallbackSortsUnorderedChannel() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

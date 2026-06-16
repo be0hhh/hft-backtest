@@ -152,6 +152,25 @@ bool writeStrategyIndicator(const std::filesystem::path& path, const EngineState
   }
   return out.good();
 }
+
+bool writeStrategyRange(const std::filesystem::path& path, const EngineState& engine) noexcept {
+  if (engine.strategyRange.empty()) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    return true;
+  }
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) return false;
+  for (const JsonStrategyRangePoint& row : engine.strategyRange) {
+    out << '[' << row.tsNs
+        << ',' << row.lowRaw
+        << ',' << row.midRaw
+        << ',' << row.highRaw
+        << "]\n";
+  }
+  return out.good();
+}
+
 void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, const EngineState& engine, const char* indent) {
   const char q = '"';
   out << indent << q << "mode" << q << ": " << q << "deterministic_bbo_v2_strategy_close" << q << ",\n";
@@ -160,6 +179,11 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
   out << indent << q << "booktickers" << q << ": " << result.bookTickers << ",\n";
   out << indent << q << "price_limits" << q << ": " << result.priceLimits << ",\n";
   out << indent << q << "depths" << q << ": " << result.depths << ",\n";
+  out << indent << q << "liquidations" << q << ": " << result.liquidations << ",\n";
+  out << indent << q << "mark_prices" << q << ": " << result.markPrices << ",\n";
+  out << indent << q << "index_prices" << q << ": " << result.indexPrices << ",\n";
+  out << indent << q << "funding" << q << ": " << result.funding << ",\n";
+  out << indent << q << "open_interest" << q << ": " << result.openInterest << ",\n";
   out << indent << q << "orders" << q << ": " << result.orders << ",\n";
   out << indent << q << "fills" << q << ": " << result.fills << ",\n";
   out << indent << q << "user_events" << q << ": " << result.userEvents << ",\n";
@@ -167,6 +191,13 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
   out << indent << q << "reduce_only_orders" << q << ": " << result.reduceOnlyOrders << ",\n";
   out << indent << q << "reduce_only_fills" << q << ": " << result.reduceOnlyFills << ",\n";
   out << indent << q << "strategy_closed" << q << ": " << (result.strategyClosed ? "true" : "false") << ",\n";
+  out << indent << q << "liquidated" << q << ": " << (result.liquidated ? "true" : "false") << ",\n";
+  out << indent << q << "liquidation_ts_ns" << q << ": " << result.liquidationTsNs << ",\n";
+  out << indent << q << "liquidation_equity_e8" << q << ": " << result.liquidationEquityE8 << ",\n";
+  out << indent << q << "risk_stopped" << q << ": " << (result.riskStopped ? "true" : "false") << ",\n";
+  out << indent << q << "risk_stop_ts_ns" << q << ": " << result.riskStopTsNs << ",\n";
+  out << indent << q << "risk_stop_equity_e8" << q << ": " << result.riskStopEquityE8 << ",\n";
+  out << indent << q << "risk_stop_threshold_equity_e8" << q << ": " << result.riskStopThresholdEquityE8 << ",\n";
   out << indent << q << "input_coverage" << q << ": {"
       << q << "strategy_cycles" << q << ": " << result.inputCoverage.strategyCycles << ", "
       << q << "cycles_with_trade" << q << ": " << result.inputCoverage.cyclesWithTrade << ", "
@@ -287,6 +318,12 @@ bool writeManifest(const std::filesystem::path& path, const BacktestRunResult& r
         << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,value_raw,aux_raw,event_code,reason_raw,decision_kind,side_raw]" << q
         << ", " << q << "rows" << q << ": " << engine.strategyIndicator.size() << "}";
   }
+  if (!engine.strategyRange.empty()) {
+    out << ",\n";
+    out << "    " << q << "strategy_range" << q << ": {" << q << "path" << q << ": " << q << "strategy_range.jsonl" << q
+        << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,low_raw,mid_raw,high_raw]" << q
+        << ", " << q << "rows" << q << ": " << engine.strategyRange.size() << "}";
+  }
   if (!engine.probeMetrics.empty()) {
     out << ",\n";
     out << "    " << q << "probe_metrics" << q << ": {" << q << "path" << q << ": " << q << "probe_metrics.jsonl" << q
@@ -330,6 +367,7 @@ Status writeResult(const BacktestRunResult& result, const EngineState& engine) n
   if (!writeRiskSnapshots(result.resultPath / "risk_snapshots.jsonl", engine)) return Status::IoError;
   if (!writeProbeMetrics(result.resultPath / "probe_metrics.jsonl", engine)) return Status::IoError;
   if (!writeStrategyIndicator(result.resultPath / "strategy_indicator.jsonl", engine)) return Status::IoError;
+  if (!writeStrategyRange(result.resultPath / "strategy_range.jsonl", engine)) return Status::IoError;
   if (!writeManifest(result.resultPath / "manifest.json", result, engine)) return Status::IoError;
   return Status::Ok;
 }

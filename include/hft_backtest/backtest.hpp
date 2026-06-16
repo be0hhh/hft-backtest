@@ -116,6 +116,11 @@ struct BacktestRunResult {
   std::uint64_t bookTickers{0};
   std::uint64_t priceLimits{0};
   std::uint64_t depths{0};
+  std::uint64_t liquidations{0};
+  std::uint64_t markPrices{0};
+  std::uint64_t indexPrices{0};
+  std::uint64_t funding{0};
+  std::uint64_t openInterest{0};
   std::uint64_t orders{0};
   std::uint64_t fills{0};
   std::uint64_t events{0};
@@ -137,10 +142,17 @@ struct BacktestRunResult {
   std::int64_t mfeE8{0};
   std::int64_t maeE8{0};
   std::int64_t openPositionQtyE8{0};
+  std::int64_t liquidationTsNs{0};
+  std::int64_t liquidationEquityE8{0};
+  std::int64_t riskStopTsNs{0};
+  std::int64_t riskStopEquityE8{0};
+  std::int64_t riskStopThresholdEquityE8{0};
   std::vector<std::int64_t> totalPnlCurveE8{};
   std::vector<BacktestLegSummary> legs{};
   BacktestInputCoverage inputCoverage{};
   bool strategyClosed{false};
+  bool liquidated{false};
+  bool riskStopped{false};
 };
 
 using BacktestProgressCallback = bool (*)(const BacktestProgress& progress, void* userData) noexcept;
