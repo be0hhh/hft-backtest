@@ -240,6 +240,10 @@ bool isRangeReversion(const StrategyDescriptor& descriptor) noexcept {
   return descriptor.name && std::string_view{descriptor.name} == "range_reversion";
 }
 
+bool isStatArbBestside(const StrategyDescriptor& descriptor) noexcept {
+  return descriptor.name && std::string_view{descriptor.name} == "stat_arb_bestside";
+}
+
 void prefetchRead(const void* ptr) noexcept {
 #if defined(__GNUC__) || defined(__clang__)
   __builtin_prefetch(ptr, 0, 1);
@@ -256,7 +260,8 @@ void reserveEngineStorage(detail::EngineState& engine,
                           std::size_t events,
                           bool captureProbeTrace,
                           bool captureIndicatorTrace,
-                          bool captureRangeTrace) {
+                          bool captureRangeTrace,
+                          bool captureSpreadTrace) {
   const std::size_t tradeRows = boundedReserve(events, 16u, 64u);
   engine.pending.reserve(detail::kIntentCapacity);
   engine.orders.reserve(tradeRows);
@@ -267,6 +272,7 @@ void reserveEngineStorage(detail::EngineState& engine,
   if (captureProbeTrace) engine.probeMetrics.reserve(events + 8u);
   if (captureIndicatorTrace) engine.strategyIndicator.reserve(events + 8u);
   if (captureRangeTrace) engine.strategyRange.reserve(events + 8u);
+  if (captureSpreadTrace) engine.strategySpread.reserve(events + 8u);
 }
 
 struct StrategyIndicatorProfileInfo {
@@ -396,6 +402,23 @@ void appendStrategyRange(detail::EngineState& engine,
   engine.strategyRange.push_back(row);
 }
 
+void appendStrategySpread(detail::EngineState& engine,
+                          std::int64_t tsNs,
+                          const hft_trader::core::StrategyDecisionTrace& trace) {
+  if (trace.arbReady == 0u) return;
+  detail::JsonStrategySpreadPoint row{};
+  row.tsNs = tsNs;
+  row.spreadBpsE8 = trace.arbSpreadBpsE8;
+  row.emaBpsE8 = trace.arbEmaBpsE8;
+  row.deviationBpsE8 = trace.arbDeviationBpsE8;
+  row.costBandBpsE8 = trace.arbCostBandBpsE8;
+  row.edgeAfterCostBpsE8 = trace.arbEdgeAfterCostBpsE8;
+  row.direction = trace.arbDirection;
+  row.decisionKind = trace.decisionKind;
+  row.reasonRaw = trace.reasonRaw;
+  engine.strategySpread.push_back(row);
+}
+
 void recordInputCoverage(detail::EngineState& engine) noexcept {
   ++engine.inputCoverage.strategyCycles;
   if (engine.snapshot.hasTrade.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithTrade;
@@ -523,7 +546,8 @@ bool runCycle(const StrategyDescriptor& descriptor,
   const bool captureProbeTrace = isBacktestProbe(descriptor);
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engine);
   const bool captureRangeTrace = isRangeReversion(descriptor);
-  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace) {
+  const bool captureSpreadTrace = isStatArbBestside(descriptor);
+  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
@@ -532,13 +556,14 @@ bool runCycle(const StrategyDescriptor& descriptor,
     ctx.io.orderCount = 0u;
     ctx.io.amendCount = 0u;
   }
-  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace) {
+  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
     trace.amendCount = static_cast<std::uint32_t>(ctx.io.amendCount);
     trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
     if (captureProbeTrace) appendProbeMetric(engine, tsNs, trace);
     if (captureIndicatorTrace) appendStrategyIndicator(engine, tsNs, trace);
     if (captureRangeTrace) appendStrategyRange(engine, tsNs, trace);
+    if (captureSpreadTrace) appendStrategySpread(engine, tsNs, trace);
   }
   if (captureProbeTrace && !ok) return false;
   detail::applyIntents(engine, ctx.io, tsNs, engine.latency);
@@ -652,7 +677,8 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   const bool captureProbeTrace = isBacktestProbe(descriptor);
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engines[primaryLegIndex]);
   const bool captureRangeTrace = isRangeReversion(descriptor);
-  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace) {
+  const bool captureSpreadTrace = isStatArbBestside(descriptor);
+  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
@@ -661,13 +687,14 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
     ctx.io.orderCount = 0u;
     ctx.io.amendCount = 0u;
   }
-  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace) {
+  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
     trace.amendCount = static_cast<std::uint32_t>(ctx.io.amendCount);
     trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
     if (captureProbeTrace) appendProbeMetric(engines[primaryLegIndex], tsNs, trace);
     if (captureIndicatorTrace) appendStrategyIndicator(engines[primaryLegIndex], tsNs, trace);
     if (captureRangeTrace) appendStrategyRange(engines[primaryLegIndex], tsNs, trace);
+    if (captureSpreadTrace) appendStrategySpread(engines[primaryLegIndex], tsNs, trace);
   }
   if (!ok && captureProbeTrace) return false;
   applyIntentsToLegs(engines, ctx.io, primaryLegIndex, tsNs);
@@ -797,6 +824,7 @@ void populateAggregateArtifactEngine(const std::vector<detail::EngineState>& eng
     out.probeMetrics.insert(out.probeMetrics.end(), engine.probeMetrics.begin(), engine.probeMetrics.end());
     out.strategyIndicator.insert(out.strategyIndicator.end(), engine.strategyIndicator.begin(), engine.strategyIndicator.end());
     out.strategyRange.insert(out.strategyRange.end(), engine.strategyRange.begin(), engine.strategyRange.end());
+    out.strategySpread.insert(out.strategySpread.end(), engine.strategySpread.begin(), engine.strategySpread.end());
     out.userEvents.insert(out.userEvents.end(), engine.userEvents.begin(), engine.userEvents.end());
     out.inputCoverage = addCoverage(out.inputCoverage, engine.inputCoverage);
     out.timerWakeEvents += engine.timerWakeEvents;
@@ -1757,12 +1785,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   const bool captureProbeTrace = isBacktestProbe(*descriptor);
   const bool captureIndicatorTrace = !result.indicatorProfile.empty();
   const bool captureRangeTrace = isRangeReversion(*descriptor);
+  const bool captureSpreadTrace = isStatArbBestside(*descriptor);
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
-      reserveEngineStorage(legEngine, timeline.size(), captureProbeTrace, captureIndicatorTrace, captureRangeTrace);
+      reserveEngineStorage(legEngine, timeline.size(), captureProbeTrace, captureIndicatorTrace, captureRangeTrace, captureSpreadTrace);
     }
   } else {
-    reserveEngineStorage(engine, timeline.size(), captureProbeTrace, captureIndicatorTrace, captureRangeTrace);
+    reserveEngineStorage(engine, timeline.size(), captureProbeTrace, captureIndicatorTrace, captureRangeTrace, captureSpreadTrace);
   }
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {

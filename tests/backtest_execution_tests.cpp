@@ -802,29 +802,35 @@ bool testWriterCreatesV2RunDirectory() {
   engine.strategyIndicatorAuxLabel = "Sample";
   engine.strategyIndicatorUnit = "bps";
   engine.strategyIndicator.push_back(JsonStrategyIndicatorPoint{150, 42, 44, 1, 7, 3, 1});
+  engine.strategySpread.push_back(JsonStrategySpreadPoint{150, 100000000, 90000000, 10000000, 5000000, 5000000, 1, 3, 0});
 
   const hft_backtest::Status status = writeResult(result, engine);
   const std::string manifest = readText(dir / "manifest.json");
-  const std::string orders = readText(dir / "orders.jsonl");
+  const std::string orderLifetimes = readText(dir / "order_lifetimes.jsonl");
   const std::string fills = readText(dir / "fills.jsonl");
   const std::string equity = readText(dir / "equity.jsonl");
   const std::string risk = readText(dir / "risk_snapshots.jsonl");
   const std::string indicator = readText(dir / "strategy_indicator.jsonl");
+  const std::string spread = readText(dir / "strategy_spread.jsonl");
 
   return expect(status == hft_backtest::Status::Ok, "v2 writer reports ok") &&
          expect(std::filesystem::is_directory(dir), "result path is a directory") &&
          expect(manifest.find("\"type\": \"run.result.v2\"") != std::string::npos, "manifest declares v2 result") &&
          expect(manifest.find("\"orders\": 1") != std::string::npos, "manifest summary includes order count") &&
+         expect(manifest.find("\"order_lifetimes\": {") != std::string::npos, "manifest declares order lifetimes stream") &&
          expect(manifest.find("\"risk_snapshots\": {") != std::string::npos, "manifest declares risk snapshots stream") &&
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
+         expect(manifest.find("\"strategy_spread\": {") != std::string::npos, "manifest declares strategy spread stream") &&
          expect(manifest.find("\"profile\": \"trade_range\"") != std::string::npos, "indicator stream carries profile") &&
          expect(manifest.find("\"market_data_latency\": {\"base_us\": 250, \"jitter_us\": 100}") != std::string::npos,
                 "manifest leg summary carries per-leg market data latency") &&
-         expect(orders == "[1,0,100,110,100,1,1,1,3,10000000000,100000000,0,0]\n", "orders stream uses compact arrays") &&
+         expect(orderLifetimes == "[110,150,10000000000,100000000,1,0,0]\n", "order lifetimes stream uses compact arrays") &&
+         expect(!std::filesystem::exists(dir / "orders.jsonl"), "writer does not emit raw orders stream") &&
          expect(fills == "[1,110,150,1,10000000000,100000000,0,0,0]\n", "fills stream uses compact arrays") &&
          expect(equity == "[150,0,0,0,0,0,0,0,100000000000,100000000,1]\n", "equity stream uses compact arrays") &&
          expect(risk == "[150,0,0,0,0,0,0,100000000000,100000000,10000000000,9900000000,10100000000,1,2]\n", "risk stream uses compact arrays") &&
          expect(indicator == "[150,42,44,1,7,3,1]\n", "strategy indicator stream uses compact arrays") &&
+         expect(spread == "[150,100000000,90000000,10000000,5000000,5000000,1,3,0]\n", "strategy spread stream uses compact arrays") &&
          expect(std::filesystem::exists(dir / "config.ini"), "writer copies run config into result directory") &&
          expect(!std::filesystem::exists(dir.parent_path() / "run-v2.summary.json"), "writer does not create legacy summary json");
 }
@@ -965,7 +971,6 @@ bool testTwoLegProbeRunsOnTwoSessionsAndWritesLegIndexes() {
   request.latencySchedules.push_back(okxLatency);
   const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
   const std::string manifest = readText(request.outputPath / "manifest.json");
-  const std::string orders = readText(request.outputPath / "orders.jsonl");
   const std::string fills = readText(request.outputPath / "fills.jsonl");
 
   return expect(result.status == hft_backtest::Status::Ok, "two_leg_probe backtest completes") &&
@@ -984,8 +989,62 @@ bool testTwoLegProbeRunsOnTwoSessionsAndWritesLegIndexes() {
          expect(manifest.find("\"maker_fee_bps_e8\": 200000000") != std::string::npos, "manifest carries leg 0 maker fee") &&
          expect(manifest.find("\"market_order_latency\": {\"base_us\": 3100, \"jitter_us\": 300}") != std::string::npos,
                 "manifest carries leg 1 latency") &&
-         expect(orders.find(",0]\n") != std::string::npos, "orders stream includes leg 0") &&
-         expect(orders.find(",1]\n") != std::string::npos, "orders stream includes leg 1") &&
+         expect(manifest.find("\"order_lifetimes\": {") != std::string::npos, "manifest declares order lifetimes stream") &&
+         expect(std::filesystem::exists(request.outputPath / "order_lifetimes.jsonl"),
+                "writer emits order lifetimes stream file") &&
+         expect(fills.find(",0]\n") != std::string::npos, "fills stream includes leg 0") &&
+         expect(fills.find(",1]\n") != std::string::npos, "fills stream includes leg 1");
+}
+
+bool testStatArbBestsideRunsOnTwoSessionsAndWritesSpreadTrace() {
+  const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                     ("hft_backtest_stat_arb_" + std::to_string(std::rand()));
+  const std::filesystem::path legA = root / "leg_a";
+  const std::filesystem::path legB = root / "leg_b";
+  writeTwoLegProbeSession(legA, "binance", "futures", "BTCUSDT", 10000000000LL, 10010000000LL, 1000);
+  writeTwoLegProbeSession(legB, "okx", "futures", "BTCUSDT", 10000000000LL, 10010000000LL, 1100);
+  writeText(legB / "jsonl" / "bookticker.jsonl",
+            "[10000000000,100000000,10010000000,100000000,1200,1,1]\n"
+            "[10200000000,100000000,10210000000,100000000,2200,2,2]\n"
+            "[10000000000,100000000,10010000000,100000000,3200,3,3]\n");
+  writeText(root / "stat_arb.ini",
+            "[strategy]\n"
+            "type=stat_arb_bestside\n"
+            "enabled=1\n"
+            "ema_window_ms=5000\n"
+            "entry_edge_bps=0\n"
+            "exit_edge_bps=0\n"
+            "amount_qty=10\n"
+            "[venue.binance_futures]\n"
+            "api_slot=1\n"
+            "symbols=BTCUSDT\n"
+            "[venue.okx_futures]\n"
+            "api_slot=1\n"
+            "symbols=BTCUSDT\n"
+            "[portfolio.recorder]\n"
+            "legs=binance_futures:BTCUSDT,okx_futures:BTCUSDT\n"
+            "primary=binance_futures:BTCUSDT\n");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessions.push_back(hft_backtest::BacktestSessionRequest{legA, "binance_futures", "BTCUSDT"});
+  request.sessions.push_back(hft_backtest::BacktestSessionRequest{legB, "okx_futures", "BTCUSDT"});
+  request.configPath = root / "stat_arb.ini";
+  request.strategy = "stat_arb_bestside";
+  request.runId = "stat-arb";
+  request.outputPath = root / "backtests" / "stat-arb";
+  request.initialBalanceE8 = 100000000000LL;
+  request.feeSchedules.push_back(hft_backtest::BacktestFeeSchedule{"binance", "futures", 0, 0});
+  request.feeSchedules.push_back(hft_backtest::BacktestFeeSchedule{"okx", "futures", 0, 0});
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+  const std::string manifest = readText(request.outputPath / "manifest.json");
+  const std::string spread = readText(request.outputPath / "strategy_spread.jsonl");
+  const std::string fills = readText(request.outputPath / "fills.jsonl");
+
+  return expect(result.status == hft_backtest::Status::Ok, "stat_arb_bestside backtest completes") &&
+         expect(result.orders >= 2u, "stat_arb_bestside emits routed market pair") &&
+         expect(result.fills >= 2u, "stat_arb_bestside fills routed market pair") &&
+         expect(manifest.find("\"strategy_spread\": {") != std::string::npos, "manifest declares strategy spread stream") &&
+         expect(spread.find(",1,3,0]\n") != std::string::npos, "spread stream records entry decision") &&
          expect(fills.find(",0]\n") != std::string::npos, "fills stream includes leg 0") &&
          expect(fills.find(",1]\n") != std::string::npos, "fills stream includes leg 1");
 }
@@ -1177,6 +1236,17 @@ bool testRangeReversionMetadataExposesRangeControls() {
          expect(metadataHasParam(*metadata, "amount_qty"), "range metadata contains amount_qty") &&
          expect(metadataHasIndicator(*metadata, "range_position"), "range metadata exposes range_position indicator");
 }
+
+bool testStatArbBestsideMetadataRequiresTwoSessions() {
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("stat_arb_bestside");
+  return expect(metadata != nullptr, "stat_arb_bestside metadata is exported") &&
+         expect(metadata->minSessionCount == 2u, "stat arb requires at least two sessions") &&
+         expect(metadata->maxSessionCount == 2u, "stat arb allows exactly two sessions") &&
+         expect(metadataHasParam(*metadata, "ema_window_ms"), "stat arb metadata contains ema_window_ms") &&
+         expect(metadataHasParam(*metadata, "entry_edge_bps"), "stat arb metadata contains entry_edge_bps") &&
+         expect(metadataHasParam(*metadata, "exit_edge_bps"), "stat arb metadata contains exit_edge_bps") &&
+         expect(metadataHasParam(*metadata, "amount_qty"), "stat arb metadata contains amount_qty");
+}
 }  // namespace
 
 int main() {
@@ -1210,6 +1280,7 @@ int main() {
   ok = testWriterCreatesV2RunDirectory() && ok;
   ok = testBacktestProbeReportsFullInputCoverage() && ok;
   ok = testTwoLegProbeRunsOnTwoSessionsAndWritesLegIndexes() && ok;
+  ok = testStatArbBestsideRunsOnTwoSessionsAndWritesSpreadTrace() && ok;
   ok = testBacktestProbeRequiresCalculatedTradeWarmup() && ok;
   ok = testBacktestProbeRequiresCandleSeed() && ok;
   ok = testBacktestProbeRequiresAllCandleSeedTiers() && ok;
@@ -1218,5 +1289,6 @@ int main() {
   ok = testBacktestProbeMetadataHasTraceIndicators() && ok;
   ok = testTwoLegProbeMetadataRequiresTwoSessions() && ok;
   ok = testRangeReversionMetadataExposesRangeControls() && ok;
+  ok = testStatArbBestsideMetadataRequiresTwoSessions() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

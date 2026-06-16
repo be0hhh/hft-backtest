@@ -159,6 +159,18 @@ struct JsonStrategyRangePoint {
   std::int64_t highRaw{0};
 };
 
+struct JsonStrategySpreadPoint {
+  std::int64_t tsNs{0};
+  std::int64_t spreadBpsE8{0};
+  std::int64_t emaBpsE8{0};
+  std::int64_t deviationBpsE8{0};
+  std::int64_t costBandBpsE8{0};
+  std::int64_t edgeAfterCostBpsE8{0};
+  std::uint8_t direction{0u};
+  std::uint8_t decisionKind{0u};
+  std::uint8_t reasonRaw{0u};
+};
+
 struct JsonProbeMetric {
   std::int64_t tsNs{0};
   std::uint8_t decisionKind{0u};
@@ -211,6 +223,7 @@ struct EngineState {
   std::vector<JsonProbeMetric> probeMetrics{};
   std::vector<JsonStrategyIndicatorPoint> strategyIndicator{};
   std::vector<JsonStrategyRangePoint> strategyRange{};
+  std::vector<JsonStrategySpreadPoint> strategySpread{};
   std::string strategyIndicatorProfile{};
   std::string strategyIndicatorTitle{};
   std::string strategyIndicatorValueLabel{};
