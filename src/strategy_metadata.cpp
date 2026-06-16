@@ -36,6 +36,13 @@ inline constexpr StrategyMetadata kStrategies[] = {
         },
     },
     StrategyMetadata{
+        .id = "two_leg_probe",
+        .displayNameRu = "Диагностический two-leg probe",
+        .configTemplateFile = "two_leg_probe.ini",
+        .minSessionCount = 2u,
+        .maxSessionCount = 2u,
+    },
+    StrategyMetadata{
         .id = "range_reversion",
         .displayNameRu = "Ренж-реверсия",
         .configTemplateFile = "range_reversion.ini",

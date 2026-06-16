@@ -238,6 +238,12 @@ void writeLegsArray(std::ostream& out, const BacktestRunResult& result, const ch
         << q << "symbol" << q << ": " << quote(leg.symbol) << ", "
         << q << "maker_fee_bps_e8" << q << ": " << leg.makerFeeBpsE8 << ", "
         << q << "taker_fee_bps_e8" << q << ": " << leg.takerFeeBpsE8 << ", "
+        << q << "market_data_latency" << q << ": {" << q << "base_us" << q << ": " << leg.marketDataLatency.baseUs
+        << ", " << q << "jitter_us" << q << ": " << leg.marketDataLatency.jitterUs << "}, "
+        << q << "market_order_latency" << q << ": {" << q << "base_us" << q << ": " << leg.marketOrderLatency.baseUs
+        << ", " << q << "jitter_us" << q << ": " << leg.marketOrderLatency.jitterUs << "}, "
+        << q << "limit_order_latency" << q << ": {" << q << "base_us" << q << ": " << leg.limitOrderLatency.baseUs
+        << ", " << q << "jitter_us" << q << ": " << leg.limitOrderLatency.jitterUs << "}, "
         << q << "orders" << q << ": " << leg.orders << ", "
         << q << "fills" << q << ": " << leg.fills << ", "
         << q << "user_events" << q << ": " << leg.userEvents << ", "

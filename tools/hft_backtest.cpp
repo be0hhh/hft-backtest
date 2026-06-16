@@ -13,7 +13,7 @@
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps]\n";
+  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--order-latency-us N] [--amend-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps] [--latency exchange:market:md_base:md_jitter:mkt_base:mkt_jitter:limit_base:limit_jitter]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {
@@ -85,6 +85,40 @@ bool parseFeeSchedule(const char* text, hft_backtest::BacktestFeeSchedule& out) 
   out.market.assign(marketFirst, static_cast<std::size_t>(marketEnd - marketFirst));
   out.makerFeeBpsE8 = makerE8;
   out.takerFeeBpsE8 = takerE8;
+  return true;
+}
+
+bool parseU64Text(const char* first, const char* last, std::uint64_t& out) noexcept {
+  if (!first || first == last) return false;
+  const auto parsed = std::from_chars(first, last, out);
+  return parsed.ec == std::errc{} && parsed.ptr == last;
+}
+
+bool parseLatencySchedule(const char* text, hft_backtest::BacktestLatencySchedule& out) noexcept {
+  if (!text || *text == '\0') return false;
+  const char* parts[8]{};
+  const char* ends[8]{};
+  const char* cursor = text;
+  const char* textEnd = text + std::strlen(text);
+  for (std::uint32_t i = 0u; i < 8u; ++i) {
+    parts[i] = cursor;
+    const char* end = i == 7u ? textEnd : std::strchr(cursor, ':');
+    if (!end || end == cursor) return false;
+    ends[i] = end;
+    cursor = end + 1;
+  }
+  std::uint64_t values[6]{};
+  for (std::uint32_t i = 0u; i < 6u; ++i) {
+    if (!parseU64Text(parts[i + 2u], ends[i + 2u], values[i])) return false;
+  }
+  out.exchange.assign(parts[0], static_cast<std::size_t>(ends[0] - parts[0]));
+  out.market.assign(parts[1], static_cast<std::size_t>(ends[1] - parts[1]));
+  out.marketData.baseUs = values[0];
+  out.marketData.jitterUs = values[1];
+  out.marketOrder.baseUs = values[2];
+  out.marketOrder.jitterUs = values[3];
+  out.limitOrder.baseUs = values[4];
+  out.limitOrder.jitterUs = values[5];
   return true;
 }
 
@@ -203,6 +237,12 @@ int main(int argc, char** argv) {
         hft_backtest::BacktestFeeSchedule schedule{};
         if (!parseFeeSchedule(value, schedule)) return 2;
         request.feeSchedules.push_back(std::move(schedule));
+      }
+    } else if (std::strcmp(arg, "--latency") == 0) {
+      if (const char* value = needValue(arg)) {
+        hft_backtest::BacktestLatencySchedule schedule{};
+        if (!parseLatencySchedule(value, schedule)) return 2;
+        request.latencySchedules.push_back(std::move(schedule));
       }
     } else if (std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--help") == 0) {
       printUsage();

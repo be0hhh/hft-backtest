@@ -29,6 +29,14 @@ struct BacktestFeeSchedule {
   std::int64_t takerFeeBpsE8{0};
 };
 
+struct BacktestLatencySchedule {
+  std::string exchange{};
+  std::string market{};
+  BacktestLatencyProfile marketData{};
+  BacktestLatencyProfile marketOrder{};
+  BacktestLatencyProfile limitOrder{};
+};
+
 struct BacktestRunRequest {
   std::filesystem::path sessionPath{};
   std::vector<BacktestSessionRequest> sessions{};
@@ -49,6 +57,7 @@ struct BacktestRunRequest {
   std::int64_t makerFeeBpsE8{0};
   std::int64_t takerFeeBpsE8{0};
   std::vector<BacktestFeeSchedule> feeSchedules{};
+  std::vector<BacktestLatencySchedule> latencySchedules{};
   bool writeArtifacts{true};
 };
 
@@ -79,6 +88,9 @@ struct BacktestLegSummary {
   std::string symbol{};
   std::int64_t makerFeeBpsE8{0};
   std::int64_t takerFeeBpsE8{0};
+  BacktestLatencyProfile marketDataLatency{};
+  BacktestLatencyProfile marketOrderLatency{};
+  BacktestLatencyProfile limitOrderLatency{};
   std::uint64_t orders{0};
   std::uint64_t fills{0};
   std::uint64_t userEvents{0};

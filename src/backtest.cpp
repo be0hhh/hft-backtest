@@ -128,6 +128,26 @@ bool marketDataLatencyKeepsOrder(const detail::BacktestLatencyConfig& config) no
   return config.marketData.jitterUs == 0u;
 }
 
+bool hasMarketDataLatency(const BacktestRunRequest& request,
+                          const detail::BacktestLatencyConfig& fallback) noexcept {
+  if (fallback.marketData.baseUs != 0u || fallback.marketData.jitterUs != 0u) return true;
+  for (const BacktestLatencySchedule& schedule : request.latencySchedules) {
+    if (schedule.marketData.baseUs != 0u || schedule.marketData.jitterUs != 0u) return true;
+  }
+  return false;
+}
+
+bool marketDataLatencyKeepsOrder(const BacktestRunRequest& request,
+                                 const detail::BacktestLatencyConfig& fallback) noexcept {
+  if (!marketDataLatencyKeepsOrder(fallback)) return false;
+  const std::uint64_t baseUs = fallback.marketData.baseUs;
+  for (const BacktestLatencySchedule& schedule : request.latencySchedules) {
+    if (schedule.marketData.jitterUs != 0u) return false;
+    if (schedule.marketData.baseUs != baseUs) return false;
+  }
+  return true;
+}
+
 std::string makeRunId() {
   const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count();
@@ -681,6 +701,34 @@ BacktestFeeSchedule resolveFeeSchedule(const BacktestRunRequest& request,
   return fallback;
 }
 
+detail::BacktestLatencyConfig resolveLatencyConfig(const BacktestRunRequest& request,
+                                                   const std::string& exchangeText,
+                                                   const std::string& marketText) noexcept {
+  detail::BacktestLatencyConfig fallback = detail::latencyConfigFromRequest(request);
+  const ExchangeId exchange = detail::exchangeFromText(exchangeText);
+  const canon::MarketType market = detail::marketFromText(marketText);
+  for (const BacktestLatencySchedule& schedule : request.latencySchedules) {
+    if (detail::exchangeFromText(schedule.exchange).raw != exchange.raw) continue;
+    if (detail::marketFromText(schedule.market).raw != market.raw) continue;
+    fallback.marketData = schedule.marketData;
+    fallback.marketOrder = schedule.marketOrder;
+    fallback.limitOrder = schedule.limitOrder;
+    return fallback;
+  }
+  return fallback;
+}
+
+detail::BacktestLatencyConfig latencyConfigForLeg(const BacktestRunRequest& request,
+                                                  const std::string& exchangeText,
+                                                  const std::string& marketText,
+                                                  std::size_t legIndex) noexcept {
+  detail::BacktestLatencyConfig out = resolveLatencyConfig(request, exchangeText, marketText);
+  out.seed ^= hashRunSeed(exchangeText);
+  out.seed ^= (hashRunSeed(marketText) << 1u);
+  out.seed ^= (static_cast<std::uint64_t>(legIndex + 1u) * 0x9e3779b97f4a7c15ull);
+  return out;
+}
+
 hft_trader::core::StrategyAccountState accountStateFromEngine(const detail::EngineState& engine) noexcept {
   hft_trader::core::StrategyAccountState out{};
   out.initialBalanceE8 = engine.initialBalanceE8;
@@ -717,6 +765,9 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
   out.symbol = session.symbol;
   out.makerFeeBpsE8 = engine.makerFeeBpsE8;
   out.takerFeeBpsE8 = engine.takerFeeBpsE8;
+  out.marketDataLatency = engine.latency.config.marketData;
+  out.marketOrderLatency = engine.latency.config.marketOrder;
+  out.limitOrderLatency = engine.latency.config.limitOrder;
   out.orders = engine.orders.size();
   out.fills = engine.fills.size();
   out.userEvents = engine.userEvents.size();
@@ -792,6 +843,14 @@ std::uint64_t maxLatencyUs(const BacktestRunRequest& request) noexcept {
   const std::uint64_t limitOrder = detail::latencyProfileMaxUs(config.limitOrder);
   if (marketOrder > out) out = marketOrder;
   if (limitOrder > out) out = limitOrder;
+  for (const BacktestLatencySchedule& schedule : request.latencySchedules) {
+    const std::uint64_t md = detail::latencyProfileMaxUs(schedule.marketData);
+    const std::uint64_t mo = detail::latencyProfileMaxUs(schedule.marketOrder);
+    const std::uint64_t lo = detail::latencyProfileMaxUs(schedule.limitOrder);
+    if (md > out) out = md;
+    if (mo > out) out = mo;
+    if (lo > out) out = lo;
+  }
   return out;
 }
 
@@ -1063,6 +1122,13 @@ bool drainUserEventsMulti(const StrategyDescriptor& descriptor,
   return true;
 }
 
+bool hasUndeliveredUserEvents(const std::vector<detail::EngineState>& engines) noexcept {
+  for (const detail::EngineState& engine : engines) {
+    if (engine.deliveredUserEvents < engine.userEvents.size()) return true;
+  }
+  return false;
+}
+
 bool runUntilMulti(const StrategyDescriptor& descriptor,
                    void* state,
                    std::vector<detail::EngineState>& engines,
@@ -1073,6 +1139,13 @@ bool runUntilMulti(const StrategyDescriptor& descriptor,
                    const BacktestRunRequest& request) {
   for (const detail::EngineState& engine : engines) {
     if (engine.liquidated || engine.riskStopped) return true;
+  }
+  const std::int64_t pendingTs = nextPendingTs(engines);
+  const std::int64_t wakeTs = nextWakeTs(descriptor, state);
+  const std::int64_t nextTs = pendingTs < wakeTs ? pendingTs : wakeTs;
+  if (!hasUndeliveredUserEvents(engines) &&
+      (nextTs == std::numeric_limits<std::int64_t>::max() || nextTs > untilTs)) {
+    return true;
   }
   std::uint32_t guard = 0u;
   while (true) {
@@ -1548,7 +1621,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
   detail::EngineState& engine = *engineStorage;
   configureStrategyIndicator(engine, indicatorProfile);
-  detail::initLatencyRuntime(engine.latency, latencyConfig);
+  detail::initLatencyRuntime(engine.latency, resolveLatencyConfig(effectiveRequest, session.exchange, session.market));
   engine.inputCoverage = seedCoverage;
   engine.exchange = sessionExchange;
   engine.market = sessionMarket;
@@ -1563,7 +1636,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     for (std::size_t leg = 0; leg < sessions.size(); ++leg) {
       detail::EngineState& legEngine = legEngines[leg];
       configureStrategyIndicator(legEngine, indicatorProfile);
-      detail::initLatencyRuntime(legEngine.latency, latencyConfig);
+      const detail::BacktestLatencyConfig legLatency =
+          latencyConfigForLeg(effectiveRequest, sessions[leg].exchange, sessions[leg].market, leg);
+      detail::initLatencyRuntime(legEngine.latency, legLatency);
       legEngine.inputCoverage = seedCoverage;
       legEngine.legIndex = static_cast<std::uint32_t>(leg);
       legEngine.exchange = detail::exchangeFromText(sessions[leg].exchange);
@@ -1627,14 +1702,22 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   const std::vector<detail::TimelineEvent>& timeline = *timelineView;
   std::vector<detail::TimelineEvent> loadedDeliveryTimeline;
   const std::vector<detail::TimelineEvent>* deliveryTimelineView = nullptr;
-  if (latencyConfig.marketData.baseUs == 0u && latencyConfig.marketData.jitterUs == 0u) {
+  if (!hasMarketDataLatency(effectiveRequest, latencyConfig)) {
     deliveryTimelineView = &timeline;
   } else {
     loadedDeliveryTimeline = timeline;
     for (detail::TimelineEvent& event : loadedDeliveryTimeline) {
-      event.deliveryTsNs = detail::delayedTs(event.tsNs, detail::sampleLatencyUs(engine.latency, detail::BacktestLatencyChannel::MarketData));
+      if (hasExplicitSessions && event.legIndex < legEngines.size()) {
+        event.deliveryTsNs = detail::delayedTs(
+            event.tsNs,
+            detail::sampleLatencyUs(legEngines[event.legIndex].latency, detail::BacktestLatencyChannel::MarketData));
+      } else {
+        event.deliveryTsNs = detail::delayedTs(
+            event.tsNs,
+            detail::sampleLatencyUs(engine.latency, detail::BacktestLatencyChannel::MarketData));
+      }
     }
-    if (!marketDataLatencyKeepsOrder(latencyConfig)) {
+    if (!marketDataLatencyKeepsOrder(effectiveRequest, latencyConfig)) {
       std::stable_sort(loadedDeliveryTimeline.begin(), loadedDeliveryTimeline.end(), [](const detail::TimelineEvent& lhs, const detail::TimelineEvent& rhs) noexcept {
         if (lhs.deliveryTsNs != rhs.deliveryTsNs) return lhs.deliveryTsNs < rhs.deliveryTsNs;
         if (lhs.tsNs != rhs.tsNs) return lhs.tsNs < rhs.tsNs;

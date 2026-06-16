@@ -776,6 +776,14 @@ bool testWriterCreatesV2RunDirectory() {
   result.initialBalanceE8 = 100000000000ll;
   result.walletBalanceE8 = 100100000000ll;
   result.totalPnlE8 = 100000000ll;
+  hft_backtest::BacktestLegSummary leg{};
+  leg.exchange = "binance";
+  leg.market = "futures";
+  leg.symbol = "BTCUSDT";
+  leg.marketDataLatency = hft_backtest::BacktestLatencyProfile{250u, 100u};
+  leg.marketOrderLatency = hft_backtest::BacktestLatencyProfile{2500u, 1000u};
+  leg.limitOrderLatency = hft_backtest::BacktestLatencyProfile{1800u, 700u};
+  result.legs.push_back(leg);
 
   std::filesystem::create_directories(dir);
   {
@@ -810,6 +818,8 @@ bool testWriterCreatesV2RunDirectory() {
          expect(manifest.find("\"risk_snapshots\": {") != std::string::npos, "manifest declares risk snapshots stream") &&
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
          expect(manifest.find("\"profile\": \"trade_range\"") != std::string::npos, "indicator stream carries profile") &&
+         expect(manifest.find("\"market_data_latency\": {\"base_us\": 250, \"jitter_us\": 100}") != std::string::npos,
+                "manifest leg summary carries per-leg market data latency") &&
          expect(orders == "[1,0,100,110,100,1,1,1,3,10000000000,100000000,0,0]\n", "orders stream uses compact arrays") &&
          expect(fills == "[1,110,150,1,10000000000,100000000,0,0,0]\n", "fills stream uses compact arrays") &&
          expect(equity == "[150,0,0,0,0,0,0,0,100000000000,100000000,1]\n", "equity stream uses compact arrays") &&
@@ -882,6 +892,102 @@ bool testBacktestProbeReportsFullInputCoverage() {
          expect(result.inputCoverage.seedD1Candles == 1u, "probe reports d1 candle seed") &&
          expect(manifest.find("\"probe_metrics\"") != std::string::npos, "manifest declares probe metrics stream") &&
          expect(!probeMetrics.empty(), "probe metrics stream is written");
+}
+
+void writeTwoLegProbeSession(const std::filesystem::path& dir,
+                             std::string_view exchange,
+                             std::string_view market,
+                             std::string_view symbol,
+                             std::int64_t bid,
+                             std::int64_t ask,
+                             std::int64_t firstTs) {
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"" + std::string(exchange) + "\", \"market\": \"" + std::string(market) + "\", \"symbols\": [\"" + std::string(symbol) + "\"]},\n"
+            "  \"channels\": {\n"
+            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
+            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"}\n"
+            "  },\n"
+            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
+            "}\n");
+  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
+  writeText(dir / "jsonl" / "trades.jsonl",
+            "[" + std::to_string((bid + ask) / 2) + ",100000000,1," + std::to_string(firstTs) + ",1,1,1," + std::to_string((bid + ask) / 2) + ",0,\"" + std::string(symbol) + "\",\"" + std::string(exchange) + "\",\"" + std::string(market) + "\",1,1]\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl",
+            "[" + std::to_string(bid) + ",100000000," + std::to_string(ask) + ",100000000," + std::to_string(firstTs + 100) + ",1,1]\n"
+            "[" + std::to_string(bid + 1000000) + ",100000000," + std::to_string(ask + 1000000) + ",100000000," + std::to_string(firstTs + 200) + ",2,2]\n");
+}
+
+bool testTwoLegProbeRunsOnTwoSessionsAndWritesLegIndexes() {
+  const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                     ("hft_backtest_two_leg_probe_" + std::to_string(std::rand()));
+  const std::filesystem::path legA = root / "leg_a";
+  const std::filesystem::path legB = root / "leg_b";
+  writeTwoLegProbeSession(legA, "binance", "futures", "BTCUSDT", 9900000000LL, 10000000000LL, 1000);
+  writeTwoLegProbeSession(legB, "okx", "futures", "ETHUSDT", 10100000000LL, 10200000000LL, 1100);
+  writeText(root / "two_leg_probe.ini",
+            "[strategy]\n"
+            "type=two_leg_probe\n"
+            "enabled=1\n"
+            "[venue.binance_futures]\n"
+            "api_slot=1\n"
+            "symbols=BTCUSDT\n"
+            "[venue.okx_futures]\n"
+            "api_slot=1\n"
+            "symbols=ETHUSDT\n"
+            "[portfolio.recorder]\n"
+            "legs=binance_futures:BTCUSDT,okx_futures:ETHUSDT\n"
+            "primary=binance_futures:BTCUSDT\n");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessions.push_back(hft_backtest::BacktestSessionRequest{legA, "binance_futures", "BTCUSDT"});
+  request.sessions.push_back(hft_backtest::BacktestSessionRequest{legB, "okx_futures", "ETHUSDT"});
+  request.configPath = root / "two_leg_probe.ini";
+  request.strategy = "two_leg_probe";
+  request.runId = "two-leg-probe";
+  request.outputPath = root / "backtests" / "two-leg-probe";
+  request.initialBalanceE8 = 100000000000LL;
+  request.feeSchedules.push_back(hft_backtest::BacktestFeeSchedule{"binance", "futures", 200000000LL, 500000000LL});
+  request.feeSchedules.push_back(hft_backtest::BacktestFeeSchedule{"okx", "futures", 100000000LL, 400000000LL});
+  hft_backtest::BacktestLatencySchedule binanceLatency{};
+  binanceLatency.exchange = "binance";
+  binanceLatency.market = "futures";
+  binanceLatency.marketData = hft_backtest::BacktestLatencyProfile{100u, 10u};
+  binanceLatency.marketOrder = hft_backtest::BacktestLatencyProfile{1100u, 100u};
+  binanceLatency.limitOrder = hft_backtest::BacktestLatencyProfile{1200u, 200u};
+  request.latencySchedules.push_back(binanceLatency);
+  hft_backtest::BacktestLatencySchedule okxLatency{};
+  okxLatency.exchange = "okx";
+  okxLatency.market = "futures";
+  okxLatency.marketData = hft_backtest::BacktestLatencyProfile{300u, 30u};
+  okxLatency.marketOrder = hft_backtest::BacktestLatencyProfile{3100u, 300u};
+  okxLatency.limitOrder = hft_backtest::BacktestLatencyProfile{3200u, 400u};
+  request.latencySchedules.push_back(okxLatency);
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+  const std::string manifest = readText(request.outputPath / "manifest.json");
+  const std::string orders = readText(request.outputPath / "orders.jsonl");
+  const std::string fills = readText(request.outputPath / "fills.jsonl");
+
+  return expect(result.status == hft_backtest::Status::Ok, "two_leg_probe backtest completes") &&
+         expect(result.legs.size() == 2u, "two_leg_probe result reports two legs") &&
+         expect(result.legs[0].makerFeeBpsE8 == 200000000LL, "leg 0 uses binance maker fee schedule") &&
+         expect(result.legs[1].makerFeeBpsE8 == 100000000LL, "leg 1 uses okx maker fee schedule") &&
+         expect(result.legs[0].marketDataLatency.baseUs == 100u, "leg 0 uses binance market data latency") &&
+         expect(result.legs[1].marketDataLatency.baseUs == 300u, "leg 1 uses okx market data latency") &&
+         expect(result.legs[0].marketOrderLatency.baseUs == 1100u, "leg 0 uses binance market order latency") &&
+         expect(result.legs[1].limitOrderLatency.baseUs == 3200u, "leg 1 uses okx limit order latency") &&
+         expect(result.orders >= 2u, "two_leg_probe emits orders on both legs") &&
+         expect(result.fills >= 2u, "two_leg_probe fills orders on both legs") &&
+         expect(result.inputCoverage.cyclesWithTrade > 0u, "two_leg_probe sees trades") &&
+         expect(result.inputCoverage.cyclesWithBookTicker > 0u, "two_leg_probe sees bookticker") &&
+         expect(manifest.find("\"legs\": [") != std::string::npos, "manifest includes leg summaries") &&
+         expect(manifest.find("\"maker_fee_bps_e8\": 200000000") != std::string::npos, "manifest carries leg 0 maker fee") &&
+         expect(manifest.find("\"market_order_latency\": {\"base_us\": 3100, \"jitter_us\": 300}") != std::string::npos,
+                "manifest carries leg 1 latency") &&
+         expect(orders.find(",0]\n") != std::string::npos, "orders stream includes leg 0") &&
+         expect(orders.find(",1]\n") != std::string::npos, "orders stream includes leg 1") &&
+         expect(fills.find(",0]\n") != std::string::npos, "fills stream includes leg 0") &&
+         expect(fills.find(",1]\n") != std::string::npos, "fills stream includes leg 1");
 }
 
 bool testBacktestProbeRequiresCalculatedTradeWarmup() {
@@ -1051,6 +1157,15 @@ bool testBacktestProbeMetadataHasTraceIndicators() {
          expect(metadata->indicators[1].id != nullptr && std::string_view{metadata->indicators[1].id} == "rolling_volume", "backtest_probe exposes rolling_volume indicator");
 }
 
+bool testTwoLegProbeMetadataRequiresTwoSessions() {
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("two_leg_probe");
+  return expect(metadata != nullptr, "two_leg_probe metadata is exported") &&
+         expect(metadata->minSessionCount == 2u, "two_leg_probe requires at least two sessions") &&
+         expect(metadata->maxSessionCount == 2u, "two_leg_probe allows exactly two sessions") &&
+         expect(metadata->paramCount == 0u, "two_leg_probe has no UI params") &&
+         expect(metadata->indicatorCount == 0u, "two_leg_probe declares no indicator profiles");
+}
+
 bool testRangeReversionMetadataExposesRangeControls() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("range_reversion");
   return expect(metadata != nullptr, "range_reversion metadata is exported") &&
@@ -1094,12 +1209,14 @@ int main() {
   ok = testTieredCandleHistoryBuildsCounts() && ok;
   ok = testWriterCreatesV2RunDirectory() && ok;
   ok = testBacktestProbeReportsFullInputCoverage() && ok;
+  ok = testTwoLegProbeRunsOnTwoSessionsAndWritesLegIndexes() && ok;
   ok = testBacktestProbeRequiresCalculatedTradeWarmup() && ok;
   ok = testBacktestProbeRequiresCandleSeed() && ok;
   ok = testBacktestProbeRequiresAllCandleSeedTiers() && ok;
   ok = testBacktestProbeRequiresTradeWarmupCoverage() && ok;
   ok = testStrategyMetadataExposesOnlySupportedSpreadMakerParams() && ok;
   ok = testBacktestProbeMetadataHasTraceIndicators() && ok;
+  ok = testTwoLegProbeMetadataRequiresTwoSessions() && ok;
   ok = testRangeReversionMetadataExposesRangeControls() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
