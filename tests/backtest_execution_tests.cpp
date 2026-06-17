@@ -906,7 +906,8 @@ void writeTwoLegProbeSession(const std::filesystem::path& dir,
                              std::string_view symbol,
                              std::int64_t bid,
                              std::int64_t ask,
-                             std::int64_t firstTs) {
+                             std::int64_t firstTs,
+                             std::int64_t contractBaseQtyE8 = 100000000) {
   writeText(dir / "manifest.json",
             "{\n"
             "  \"identity\": {\"exchange\": \"" + std::string(exchange) + "\", \"market\": \"" + std::string(market) + "\", \"symbols\": [\"" + std::string(symbol) + "\"]},\n"
@@ -916,7 +917,9 @@ void writeTwoLegProbeSession(const std::filesystem::path& dir,
             "  },\n"
             "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
             "}\n");
-  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
+  writeText(dir / "instrument_metadata.json",
+            "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":" +
+                std::to_string(contractBaseQtyE8) + "}\n");
   writeText(dir / "jsonl" / "trades.jsonl",
             "[" + std::to_string((bid + ask) / 2) + ",100000000,1," + std::to_string(firstTs) + ",1,1,1," + std::to_string((bid + ask) / 2) + ",0,\"" + std::string(symbol) + "\",\"" + std::string(exchange) + "\",\"" + std::string(market) + "\",1,1]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl",
@@ -942,8 +945,7 @@ bool testTwoLegProbeRunsOnTwoSessionsAndWritesLegIndexes() {
             "api_slot=1\n"
             "symbols=ETHUSDT\n"
             "[portfolio.recorder]\n"
-            "legs=binance_futures:BTCUSDT,okx_futures:ETHUSDT\n"
-            "primary=binance_futures:BTCUSDT\n");
+            "legs=binance_futures:BTCUSDT,okx_futures:ETHUSDT\n");
 
   hft_backtest::BacktestRunRequest request{};
   request.sessions.push_back(hft_backtest::BacktestSessionRequest{legA, "binance_futures", "BTCUSDT"});
@@ -1022,8 +1024,7 @@ bool testStatArbBestsideRunsOnTwoSessionsAndWritesSpreadTrace() {
             "api_slot=1\n"
             "symbols=BTCUSDT\n"
             "[portfolio.recorder]\n"
-            "legs=binance_futures:BTCUSDT,okx_futures:BTCUSDT\n"
-            "primary=binance_futures:BTCUSDT\n");
+            "legs=binance_futures:BTCUSDT,okx_futures:BTCUSDT\n");
 
   hft_backtest::BacktestRunRequest request{};
   request.sessions.push_back(hft_backtest::BacktestSessionRequest{legA, "binance_futures", "BTCUSDT"});
@@ -1047,6 +1048,120 @@ bool testStatArbBestsideRunsOnTwoSessionsAndWritesSpreadTrace() {
          expect(spread.find(",1,3,0]\n") != std::string::npos, "spread stream records entry decision") &&
          expect(fills.find(",0]\n") != std::string::npos, "fills stream includes leg 0") &&
          expect(fills.find(",1]\n") != std::string::npos, "fills stream includes leg 1");
+}
+
+bool testBacktestMixedSessionAndLegSessionLoadsBothLegs() {
+  const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                     ("hft_backtest_mixed_sessions_" + std::to_string(std::rand()));
+  const std::filesystem::path legA = root / "leg_a";
+  const std::filesystem::path legB = root / "leg_b";
+  writeTwoLegProbeSession(legA, "binance", "futures", "BTCUSDT", 9900000000LL, 10000000000LL, 1000);
+  writeTwoLegProbeSession(legB, "okx", "futures", "ETHUSDT", 10100000000LL, 10200000000LL, 1100);
+  writeText(root / "two_leg_probe.ini",
+            "[strategy]\n"
+            "type=two_leg_probe\n"
+            "enabled=1\n"
+            "[venue.binance_futures]\n"
+            "api_slot=1\n"
+            "symbols=BTCUSDT\n"
+            "[venue.okx_futures]\n"
+            "api_slot=1\n"
+            "symbols=ETHUSDT\n"
+            "[portfolio.recorder]\n"
+            "legs=binance_futures:BTCUSDT,okx_futures:ETHUSDT\n");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessionPath = legA;
+  request.sessions.push_back(hft_backtest::BacktestSessionRequest{legB, "okx_futures", "ETHUSDT"});
+  request.configPath = root / "two_leg_probe.ini";
+  request.strategy = "two_leg_probe";
+  request.runId = "mixed-sessions";
+  request.outputPath = root / "backtests" / "mixed-sessions";
+  request.initialBalanceE8 = 100000000000LL;
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+  const std::string fills = readText(request.outputPath / "fills.jsonl");
+
+  return expect(result.status == hft_backtest::Status::Ok, "--session plus --leg-session backtest completes") &&
+         expect(result.legs.size() == 2u, "mixed session request reports both legs") &&
+         expect(result.orders >= 2u, "mixed session request emits routed orders") &&
+         expect(fills.find(",0]\n") != std::string::npos, "mixed fills include sessionPath leg 0") &&
+         expect(fills.find(",1]\n") != std::string::npos, "mixed fills include leg-session leg 1");
+}
+
+bool testStatArbBestsideAmountQtyRoundsToCommonBaseLot() {
+  const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                     ("hft_backtest_stat_arb_common_qty_" + std::to_string(std::rand()));
+  const std::filesystem::path legA = root / "leg_a";
+  const std::filesystem::path legB = root / "leg_b";
+  writeTwoLegProbeSession(legA, "binance", "futures", "BTCUSDT", 100000000LL, 101000000LL, 1000, 1000000000);
+  writeTwoLegProbeSession(legB, "okx", "futures", "BTCUSDT", 100000000LL, 101000000LL, 1100, 100000000);
+  writeText(legB / "jsonl" / "bookticker.jsonl",
+            "[100000000,100000000,101000000,100000000,1200,1,1]\n"
+            "[120000000,100000000,121000000,100000000,2200,2,2]\n"
+            "[100000000,100000000,101000000,100000000,3200,3,3]\n");
+  writeText(root / "stat_arb.ini",
+            "[strategy]\n"
+            "type=stat_arb_bestside\n"
+            "enabled=1\n"
+            "ema_window_ms=5000\n"
+            "entry_edge_bps=0\n"
+            "exit_edge_bps=0\n"
+            "amount_qty=15\n"
+            "[venue.binance_futures]\n"
+            "api_slot=1\n"
+            "symbols=BTCUSDT\n"
+            "[venue.okx_futures]\n"
+            "api_slot=1\n"
+            "symbols=BTCUSDT\n"
+            "[portfolio.recorder]\n"
+            "legs=binance_futures:BTCUSDT,okx_futures:BTCUSDT\n");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessions.push_back(hft_backtest::BacktestSessionRequest{legA, "binance_futures", "BTCUSDT"});
+  request.sessions.push_back(hft_backtest::BacktestSessionRequest{legB, "okx_futures", "BTCUSDT"});
+  request.configPath = root / "stat_arb.ini";
+  request.strategy = "stat_arb_bestside";
+  request.runId = "stat-arb-common-qty";
+  request.outputPath = root / "backtests" / "stat-arb-common-qty";
+  request.initialBalanceE8 = 100000000000LL;
+  request.feeSchedules.push_back(hft_backtest::BacktestFeeSchedule{"binance", "futures", 0, 0});
+  request.feeSchedules.push_back(hft_backtest::BacktestFeeSchedule{"okx", "futures", 0, 0});
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+  const std::string fills = readText(request.outputPath / "fills.jsonl");
+
+  return expect(result.status == hft_backtest::Status::Ok, "stat arb common lot backtest completes") &&
+         expect(result.fills >= 2u, "stat arb common lot produces fills") &&
+         expect(fills.find(",1000000000,") != std::string::npos, "fills use common 10-unit base quantity");
+}
+
+bool testStatArbBestsideFailsOnSingleSession() {
+  const std::filesystem::path root = std::filesystem::temp_directory_path() /
+                                     ("hft_backtest_stat_arb_single_" + std::to_string(std::rand()));
+  const std::filesystem::path legA = root / "leg_a";
+  writeTwoLegProbeSession(legA, "binance", "futures", "BTCUSDT", 10000000000LL, 10010000000LL, 1000);
+  writeText(root / "stat_arb.ini",
+            "[strategy]\n"
+            "type=stat_arb_bestside\n"
+            "enabled=1\n"
+            "ema_window_ms=5000\n"
+            "entry_edge_bps=0\n"
+            "exit_edge_bps=0\n"
+            "amount_qty=10\n"
+            "[venue.binance_futures]\n"
+            "api_slot=1\n"
+            "symbols=BTCUSDT\n");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessionPath = legA;
+  request.configPath = root / "stat_arb.ini";
+  request.strategy = "stat_arb_bestside";
+  request.runId = "stat-arb-single";
+  request.outputPath = root / "backtests" / "stat-arb-single";
+  request.initialBalanceE8 = 100000000000LL;
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+
+  return expect(result.status == hft_backtest::Status::InvalidArgument,
+                "single-session stat arb fails instead of false-completing");
 }
 
 bool testBacktestProbeRequiresCalculatedTradeWarmup() {
@@ -1247,6 +1362,17 @@ bool testStatArbBestsideMetadataRequiresTwoSessions() {
          expect(metadataHasParam(*metadata, "exit_edge_bps"), "stat arb metadata contains exit_edge_bps") &&
          expect(metadataHasParam(*metadata, "amount_qty"), "stat arb metadata contains amount_qty");
 }
+
+bool testStatArbBandMetadataRequiresTwoSessions() {
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("stat_arb_band");
+  return expect(metadata != nullptr, "stat_arb_band metadata is exported") &&
+         expect(metadata->minSessionCount == 2u, "stat arb band requires at least two sessions") &&
+         expect(metadata->maxSessionCount == 2u, "stat arb band allows exactly two sessions") &&
+         expect(metadataHasParam(*metadata, "ema_window_ms"), "stat arb band metadata contains ema_window_ms") &&
+         expect(metadataHasParam(*metadata, "entry_edge_bps"), "stat arb band metadata contains entry_edge_bps") &&
+         expect(metadataHasParam(*metadata, "exit_edge_bps"), "stat arb band metadata contains exit_edge_bps") &&
+         expect(metadataHasParam(*metadata, "amount_qty"), "stat arb band metadata contains amount_qty");
+}
 }  // namespace
 
 int main() {
@@ -1281,6 +1407,9 @@ int main() {
   ok = testBacktestProbeReportsFullInputCoverage() && ok;
   ok = testTwoLegProbeRunsOnTwoSessionsAndWritesLegIndexes() && ok;
   ok = testStatArbBestsideRunsOnTwoSessionsAndWritesSpreadTrace() && ok;
+  ok = testBacktestMixedSessionAndLegSessionLoadsBothLegs() && ok;
+  ok = testStatArbBestsideAmountQtyRoundsToCommonBaseLot() && ok;
+  ok = testStatArbBestsideFailsOnSingleSession() && ok;
   ok = testBacktestProbeRequiresCalculatedTradeWarmup() && ok;
   ok = testBacktestProbeRequiresCandleSeed() && ok;
   ok = testBacktestProbeRequiresAllCandleSeedTiers() && ok;
@@ -1290,5 +1419,6 @@ int main() {
   ok = testTwoLegProbeMetadataRequiresTwoSessions() && ok;
   ok = testRangeReversionMetadataExposesRangeControls() && ok;
   ok = testStatArbBestsideMetadataRequiresTwoSessions() && ok;
+  ok = testStatArbBandMetadataRequiresTwoSessions() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -26,6 +26,7 @@ void initializeAccounting(EngineState& engine, const BacktestRunRequest& request
   engine.walletBalanceE8 = request.initialBalanceE8;
   engine.makerFeeBpsE8 = request.makerFeeBpsE8;
   engine.takerFeeBpsE8 = request.takerFeeBpsE8;
+  bumpContextRevision(engine);
 }
 
 void updatePosition(EngineState& engine, Side side, std::int64_t priceE8, std::int64_t qtyE8, std::int64_t tsNs, std::int64_t feeBpsE8, std::int64_t& netRealized) noexcept {
@@ -62,6 +63,7 @@ void updatePosition(EngineState& engine, Side side, std::int64_t priceE8, std::i
   engine.position.unrealizedPnl.raw = unrealizedPnlE8(engine);
   engine.position.lastUpdateUtc.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   engine.position.valid = true;
+  bumpContextRevision(engine);
 }
 
 std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
@@ -153,6 +155,7 @@ void hardLiquidate(EngineState& engine, std::int64_t tsNs, std::int64_t breached
   engine.position.lastUpdateUtc.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   appendEquityPoint(engine, tsNs);
   appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonLiquidation);
+  bumpContextRevision(engine);
 }
 
 void stopForTraderRisk(EngineState& engine,
@@ -179,6 +182,7 @@ void stopForTraderRisk(EngineState& engine,
   engine.position.lastUpdateUtc.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   appendEquityPoint(engine, tsNs);
   appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonTraderRiskStop);
+  bumpContextRevision(engine);
 }
 
 }  // namespace hft_backtest::detail

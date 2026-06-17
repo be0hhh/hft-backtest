@@ -238,6 +238,7 @@ struct EngineState {
   hft_trader::core::LocalOrderBookState venueOrderBook{};
   hft_trader::core::BboReconstructionState bboReconstruction{};
   hft_trader::core::BboReconstructionState venueBboReconstruction{};
+  std::uint64_t contextRevision{1u};
   BacktestInputCoverage inputCoverage{};
   std::uint32_t legIndex{0u};
   ExchangeId exchange{};
@@ -270,6 +271,11 @@ struct EngineState {
   bool liquidated{false};
   bool riskStopped{false};
 };
+
+inline void bumpContextRevision(EngineState& engine) noexcept {
+  ++engine.contextRevision;
+  if (engine.contextRevision == 0u) engine.contextRevision = 1u;
+}
 
 inline const cxet::composite::BookTickerRuntimeV1& effectiveBookTicker(
     const hft_trader::core::StrategyMarketSnapshot& snapshot) noexcept {

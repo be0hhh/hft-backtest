@@ -40,6 +40,11 @@ std::size_t channelSize(const SessionData& session, std::uint8_t kind) noexcept 
 }
 
 bool channelSorted(const SessionData& session, std::uint8_t leg, std::uint8_t kind) noexcept {
+  if (session.timelineOrderKnown &&
+      static_cast<std::size_t>(kind) < session.timelineChannelSorted.size() &&
+      session.timelineChannelSorted[static_cast<std::size_t>(kind)]) {
+    return true;
+  }
   const std::size_t n = channelSize(session, kind);
   if (n < 2u) return true;
   TimelineEvent previous = makeEvent(session, leg, kind, 0u);
@@ -68,19 +73,20 @@ struct TimelineCursor {
   std::uint8_t kind{0u};
   std::size_t index{0u};
   std::size_t size{0u};
+  TimelineEvent event{};
 };
 
 bool cursorDone(const TimelineCursor& cursor) noexcept {
   return cursor.index >= cursor.size;
 }
 
-TimelineEvent cursorEvent(const TimelineCursor& cursor) noexcept {
-  return makeEvent(*cursor.session, cursor.leg, cursor.kind, cursor.index);
+bool cursorHeapLess(const TimelineCursor& lhs, const TimelineCursor& rhs) noexcept {
+  return timelineLess(rhs.event, lhs.event);
 }
 
 void pushCursor(std::vector<TimelineCursor>& cursors, const SessionData& session, std::uint8_t leg, std::uint8_t kind) {
   const std::size_t n = channelSize(session, kind);
-  if (n != 0u) cursors.push_back(TimelineCursor{&session, leg, kind, 0u, n});
+  if (n != 0u) cursors.push_back(TimelineCursor{&session, leg, kind, 0u, n, makeEvent(session, leg, kind, 0u)});
 }
 
 bool buildMergedTimeline(const std::vector<const SessionData*>& sessions, std::vector<TimelineEvent>& out) {
@@ -106,22 +112,20 @@ bool buildMergedTimeline(const std::vector<const SessionData*>& sessions, std::v
     for (std::uint8_t kind = 0u; kind < kTimelineKindCount; ++kind) pushCursor(cursors, session, leg, kind);
   }
 
-  while (out.size() < capacity) {
-    std::size_t best = cursors.size();
-    TimelineEvent bestEvent{};
-    for (std::size_t i = 0u; i < cursors.size(); ++i) {
-      if (cursorDone(cursors[i])) continue;
-      const TimelineEvent candidate = cursorEvent(cursors[i]);
-      if (best == cursors.size() || timelineLess(candidate, bestEvent)) {
-        best = i;
-        bestEvent = candidate;
-      }
+  std::make_heap(cursors.begin(), cursors.end(), cursorHeapLess);
+  while (!cursors.empty()) {
+    std::pop_heap(cursors.begin(), cursors.end(), cursorHeapLess);
+    TimelineCursor cursor = cursors.back();
+    cursors.pop_back();
+    out.push_back(cursor.event);
+    ++cursor.index;
+    if (!cursorDone(cursor)) {
+      cursor.event = makeEvent(*cursor.session, cursor.leg, cursor.kind, cursor.index);
+      cursors.push_back(cursor);
+      std::push_heap(cursors.begin(), cursors.end(), cursorHeapLess);
     }
-    if (best == cursors.size()) return false;
-    out.push_back(bestEvent);
-    ++cursors[best].index;
   }
-  return true;
+  return out.size() == capacity;
 }
 
 void buildFallbackTimeline(const std::vector<const SessionData*>& sessions, std::vector<TimelineEvent>& out) {

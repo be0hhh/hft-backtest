@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -8,6 +10,8 @@
 #include "hft_backtest/status.hpp"
 
 namespace hft_backtest::detail {
+
+constexpr std::size_t kSessionTimelineKindCount = 9u;
 
 struct PriceLevelRow {
   std::int64_t priceE8{0};
@@ -154,6 +158,8 @@ struct SessionData {
   std::int64_t tradeHistoryRows{0};
   std::int64_t firstTsNs{0};
   std::int64_t lastTsNs{0};
+  std::array<bool, kSessionTimelineKindCount> timelineChannelSorted{};
+  bool timelineOrderKnown{false};
 };
 
 Status loadSession(const std::filesystem::path& sessionPath,

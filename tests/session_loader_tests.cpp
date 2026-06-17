@@ -151,6 +151,42 @@ bool testLoadSessionRejectsI64Overflow() {
          expect(error.find("trades.jsonl:1") != std::string::npos, "overflow error carries file and line");
 }
 
+bool testLoadSessionSortsUnorderedTimelineChannels() {
+  const std::filesystem::path dir = makeSessionDir("unordered_channels");
+  writeManifest(dir);
+  writeText(dir / "jsonl" / "trades.jsonl",
+            "[10030000000,100000000,1,3000,1,1,1,10030000000,0,\"BTCUSDT\",\"binance\",\"futures\",3,30]\n"
+            "[10010000000,100000000,0,1000,1,1,1,10010000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,10]\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl",
+            "[9900000000,100000000,10100000000,100000000,2000,2,20]\n");
+
+  hft_backtest::detail::SessionData data{};
+  hft_backtest::detail::SessionLoadPlan plan{};
+  plan.loadTrades = true;
+  plan.requireTrades = true;
+  plan.loadBookTickers = true;
+  plan.requireBookTickers = true;
+  plan.loadDepths = false;
+  plan.loadCandles = false;
+  std::string error{};
+
+  const hft_backtest::Status status = hft_backtest::detail::loadSession(dir, plan, data, error);
+
+  std::vector<hft_backtest::detail::TimelineEvent> out{};
+  hft_backtest::detail::buildTimeline(data, out);
+
+  return expect(status == hft_backtest::Status::Ok, "unordered loaded session succeeds") &&
+         expect(data.timelineOrderKnown, "loaded session timeline order is known") &&
+         expect(data.timelineChannelSorted[hft_backtest::detail::kTimelineKindTrade], "loaded trades are marked sorted") &&
+         expect(data.trades.size() == 2u, "unordered trade rows parsed") &&
+         expect(data.trades[0].tsNs == 1000, "loader sorted earlier trade first") &&
+         expect(data.trades[1].tsNs == 3000, "loader sorted later trade second") &&
+         expect(out.size() == 3u, "timeline includes sorted loaded events") &&
+         expect(out[0].tsNs == 1000 && out[0].kind == hft_backtest::detail::kTimelineKindTrade, "loaded timeline first trade") &&
+         expect(out[1].tsNs == 2000 && out[1].kind == hft_backtest::detail::kTimelineKindBookTicker, "loaded timeline bookticker") &&
+         expect(out[2].tsNs == 3000 && out[2].kind == hft_backtest::detail::kTimelineKindTrade, "loaded timeline second trade");
+}
+
 bool testBuildTimelineMergesSortedChannelsInStableOrder() {
   hft_backtest::detail::SessionData session{};
   session.depths.push_back(hft_backtest::detail::DepthRow{100, 1, {}});
@@ -213,6 +249,7 @@ int main() {
   ok = testLoadSessionReadsOptionalReferenceStreams() && ok;
   ok = testLoadSessionParsesCrLfAndFinalLineWithoutNewline() && ok;
   ok = testLoadSessionRejectsI64Overflow() && ok;
+  ok = testLoadSessionSortsUnorderedTimelineChannels() && ok;
   ok = testBuildTimelineMergesSortedChannelsInStableOrder() && ok;
   ok = testBuildTimelineIncludesOptionalReferenceStreams() && ok;
   ok = testBuildTimelineFallbackSortsUnorderedChannel() && ok;

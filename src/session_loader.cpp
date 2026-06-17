@@ -49,6 +49,10 @@ class MappedFile {
     return std::string_view(static_cast<const char*>(data_), size_);
   }
 
+  std::size_t size() const noexcept {
+    return size_;
+  }
+
  private:
   int fd_{-1};
   void* data_{nullptr};
@@ -389,14 +393,51 @@ bool readLine(std::string_view text, std::size_t& pos, std::string_view& line) n
   return true;
 }
 
+struct TimelineRowKey {
+  std::int64_t tsNs{0};
+  std::int64_t ingestSeq{0};
+};
+
+bool rowKeyLess(TimelineRowKey lhs, TimelineRowKey rhs) noexcept {
+  if (lhs.tsNs != rhs.tsNs) return lhs.tsNs < rhs.tsNs;
+  return lhs.ingestSeq < rhs.ingestSeq;
+}
+
+TimelineRowKey rowKey(const TradeRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
+TimelineRowKey rowKey(const BookTickerRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
+TimelineRowKey rowKey(const PriceLimitRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
+TimelineRowKey rowKey(const LiquidationRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
+TimelineRowKey rowKey(const MarkPriceRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
+TimelineRowKey rowKey(const IndexPriceRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
+TimelineRowKey rowKey(const FundingRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
+TimelineRowKey rowKey(const OpenInterestRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
+TimelineRowKey rowKey(const DepthRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
+TimelineRowKey rowKey(const CandleRow& row) noexcept { return TimelineRowKey{row.tsNs, 0}; }
+
+std::size_t estimatedRowsFor(std::size_t bytes, std::string_view channel) noexcept {
+  if (bytes == 0u) return 0u;
+  std::size_t avgBytes = 96u;
+  if (channel == "bookticker" || channel == "mark_price" || channel == "index_price" ||
+      channel == "funding" || channel == "open_interest" || channel == "candles") {
+    avgBytes = 64u;
+  } else if (channel == "depth" || channel == "depth_tape") {
+    avgBytes = 192u;
+  } else if (channel == "liquidations") {
+    avgBytes = 160u;
+  }
+  return (bytes / avgBytes) + 16u;
+}
+
 template<typename Row, typename ParseFn>
 Status loadJsonl(const std::filesystem::path& path,
                  std::string_view channel,
                  bool required,
                  std::vector<Row>& out,
                  ParseFn parse,
-                 std::string& error) {
+                 std::string& error,
+                 bool* sortedOut = nullptr) {
   out.clear();
+  if (sortedOut) *sortedOut = true;
   if (!std::filesystem::exists(path)) {
     if (required) {
       error = "missing required ";
@@ -418,12 +459,8 @@ Status loadJsonl(const std::filesystem::path& path,
     return Status::IoError;
   }
   const std::string_view text = file.view();
-  std::size_t expectedRows = 0u;
-  for (char c : text) {
-    if (c == '\n') ++expectedRows;
-  }
-  if (!text.empty() && text.back() != '\n') ++expectedRows;
-  out.reserve(expectedRows);
+  out.reserve(estimatedRowsFor(text.size(), channel));
+  bool sorted = true;
   std::uint64_t lineNo = 0;
   std::size_t pos = 0u;
   while (pos < text.size()) {
@@ -443,6 +480,7 @@ Status loadJsonl(const std::filesystem::path& path,
       error += std::to_string(lineNo);
       return Status::CorruptData;
     }
+    if (!out.empty() && rowKeyLess(rowKey(row), rowKey(out.back()))) sorted = false;
     out.push_back(std::move(row));
   }
   if (required && out.empty()) {
@@ -452,6 +490,12 @@ Status loadJsonl(const std::filesystem::path& path,
     error += path.generic_string();
     return Status::CorruptData;
   }
+  if (!sorted) {
+    std::stable_sort(out.begin(), out.end(), [](const Row& lhs, const Row& rhs) noexcept {
+      return rowKeyLess(rowKey(lhs), rowKey(rhs));
+    });
+  }
+  if (sortedOut) *sortedOut = true;
   return Status::Ok;
 }
 
@@ -459,8 +503,10 @@ Status loadDepthTapeSidecarJsonl(const std::filesystem::path& tapePath,
                                  const std::filesystem::path& sidecarPath,
                                  bool required,
                                  std::vector<DepthRow>& out,
-                                 std::string& error) {
+                                 std::string& error,
+                                 bool* sortedOut = nullptr) {
   out.clear();
+  if (sortedOut) *sortedOut = true;
   if (!std::filesystem::exists(tapePath) || !std::filesystem::exists(sidecarPath)) {
     if (required) {
       error = "missing required depth_tape/depth_sidecar package";
@@ -476,16 +522,12 @@ Status loadDepthTapeSidecarJsonl(const std::filesystem::path& tapePath,
   }
   const std::string_view tapeText = tapeFile.view();
   const std::string_view sidecarText = sidecarFile.view();
-  std::size_t expectedRows = 0u;
-  for (char c : tapeText) {
-    if (c == '\n') ++expectedRows;
-  }
-  if (!tapeText.empty() && tapeText.back() != '\n') ++expectedRows;
-  out.reserve(expectedRows);
+  out.reserve(estimatedRowsFor(tapeFile.size(), "depth_tape"));
 
   std::size_t tapePos = 0u;
   std::size_t sidecarPos = 0u;
   std::uint64_t lineNo = 0u;
+  bool sorted = true;
   while (tapePos < tapeText.size() || sidecarPos < sidecarText.size()) {
     std::string_view tapeLine{};
     std::string_view sidecarLine{};
@@ -504,6 +546,7 @@ Status loadDepthTapeSidecarJsonl(const std::filesystem::path& tapePath,
       error += std::to_string(lineNo);
       return Status::CorruptData;
     }
+    if (!out.empty() && rowKeyLess(rowKey(row), rowKey(out.back()))) sorted = false;
     out.push_back(std::move(row));
   }
   if (required && out.empty()) {
@@ -511,6 +554,12 @@ Status loadDepthTapeSidecarJsonl(const std::filesystem::path& tapePath,
     error += tapePath.generic_string();
     return Status::CorruptData;
   }
+  if (!sorted) {
+    std::stable_sort(out.begin(), out.end(), [](const DepthRow& lhs, const DepthRow& rhs) noexcept {
+      return rowKeyLess(rowKey(lhs), rowKey(rhs));
+    });
+  }
+  if (sortedOut) *sortedOut = true;
   return Status::Ok;
 }
 
@@ -771,6 +820,8 @@ Status loadSession(const std::filesystem::path& sessionPath,
     }
     updateRange(out, out.snapshot.tsNs);
   }
+  out.timelineChannelSorted.fill(true);
+  out.timelineOrderKnown = true;
   rebuildReplayRange(out);
   return Status::Ok;
 }

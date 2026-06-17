@@ -140,6 +140,7 @@ bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
   engine.userEvents.push_back(makeRejectedOrderEvent(engine, order, tsNs));
   if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusRejected;
   order = OpenOrder{};
+  bumpContextRevision(engine);
   return false;
 }
 
@@ -188,6 +189,7 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
   engine.userEvents.push_back(makeFillEvent(engine, order, priceE8, fillQty, tsNs, feeE8, netRealized, taker));
   if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
   order = OpenOrder{};
+  bumpContextRevision(engine);
   return true;
 }
 
@@ -223,11 +225,13 @@ void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& 
 
 void applyDueActions(EngineState& engine, std::int64_t tsNs) {
   if (engine.liquidated || engine.riskStopped) return;
+  bool changed = false;
   while (!engine.pending.empty()) {
     if (engine.pending.front().activeTsNs > tsNs) break;
     std::pop_heap(engine.pending.begin(), engine.pending.end(), pendingEarlier);
     PendingAction action = std::move(engine.pending.back());
     engine.pending.pop_back();
+    changed = true;
     if (action.kind == PendingActionKind::CancelAck && action.recordIndex < engine.orders.size()) {
       engine.orders[action.recordIndex].activeTsNs = action.activeTsNs;
       engine.orders[action.recordIndex].status = kRecordStatusAcked;
@@ -282,6 +286,7 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
       tryFillOnTop(engine, action.activeTsNs);
     }
   }
+  if (changed) bumpContextRevision(engine);
 }
 
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs) {
@@ -371,6 +376,7 @@ void applyIntents(EngineState& engine,
                   std::uint64_t amendLatencyUs,
                   std::uint64_t cancelLatencyUs) {
   if (engine.liquidated || engine.riskStopped) return;
+  const bool hasIntents = io.cancelCount != 0u || io.amendCount != 0u || io.orderCount != 0u;
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
     const auto& intent = io.cancelOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, cancelLatencyUs);
@@ -472,6 +478,7 @@ void applyIntents(EngineState& engine,
       engine.orders[recordIndex].status = kRecordStatusRejected;
     }
   }
+  if (hasIntents) bumpContextRevision(engine);
   applyDueActions(engine, tsNs);
 }
 
@@ -480,6 +487,7 @@ void applyIntents(EngineState& engine,
                   std::int64_t tsNs,
                   BacktestLatencyRuntime& latency) {
   if (engine.liquidated || engine.riskStopped) return;
+  const bool hasIntents = io.cancelCount != 0u || io.amendCount != 0u || io.orderCount != 0u;
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
     const auto& intent = io.cancelOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
@@ -574,6 +582,7 @@ void applyIntents(EngineState& engine,
       engine.orders[recordIndex].status = kRecordStatusRejected;
     }
   }
+  if (hasIntents) bumpContextRevision(engine);
   applyDueActions(engine, tsNs);
 }
 
