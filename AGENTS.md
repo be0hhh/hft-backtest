@@ -2,14 +2,26 @@
 
 `hft-backtest` is an app-layer replay/backtest module above CXETCPP, hft-trader, and hft-recorder session corpora.
 
+## Boundaries
+
 - Do not change strategy code to make backtests work. Link the prebuilt hft-trader runtime shared library and adapt at the app boundary.
-- Keep recorder as the owner of captured corpus files and UI launch/display. Backtest owns replay execution, fills, accounting, and result JSON.
+- Keep recorder as the owner of captured corpus files and UI launch/display.
+- Backtest owns replay execution, fills, accounting, latency simulation, sweeps, metrics, and result JSON.
 - Build from WSL/Linux only. The module links Linux `.so` artifacts from hft-trader and CXETCPP.
-- Do not run builds/tests unless the current user message explicitly asks for the exact verification command.
 - Keep hot replay state integer-scaled and deterministic. No floating point in execution/accounting code.
+
+## Build/test restraint
+
+- Do not run builds/tests unless the current user message explicitly asks for the exact verification command.
+- If verification is needed, state the exact command for the user to run manually.
 
 ## Subagents and planning
 
-- Root `AGENTS.md` permits moderate automatic Codex subagent use for independent work. In `hft-backtest`, use subagents only for clearly separated replay, accounting, result JSON, documentation, or app-boundary tasks.
-- Subagents must not run builds/tests or compile linked dependencies unless the current user message explicitly asks for that exact verification.
-- Before non-trivial backtest changes, state the goal, assumptions, affected replay/accounting/result areas, and the manual verification command or checklist.
+Use subagents only for clearly separated replay, accounting, result JSON, documentation, or app-boundary tasks.
+
+Before non-trivial backtest changes, state:
+
+- selected roles;
+- affected replay/accounting/result areas;
+- determinism/accounting risks;
+- manual verification checklist.
