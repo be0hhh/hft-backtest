@@ -51,9 +51,9 @@ struct BacktestRunRequest {
   BacktestLatencyProfile marketOrderLatency{};
   BacktestLatencyProfile limitOrderLatency{};
   std::uint64_t orderLatencyUs{1000};
-  std::uint64_t amendLatencyUs{1000};
   std::uint64_t cancelLatencyUs{1000};
   std::int64_t initialBalanceE8{0};
+  std::vector<std::int64_t> legInitialBalancesE8{};
   std::int64_t makerFeeBpsE8{0};
   std::int64_t takerFeeBpsE8{0};
   std::vector<BacktestFeeSchedule> feeSchedules{};
@@ -97,6 +97,8 @@ struct BacktestLegSummary {
   std::uint64_t timerWakeEvents{0};
   std::uint64_t reduceOnlyOrders{0};
   std::uint64_t reduceOnlyFills{0};
+  std::int64_t initialBalanceE8{0};
+  std::int64_t walletBalanceE8{0};
   std::int64_t grossRealizedPnlE8{0};
   std::int64_t feesPaidE8{0};
   std::int64_t netRealizedPnlE8{0};
@@ -104,6 +106,7 @@ struct BacktestLegSummary {
   std::int64_t totalPnlE8{0};
   std::int64_t walletDeltaE8{0};
   std::int64_t openPositionQtyE8{0};
+  std::vector<std::int64_t> totalPnlCurveE8{};
   bool strategyClosed{false};
 };
 
@@ -122,7 +125,6 @@ struct BacktestRunResult {
   BacktestLatencyProfile marketOrderLatency{};
   BacktestLatencyProfile limitOrderLatency{};
   std::uint64_t orderLatencyUs{1000};
-  std::uint64_t amendLatencyUs{1000};
   std::uint64_t cancelLatencyUs{1000};
   std::uint64_t trades{0};
   std::uint64_t bookTickers{0};

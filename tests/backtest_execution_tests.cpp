@@ -48,6 +48,12 @@ hft_trader::core::OrderIntent orderIntent(std::uint64_t orderId, Side side, std:
   return out;
 }
 
+hft_trader::core::OrderIntent postOnlyOrderIntent(std::uint64_t orderId, Side side, std::int64_t px) noexcept {
+  hft_trader::core::OrderIntent out = orderIntent(orderId, side, px);
+  out.limitTimeInForcePolicy = hft_trader::core::LimitTimeInForcePolicy::PostOnlyPrefer;
+  return out;
+}
+
 hft_trader::core::OrderIntent reduceMarketIntent(std::uint64_t orderId, Side side) noexcept {
   hft_trader::core::OrderIntent out{};
   out.clientIntentId = id(orderId);
@@ -63,17 +69,6 @@ hft_trader::core::CancelIntent cancelIntent(std::uint64_t commandId, std::uint64
   out.clientIntentId = id(commandId);
   out.targetClientIntentId = id(targetId);
   out.targetOrderType = canon::OrderType::Limit;
-  return out;
-}
-
-hft_trader::core::AmendIntent amendIntent(std::uint64_t commandId, std::uint64_t targetId, std::int64_t px) noexcept {
-  hft_trader::core::AmendIntent out{};
-  out.clientIntentId = id(commandId);
-  out.targetClientIntentId = id(targetId);
-  out.side = Side::Buy();
-  out.targetOrderType = canon::OrderType::Limit;
-  out.price = price(px);
-  out.qty = amount(kQty1);
   return out;
 }
 
@@ -111,45 +106,20 @@ bool testStaleCancelDoesNotCancelReusedSlot() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), 1);
   io.orderCount = 1;
-  applyIntents(engine, io, 0, 0, 0, 0);
+  applyIntents(engine, io, 0, 0, 0);
   io.clear();
   io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancels.size());
   io.cancelCount = 1;
-  applyIntents(engine, io, 10, 0, 0, 100);
+  applyIntents(engine, io, 10, 0, 100);
   (void)fillOrder(engine, engine.open[0], kPx100, 20, false);
   io.clear();
   io.orderOut = Span<hft_trader::core::OrderIntent>(&orders[1], 1);
   io.orderCount = 1;
-  applyIntents(engine, io, 30, 0, 0, 0);
+  applyIntents(engine, io, 30, 0, 0);
   applyDueActions(engine, 200000);
   return expect(engine.open[0].state.valid, "reused slot remains valid after stale cancel") &&
          expect(engine.open[0].state.clientIntentId.raw == 2, "stale cancel does not cancel replacement order") &&
          expect(engine.orders[0].status == kRecordStatusFilled, "original order remains filled");
-}
-
-bool testStaleAmendDoesNotMutateReusedSlot() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 2> orders{orderIntent(1, Side::Buy(), kPx100 - 200000000ll), orderIntent(2, Side::Sell(), kPx100 + 200000000ll)};
-  std::array<hft_trader::core::AmendIntent, 1> amends{amendIntent(11, 1, kPx100 - 300000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), 1);
-  io.orderCount = 1;
-  applyIntents(engine, io, 0, 0, 0, 0);
-  io.clear();
-  io.amendOut = Span<hft_trader::core::AmendIntent>(amends.data(), amends.size());
-  io.amendCount = 1;
-  applyIntents(engine, io, 10, 0, 100, 0);
-  (void)fillOrder(engine, engine.open[0], kPx100, 20, false);
-  io.clear();
-  io.orderOut = Span<hft_trader::core::OrderIntent>(&orders[1], 1);
-  io.orderCount = 1;
-  applyIntents(engine, io, 30, 0, 0, 0);
-  applyDueActions(engine, 200000);
-  return expect(engine.open[0].state.valid, "reused slot remains valid after stale amend") &&
-         expect(engine.open[0].state.clientIntentId.raw == 2, "stale amend does not replace order id") &&
-         expect(engine.open[0].state.side.raw == Side::Sell().raw, "stale amend does not replace order side") &&
-         expect(engine.open[0].state.price.raw == kPx100 + 200000000ll, "stale amend does not replace order price");
 }
 
 bool testPendingDrainActivatesLateOrder() {
@@ -159,10 +129,45 @@ bool testPendingDrainActivatesLateOrder() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
-  applyIntents(engine, io, 1000, 100, 0, 0);
+  applyIntents(engine, io, 1000, 100, 0);
   return expect(engine.orders[0].status == kRecordStatusPending, "late order initially pending") &&
          (applyDueActions(engine, 101000), true) &&
          expect(engine.orders[0].status == kRecordStatusActive, "final drain activates due order");
+}
+
+bool testCancelThenReplacementLimitMaterializesReplace() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(1, Side::Buy(), kPx100 - 300000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 1000, 0, 0);
+
+  std::array<hft_trader::core::CancelIntent, 1> cancels{cancelIntent(2, 1)};
+  std::array<hft_trader::core::OrderIntent, 1> replacements{postOnlyOrderIntent(2, Side::Buy(), kPx100 - 200000000ll)};
+  io.clear();
+  io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancels.size());
+  io.cancelCount = 1;
+  io.orderOut = Span<hft_trader::core::OrderIntent>(replacements.data(), replacements.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 2000, 0, 0);
+  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
+  const std::size_t visibleCount = visibleOrders(engine, visible.data(), visible.size());
+
+  return expect(engine.orders.size() == 3u, "replace writes cancel and replacement order records") &&
+         expect(engine.orders[0].status == kRecordStatusCancelled, "replace cancels original order row") &&
+         expect(engine.orders[1].action == kRecordActionCancel, "replace writes cancel command row") &&
+         expect(engine.orders[1].targetId == 1u, "replace cancel targets original order") &&
+         expect(engine.orders[1].status == kRecordStatusAcked, "replace cancel command is acked") &&
+         expect(engine.orders[2].action == kRecordActionOrder, "replace writes replacement order row") &&
+         expect(engine.orders[2].id == 2u, "replacement order uses replacement client intent id") &&
+         expect(engine.orders[2].type == kRecordTypeLimit, "replacement remains a limit order") &&
+         expect(engine.orders[2].priceE8 == kPx100 - 200000000ll, "replacement keeps replacement price") &&
+         expect(engine.orders[2].postOnly, "replacement keeps post-only policy") &&
+         expect(visibleCount == 1u, "replacement order is visible to strategy") &&
+         expect(visible[0].clientIntentId.raw == 2u, "visible order is replacement id") &&
+         expect(visible[0].desiredPrice.raw == kPx100 - 200000000ll, "visible order has replacement desired price");
 }
 
 bool testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() {
@@ -225,7 +230,7 @@ bool testFillPublishesRuntimeUserEvent() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
-  applyIntents(engine, io, 0, 0, 0, 0);
+  applyIntents(engine, io, 0, 0, 0);
   const bool filled = fillOrder(engine, engine.open[0], kPx100, 20, false);
   hft_trader::strategy::RuntimeClientOrderId parsed{};
   return expect(filled, "manual fill succeeds") &&
@@ -237,6 +242,84 @@ bool testFillPublishesRuntimeUserEvent() {
          expect(parsed.clientIntentId.raw == 4, "client order id carries intent id");
 }
 
+bool testPostOnlyCrossingBuyRejectsWithoutTakerFill() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(40, Side::Buy(), kPx100 + 100000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+
+  applyIntents(engine, io, 1000, 0, 0);
+
+  return expect(engine.orders.size() == 1u, "post-only crossing buy is recorded") &&
+         expect(engine.orders[0].postOnly, "post-only crossing buy record keeps post-only flag") &&
+         expect(engine.orders[0].status == kRecordStatusRejected, "post-only crossing buy is rejected") &&
+         expect(engine.fills.empty(), "post-only crossing buy does not taker-fill") &&
+         expect(!engine.open[0].state.valid, "post-only crossing buy leaves no open order") &&
+         expect(engine.userEvents.size() == 1u, "post-only crossing buy publishes rejected user event") &&
+         expect(engine.userEvents[0].orderStatus == canon::OrderStatus::Rejected, "post-only crossing buy event is rejected");
+}
+
+bool testPostOnlyCrossingSellRejectsWithoutTakerFill() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(41, Side::Sell(), kPx100 - 100000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+
+  applyIntents(engine, io, 1000, 0, 0);
+
+  return expect(engine.orders.size() == 1u, "post-only crossing sell is recorded") &&
+         expect(engine.orders[0].status == kRecordStatusRejected, "post-only crossing sell is rejected") &&
+         expect(engine.fills.empty(), "post-only crossing sell does not taker-fill") &&
+         expect(!engine.open[0].state.valid, "post-only crossing sell leaves no open order");
+}
+
+bool testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 200000000ll, kPx100 + 200000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(42, Side::Buy(), kPx100 - 100000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 1000, 0, 0);
+  const bool policyVisible = engine.open[0].state.limitTimeInForcePolicy == hft_trader::core::LimitTimeInForcePolicy::PostOnlyPrefer;
+
+  setTop(engine, kPx100 - 200000000ll, kPx100 - 100000000ll);
+  tryFillOnTop(engine, 2000);
+
+  cxet::composite::TradeRuntimeV1 trade{};
+  trade.ts.raw = 3000;
+  trade.side = Side::Sell();
+  trade.price.raw = kPx100 - 100000000ll;
+  tryFillOnTrade(engine, trade);
+
+  return expect(policyVisible, "post-only resting order state keeps post-only policy") &&
+         expect(engine.orders[0].status == kRecordStatusFilled, "post-only resting order fills from trade") &&
+         expect(engine.fills.size() == 1u, "post-only resting order has one maker fill") &&
+         expect(engine.fills[0].orderId == 42u, "post-only maker fill uses order id") &&
+         expect(engine.userEvents.size() == 1u, "post-only maker fill publishes one user event") &&
+         expect(engine.userEvents[0].maker == 1u, "post-only trade fill is maker");
+}
+
+bool testGtcCrossingLimitStillTakerFills() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(45, Side::Buy(), kPx100 + 100000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+
+  applyIntents(engine, io, 1000, 0, 0);
+
+  return expect(engine.orders[0].status == kRecordStatusFilled, "gtc crossing buy still fills") &&
+         expect(engine.fills.size() == 1u, "gtc crossing buy writes fill") &&
+         expect(engine.userEvents.size() == 1u, "gtc crossing buy publishes fill event") &&
+         expect(engine.userEvents[0].maker == 0u, "gtc crossing buy is taker");
+}
+
 bool testReduceOnlyMarketBuyDoesNotOpenWhenFlat() {
   EngineState engine{};
   setTop(engine, kPx100 - 300000000ll, kPx100 - 200000000ll);
@@ -244,7 +327,7 @@ bool testReduceOnlyMarketBuyDoesNotOpenWhenFlat() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
-  applyIntents(engine, io, 200, 0, 0, 0);
+  applyIntents(engine, io, 200, 0, 0);
   return expect(engine.netQtyRaw == 0, "reduce-only buy cannot open long when flat") &&
          expect(engine.fills.empty(), "invalid reduce-only order does not write fill") &&
          expect(engine.orders.size() == 1u, "invalid reduce-only order is recorded") &&
@@ -263,7 +346,7 @@ bool testReduceOnlyMarketSellClosesLongAtBid() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
-  applyIntents(engine, io, 200, 0, 0, 0);
+  applyIntents(engine, io, 200, 0, 0);
   return expect(engine.netQtyRaw == 0, "reduce-only sell flattens long") &&
          expect(engine.fills.size() == 1u, "reduce-only close writes fill") &&
          expect(engine.fills[0].priceE8 == kPx100 + 200000000ll, "long close uses bid") &&
@@ -283,7 +366,7 @@ bool testReduceOnlyMarketBuyClosesShortAtAsk() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
-  applyIntents(engine, io, 200, 0, 0, 0);
+  applyIntents(engine, io, 200, 0, 0);
   return expect(engine.netQtyRaw == 0, "reduce-only buy flattens short") &&
          expect(engine.fills.size() == 1u, "short close writes fill") &&
          expect(engine.fills[0].priceE8 == kPx100 - 200000000ll, "short close uses ask") &&
@@ -383,7 +466,7 @@ bool testHardLiquidationClearsStateAndBlocksNewOrders() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
-  applyIntents(engine, io, 1000, 100, 0, 0);
+  applyIntents(engine, io, 1000, 100, 0);
 
   std::int64_t netRealized = 0;
   updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0, netRealized);
@@ -396,7 +479,7 @@ bool testHardLiquidationClearsStateAndBlocksNewOrders() {
   orders[0] = orderIntent(41, Side::Sell(), kPx100 + 200000000ll);
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
-  applyIntents(engine, io, 3000, 0, 0, 0);
+  applyIntents(engine, io, 3000, 0, 0);
 
   return expect(breachedEquity <= 0, "test setup breaches 100 percent equity loss") &&
          expect(engine.liquidated, "engine records hard liquidation") &&
@@ -422,7 +505,7 @@ bool testTraderRiskStopCancelsOrdersKeepsPositionAndBlocksNewOrders() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
-  applyIntents(engine, io, 1000, 0, 0, 0);
+  applyIntents(engine, io, 1000, 0, 0);
 
   std::int64_t netRealized = 0;
   updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0, netRealized);
@@ -436,7 +519,7 @@ bool testTraderRiskStopCancelsOrdersKeepsPositionAndBlocksNewOrders() {
   orders[0] = orderIntent(51, Side::Sell(), kPx100 + 200000000ll);
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
-  applyIntents(engine, io, 3000, 0, 0, 0);
+  applyIntents(engine, io, 3000, 0, 0);
 
   return expect(breachedEquity < thresholdEquity, "test setup breaches trader risk threshold") &&
          expect(!engine.liquidated, "trader risk stop is not hard liquidation") &&
@@ -481,7 +564,7 @@ bool testCancelOpenOrdersAtFinishWritesCancelAcks() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
-  applyIntents(engine, io, 1000, 0, 0, 0);
+  applyIntents(engine, io, 1000, 0, 0);
 
   cancelOpenOrders(engine, 2000, 100);
 
@@ -493,103 +576,6 @@ bool testCancelOpenOrdersAtFinishWritesCancelAcks() {
          expect(engine.orders[1].activeTsNs == 102000, "final cleanup honors cancel latency") &&
          expect(!engine.open[0].state.valid, "final cleanup clears open order state");
 }
-bool testAmendFillBelongsToReplacementOrder() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 200000000ll, kPx100 + 200000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(1, Side::Buy(), kPx100 - 300000000ll)};
-  std::array<hft_trader::core::AmendIntent, 1> amends{amendIntent(2, 1, kPx100 - 100000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
-  io.orderCount = 1;
-  applyIntents(engine, io, 1000, 0, 0, 0);
-  io.clear();
-  io.amendOut = Span<hft_trader::core::AmendIntent>(amends.data(), amends.size());
-  io.amendCount = 1;
-  applyIntents(engine, io, 2000, 0, 100, 0);
-  applyDueActions(engine, 102000);
-  cxet::composite::TradeRuntimeV1 trade{};
-  trade.ts.raw = 150000;
-  trade.side = Side::Sell();
-  trade.price.raw = kPx100 - 100000000ll;
-  tryFillOnTrade(engine, trade);
-
-  return expect(engine.orders.size() == 3u, "amend scenario records order cancel and replacement") &&
-         expect(engine.orders[1].action == kRecordActionCancel, "replace writes cancel leg") &&
-         expect(engine.orders[2].action == kRecordActionOrder, "replace writes new order leg") &&
-         expect(engine.fills.size() == 1u, "replacement order fills once") &&
-         expect(engine.orders[0].status == kRecordStatusCancelled, "original order is cancelled by replace") &&
-         expect(engine.orders[1].status == kRecordStatusAcked, "replace cancel leg is acked") &&
-         expect(engine.orders[2].status == kRecordStatusFilled, "replacement row is marked filled") &&
-         expect(engine.fills[0].orderId == 2u, "fill belongs to replacement client intent id") &&
-         expect(engine.fills[0].entryTsNs == 102000, "replacement entry uses amend latency without second order latency");
-}
-
-bool testAmendChainFillBelongsToLastReplacementOrder() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 300000000ll, kPx100 + 300000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(10, Side::Buy(), kPx100 - 400000000ll)};
-  std::array<hft_trader::core::AmendIntent, 2> amends{amendIntent(11, 10, kPx100 - 200000000ll), amendIntent(12, 11, kPx100 - 100000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
-  io.orderCount = 1;
-  applyIntents(engine, io, 1000, 0, 0, 0);
-  io.clear();
-  io.amendOut = Span<hft_trader::core::AmendIntent>(&amends[0], 1);
-  io.amendCount = 1;
-  applyIntents(engine, io, 2000, 0, 100, 0);
-  applyDueActions(engine, 102000);
-  io.clear();
-  io.amendOut = Span<hft_trader::core::AmendIntent>(&amends[1], 1);
-  io.amendCount = 1;
-  applyIntents(engine, io, 120000, 0, 100, 0);
-  applyDueActions(engine, 220000);
-  cxet::composite::TradeRuntimeV1 trade{};
-  trade.ts.raw = 250000;
-  trade.side = Side::Sell();
-  trade.price.raw = kPx100 - 100000000ll;
-  tryFillOnTrade(engine, trade);
-
-  return expect(engine.orders.size() == 5u, "amend chain records cancel and new order legs") &&
-         expect(engine.orders[1].action == kRecordActionCancel, "first replace writes cancel leg") &&
-         expect(engine.orders[2].action == kRecordActionOrder, "first replace writes new order leg") &&
-         expect(engine.orders[3].action == kRecordActionCancel, "second replace writes cancel leg") &&
-         expect(engine.orders[4].action == kRecordActionOrder, "second replace writes new order leg") &&
-         expect(engine.fills.size() == 1u, "last replacement fills once") &&
-         expect(engine.orders[0].status == kRecordStatusCancelled, "original chain row is cancelled by first replace") &&
-         expect(engine.orders[2].status == kRecordStatusCancelled, "intermediate replacement row is cancelled by second replace") &&
-         expect(engine.orders[4].status == kRecordStatusFilled, "last replacement row is filled") &&
-         expect(engine.fills[0].orderId == 12u, "fill belongs to last replacement id");
-}
-
-bool testCancelAfterAmendCancelsReplacementOrder() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 300000000ll, kPx100 + 300000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(20, Side::Buy(), kPx100 - 400000000ll)};
-  std::array<hft_trader::core::AmendIntent, 1> amends{amendIntent(21, 20, kPx100 - 200000000ll)};
-  std::array<hft_trader::core::CancelIntent, 1> cancels{cancelIntent(22, 21)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
-  io.orderCount = 1;
-  applyIntents(engine, io, 1000, 0, 0, 0);
-  io.clear();
-  io.amendOut = Span<hft_trader::core::AmendIntent>(amends.data(), amends.size());
-  io.amendCount = 1;
-  applyIntents(engine, io, 2000, 0, 100, 0);
-  applyDueActions(engine, 102000);
-  io.clear();
-  io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancels.size());
-  io.cancelCount = 1;
-  applyIntents(engine, io, 120000, 0, 0, 100);
-  applyDueActions(engine, 220000);
-
-  return expect(engine.orders.size() == 4u, "cancel after amend records order replace cancel and new order cancel") &&
-         expect(engine.orders[0].status == kRecordStatusCancelled, "original order is cancelled by replace") &&
-         expect(engine.orders[1].status == kRecordStatusAcked, "replace cancel leg is acked") &&
-         expect(engine.orders[2].status == kRecordStatusCancelled, "replacement order is terminal-cancelled") &&
-         expect(engine.orders[3].status == kRecordStatusAcked, "cancel command is acked") &&
-         expect(!engine.open[0].state.valid, "replacement cancel clears active order");
-}
-
 bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_loader_manifest_" + std::to_string(std::rand()));
@@ -768,7 +754,6 @@ bool testWriterCreatesV2RunDirectory() {
   result.configPath = dir / "source_config.ini";
   result.resultPath = dir;
   result.orderLatencyUs = 3000;
-  result.amendLatencyUs = 3000;
   result.cancelLatencyUs = 3000;
   result.events = 2;
   result.trades = 1;
@@ -955,6 +940,7 @@ bool testTwoLegProbeRunsOnTwoSessionsAndWritesLegIndexes() {
   request.runId = "two-leg-probe";
   request.outputPath = root / "backtests" / "two-leg-probe";
   request.initialBalanceE8 = 100000000000LL;
+  request.legInitialBalancesE8 = {10000000000LL, 25000000000LL};
   request.feeSchedules.push_back(hft_backtest::BacktestFeeSchedule{"binance", "futures", 200000000LL, 500000000LL});
   request.feeSchedules.push_back(hft_backtest::BacktestFeeSchedule{"okx", "futures", 100000000LL, 400000000LL});
   hft_backtest::BacktestLatencySchedule binanceLatency{};
@@ -977,6 +963,13 @@ bool testTwoLegProbeRunsOnTwoSessionsAndWritesLegIndexes() {
 
   return expect(result.status == hft_backtest::Status::Ok, "two_leg_probe backtest completes") &&
          expect(result.legs.size() == 2u, "two_leg_probe result reports two legs") &&
+         expect(result.initialBalanceE8 == 35000000000LL, "portfolio balance sums leg balances") &&
+         expect(result.legs[0].initialBalanceE8 == 10000000000LL, "leg 0 uses requested balance") &&
+         expect(result.legs[1].initialBalanceE8 == 25000000000LL, "leg 1 uses requested balance") &&
+         expect(result.legs[0].walletBalanceE8 == result.legs[0].initialBalanceE8 + result.legs[0].netRealizedPnlE8,
+                "leg 0 wallet tracks its own net pnl") &&
+         expect(result.legs[1].walletBalanceE8 == result.legs[1].initialBalanceE8 + result.legs[1].netRealizedPnlE8,
+                "leg 1 wallet tracks its own net pnl") &&
          expect(result.legs[0].makerFeeBpsE8 == 200000000LL, "leg 0 uses binance maker fee schedule") &&
          expect(result.legs[1].makerFeeBpsE8 == 100000000LL, "leg 1 uses okx maker fee schedule") &&
          expect(result.legs[0].marketDataLatency.baseUs == 100u, "leg 0 uses binance market data latency") &&
@@ -988,6 +981,16 @@ bool testTwoLegProbeRunsOnTwoSessionsAndWritesLegIndexes() {
          expect(result.inputCoverage.cyclesWithTrade > 0u, "two_leg_probe sees trades") &&
          expect(result.inputCoverage.cyclesWithBookTicker > 0u, "two_leg_probe sees bookticker") &&
          expect(manifest.find("\"legs\": [") != std::string::npos, "manifest includes leg summaries") &&
+         expect(manifest.find("\"initial_balance_e8\": 10000000000") != std::string::npos,
+                "manifest carries leg 0 initial balance") &&
+         expect(manifest.find("\"initial_balance_e8\": 25000000000") != std::string::npos,
+                "manifest carries leg 1 initial balance") &&
+         expect(manifest.find("\"equity\": {\"path\": \"legs/0/equity.jsonl\"") != std::string::npos,
+                "manifest declares leg 0 equity stream") &&
+         expect(std::filesystem::exists(request.outputPath / "legs" / "0" / "equity.jsonl"),
+                "writer emits leg 0 equity stream") &&
+         expect(std::filesystem::exists(request.outputPath / "legs" / "1" / "equity.jsonl"),
+                "writer emits leg 1 equity stream") &&
          expect(manifest.find("\"maker_fee_bps_e8\": 200000000") != std::string::npos, "manifest carries leg 0 maker fee") &&
          expect(manifest.find("\"market_order_latency\": {\"base_us\": 3100, \"jitter_us\": 300}") != std::string::npos,
                 "manifest carries leg 1 latency") &&
@@ -1371,18 +1374,60 @@ bool testStatArbBandMetadataRequiresTwoSessions() {
          expect(metadataHasParam(*metadata, "ema_window_ms"), "stat arb band metadata contains ema_window_ms") &&
          expect(metadataHasParam(*metadata, "entry_edge_bps"), "stat arb band metadata contains entry_edge_bps") &&
          expect(metadataHasParam(*metadata, "exit_edge_bps"), "stat arb band metadata contains exit_edge_bps") &&
+         expect(metadataHasParam(*metadata, "pending_timeout_ms"), "stat arb band metadata contains pending_timeout_ms") &&
+         expect(metadataHasParam(*metadata, "max_quote_age_ms"), "stat arb band metadata contains max_quote_age_ms") &&
+         expect(metadataHasParam(*metadata, "max_leg_skew_ms"), "stat arb band metadata contains max_leg_skew_ms") &&
          expect(metadataHasParam(*metadata, "amount_qty"), "stat arb band metadata contains amount_qty");
+}
+
+bool testStatArbBoundaryMakerMetadataRequiresTwoSessions() {
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("stat_arb_boundary_maker");
+  return expect(metadata != nullptr, "stat_arb_boundary_maker metadata is exported") &&
+         expect(metadata->minSessionCount == 2u, "boundary maker requires at least two sessions") &&
+         expect(metadata->maxSessionCount == 2u, "boundary maker allows exactly two sessions") &&
+         expect(metadataHasParam(*metadata, "ema_window_ms"), "boundary maker metadata contains ema_window_ms") &&
+         expect(metadataHasParam(*metadata, "maker_entry_edge_bps"), "boundary maker metadata contains maker_entry_edge_bps") &&
+         expect(metadataHasParam(*metadata, "maker_slippage_buffer_bps"), "boundary maker metadata contains maker_slippage_buffer_bps") &&
+         expect(metadataHasParam(*metadata, "maker_offset_ticks"), "boundary maker metadata contains maker_offset_ticks") &&
+         expect(metadataHasParam(*metadata, "maker_replace_threshold_ticks"), "boundary maker metadata contains maker_replace_threshold_ticks") &&
+         expect(metadataHasParam(*metadata, "maker_ttl_ms"), "boundary maker metadata contains maker_ttl_ms") &&
+         expect(!metadataHasParam(*metadata, "entry_edge_bps"), "boundary maker metadata does not expose band entry_edge_bps") &&
+         expect(metadataHasParam(*metadata, "exit_edge_bps"), "boundary maker metadata contains exit_edge_bps") &&
+         expect(metadataHasParam(*metadata, "pending_timeout_ms"), "boundary maker metadata contains pending_timeout_ms") &&
+         expect(metadataHasParam(*metadata, "max_quote_age_ms"), "boundary maker metadata contains max_quote_age_ms") &&
+         expect(metadataHasParam(*metadata, "max_leg_skew_ms"), "boundary maker metadata contains max_leg_skew_ms") &&
+         expect(metadataHasParam(*metadata, "amount_qty"), "boundary maker metadata contains amount_qty");
+}
+
+bool testStatArbBandLadderMetadataRequiresTwoSessions() {
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("stat_arb_band_ladder");
+  return expect(metadata != nullptr, "stat_arb_band_ladder metadata is exported") &&
+         expect(metadata->minSessionCount == 2u, "stat arb band ladder requires at least two sessions") &&
+         expect(metadata->maxSessionCount == 2u, "stat arb band ladder allows exactly two sessions") &&
+         expect(metadataHasParam(*metadata, "ema_window_ms"), "stat arb band ladder metadata contains ema_window_ms") &&
+         expect(metadataHasParam(*metadata, "entry_edge_bps"), "stat arb band ladder metadata contains entry_edge_bps") &&
+         expect(metadataHasParam(*metadata, "exit_edge_bps"), "stat arb band ladder metadata contains exit_edge_bps") &&
+         expect(metadataHasParam(*metadata, "pending_timeout_ms"), "stat arb band ladder metadata contains pending_timeout_ms") &&
+         expect(metadataHasParam(*metadata, "max_quote_age_ms"), "stat arb band ladder metadata contains max_quote_age_ms") &&
+         expect(metadataHasParam(*metadata, "max_leg_skew_ms"), "stat arb band ladder metadata contains max_leg_skew_ms") &&
+         expect(metadataHasParam(*metadata, "ladder_step_bps"), "stat arb band ladder metadata contains ladder_step_bps") &&
+         expect(metadataHasParam(*metadata, "max_ladder_levels"), "stat arb band ladder metadata contains max_ladder_levels") &&
+         expect(metadataHasParam(*metadata, "amount_qty"), "stat arb band ladder metadata contains amount_qty");
 }
 }  // namespace
 
 int main() {
   bool ok = true;
   ok = testStaleCancelDoesNotCancelReusedSlot() && ok;
-  ok = testStaleAmendDoesNotMutateReusedSlot() && ok;
   ok = testPendingDrainActivatesLateOrder() && ok;
+  ok = testCancelThenReplacementLimitMaterializesReplace() && ok;
   ok = testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() && ok;
   ok = testLatencyRuntimeSplitsMarketAndLimitOrderActivation() && ok;
   ok = testFillPublishesRuntimeUserEvent() && ok;
+  ok = testPostOnlyCrossingBuyRejectsWithoutTakerFill() && ok;
+  ok = testPostOnlyCrossingSellRejectsWithoutTakerFill() && ok;
+  ok = testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() && ok;
+  ok = testGtcCrossingLimitStillTakerFills() && ok;
   ok = testReduceOnlyMarketBuyDoesNotOpenWhenFlat() && ok;
   ok = testReduceOnlyMarketSellClosesLongAtBid() && ok;
   ok = testReduceOnlyMarketBuyClosesShortAtAsk() && ok;
@@ -1394,9 +1439,6 @@ int main() {
   ok = testTraderRiskStopCancelsOrdersKeepsPositionAndBlocksNewOrders() && ok;
   ok = testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() && ok;
   ok = testCancelOpenOrdersAtFinishWritesCancelAcks() && ok;
-  ok = testAmendFillBelongsToReplacementOrder() && ok;
-  ok = testAmendChainFillBelongsToLastReplacementOrder() && ok;
-  ok = testCancelAfterAmendCancelsReplacementOrder() && ok;
   ok = testLoadSessionUsesManifestChannelPathsAndMetadata() && ok;
   ok = testLoadSessionFailsMissingRequiredDepth() && ok;
   ok = testLoadSessionPrefersDepthTapeSidecar() && ok;
@@ -1420,5 +1462,7 @@ int main() {
   ok = testRangeReversionMetadataExposesRangeControls() && ok;
   ok = testStatArbBestsideMetadataRequiresTwoSessions() && ok;
   ok = testStatArbBandMetadataRequiresTwoSessions() && ok;
+  ok = testStatArbBoundaryMakerMetadataRequiresTwoSessions() && ok;
+  ok = testStatArbBandLadderMetadataRequiresTwoSessions() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

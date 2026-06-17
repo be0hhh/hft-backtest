@@ -58,6 +58,8 @@ using hft_trader::runtime::StrategyParamStorage;
 BacktestFeeSchedule resolveFeeSchedule(const BacktestRunRequest& request,
                                        const std::string& exchangeText,
                                        const std::string& marketText) noexcept;
+std::int64_t legInitialBalanceE8(const BacktestRunRequest& request, std::size_t legIndex) noexcept;
+std::int64_t portfolioInitialBalanceE8(const BacktestRunRequest& request, std::size_t legCount) noexcept;
 hft_trader::core::StrategyAccountState accountStateFromEngine(const detail::EngineState& engine) noexcept;
 BacktestInputCoverage addCoverage(BacktestInputCoverage lhs, const BacktestInputCoverage& rhs) noexcept;
 BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
@@ -245,8 +247,10 @@ bool isRangeReversion(const StrategyDescriptor& descriptor) noexcept {
   return descriptor.name && std::string_view{descriptor.name} == "range_reversion";
 }
 
-bool isStatArbBestside(const StrategyDescriptor& descriptor) noexcept {
-  return descriptor.name && std::string_view{descriptor.name} == "stat_arb_bestside";
+bool emitsStatArbSpreadTrace(const StrategyDescriptor& descriptor) noexcept {
+  if (!descriptor.name) return false;
+  const std::string_view name{descriptor.name};
+  return name == "stat_arb_bestside" || name == "stat_arb_boundary_maker";
 }
 
 void prefetchRead(const void* ptr) noexcept {
@@ -442,7 +446,6 @@ void appendProbeMetric(detail::EngineState& engine,
   row.reasonRaw = trace.reasonRaw;
   row.sideRaw = trace.sideRaw;
   row.orderCount = trace.orderCount;
-  row.amendCount = trace.amendCount;
   row.cancelCount = trace.cancelCount;
   row.bestBidRaw = trace.bestBidRaw;
   row.bestAskRaw = trace.bestAskRaw;
@@ -520,7 +523,6 @@ bool runCycle(const StrategyDescriptor& descriptor,
   if (engine.liquidated || engine.riskStopped) return true;
   if (!strategySnapshotReady(descriptor, engine.snapshot)) return true;
   std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
-  std::array<hft_trader::core::AmendIntent, detail::kIntentCapacity> amendBuf{};
   std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
   std::array<hft_trader::core::StrategyOrderState, detail::kMaxOrderStates> orderViewStorage{};
   const std::size_t orderViewCount = detail::visibleOrders(engine, orderViewStorage.data(), orderViewStorage.size());
@@ -547,7 +549,6 @@ bool runCycle(const StrategyDescriptor& descriptor,
   ctx.userEventRecvUtc = ctx.nowUtc;
   ctx.initialOrderSeedAllowed = true;
   ctx.io.orderOut = Span<hft_trader::core::OrderIntent>(orderBuf.data(), orderBuf.size());
-  ctx.io.amendOut = Span<hft_trader::core::AmendIntent>(amendBuf.data(), amendBuf.size());
   ctx.io.cancelOut = Span<hft_trader::core::CancelIntent>(cancelBuf.data(), cancelBuf.size());
   ctx.io.clear();
   recordInputCoverage(engine);
@@ -555,7 +556,7 @@ bool runCycle(const StrategyDescriptor& descriptor,
   const bool captureProbeTrace = isBacktestProbe(descriptor);
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engine);
   const bool captureRangeTrace = isRangeReversion(descriptor);
-  const bool captureSpreadTrace = isStatArbBestside(descriptor);
+  const bool captureSpreadTrace = emitsStatArbSpreadTrace(descriptor);
   if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
@@ -563,11 +564,9 @@ bool runCycle(const StrategyDescriptor& descriptor,
   const bool ok = descriptor.runCycle(state, ctx);
   if (!hft_trader::core::canEmitNewOrder(control)) {
     ctx.io.orderCount = 0u;
-    ctx.io.amendCount = 0u;
   }
   if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
-    trace.amendCount = static_cast<std::uint32_t>(ctx.io.amendCount);
     trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
     if (captureProbeTrace) appendProbeMetric(engine, tsNs, trace);
     if (captureIndicatorTrace) appendStrategyIndicator(engine, tsNs, trace);
@@ -590,22 +589,6 @@ std::size_t backtestRouteLegIndex(std::size_t legCount,
 void applyIntentsToLegs(std::vector<detail::EngineState>& engines,
                         const hft_trader::core::StrategyIo& io,
                         std::int64_t tsNs) {
-  for (std::size_t i = 0; i < io.orderCount; ++i) {
-    const std::size_t leg = backtestRouteLegIndex(engines.size(), io.orderOut[i].routeHandle);
-    if (leg >= engines.size()) continue;
-    hft_trader::core::StrategyIo one{};
-    one.orderOut = Span<hft_trader::core::OrderIntent>(const_cast<hft_trader::core::OrderIntent*>(&io.orderOut[i]), 1u);
-    one.orderCount = 1u;
-    detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
-  }
-  for (std::size_t i = 0; i < io.amendCount; ++i) {
-    const std::size_t leg = backtestRouteLegIndex(engines.size(), io.amendOut[i].routeHandle);
-    if (leg >= engines.size()) continue;
-    hft_trader::core::StrategyIo one{};
-    one.amendOut = Span<hft_trader::core::AmendIntent>(const_cast<hft_trader::core::AmendIntent*>(&io.amendOut[i]), 1u);
-    one.amendCount = 1u;
-    detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
-  }
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
     const std::size_t leg = backtestRouteLegIndex(engines.size(), io.cancelOut[i].routeHandle);
     if (leg >= engines.size()) continue;
@@ -614,11 +597,18 @@ void applyIntentsToLegs(std::vector<detail::EngineState>& engines,
     one.cancelCount = 1u;
     detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
   }
+  for (std::size_t i = 0; i < io.orderCount; ++i) {
+    const std::size_t leg = backtestRouteLegIndex(engines.size(), io.orderOut[i].routeHandle);
+    if (leg >= engines.size()) continue;
+    hft_trader::core::StrategyIo one{};
+    one.orderOut = Span<hft_trader::core::OrderIntent>(const_cast<hft_trader::core::OrderIntent*>(&io.orderOut[i]), 1u);
+    one.orderCount = 1u;
+    detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
+  }
 }
 
 struct MultiLegCycleScratch {
   std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
-  std::array<hft_trader::core::AmendIntent, detail::kIntentCapacity> amendBuf{};
   std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
   std::array<hft_trader::core::StrategyMarketSnapshot, hft_trader::core::kStrategyRuntimeMaxLegs> snapshots{};
   std::array<std::array<hft_trader::core::StrategyOrderState, detail::kMaxOrderStates>, hft_trader::core::kStrategyRuntimeMaxLegs> orderStorage{};
@@ -707,7 +697,6 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   ctx.userEventRecvUtc = ctx.nowUtc;
   ctx.initialOrderSeedAllowed = true;
   ctx.io.orderOut = Span<hft_trader::core::OrderIntent>(scratch.orderBuf.data(), scratch.orderBuf.size());
-  ctx.io.amendOut = Span<hft_trader::core::AmendIntent>(scratch.amendBuf.data(), scratch.amendBuf.size());
   ctx.io.cancelOut = Span<hft_trader::core::CancelIntent>(scratch.cancelBuf.data(), scratch.cancelBuf.size());
   ctx.io.clear();
   recordInputCoverage(engines[0]);
@@ -715,7 +704,7 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   const bool captureProbeTrace = isBacktestProbe(descriptor);
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engines[0]);
   const bool captureRangeTrace = isRangeReversion(descriptor);
-  const bool captureSpreadTrace = isStatArbBestside(descriptor);
+  const bool captureSpreadTrace = emitsStatArbSpreadTrace(descriptor);
   if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
@@ -723,11 +712,9 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   const bool ok = descriptor.runCycle(state, ctx);
   if (!hft_trader::core::canEmitNewOrder(control)) {
     ctx.io.orderCount = 0u;
-    ctx.io.amendCount = 0u;
   }
   if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
-    trace.amendCount = static_cast<std::uint32_t>(ctx.io.amendCount);
     trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
     if (captureProbeTrace) appendProbeMetric(engines[0], tsNs, trace);
     if (captureIndicatorTrace) appendStrategyIndicator(engines[0], tsNs, trace);
@@ -764,6 +751,19 @@ BacktestFeeSchedule resolveFeeSchedule(const BacktestRunRequest& request,
   fallback.makerFeeBpsE8 = request.makerFeeBpsE8;
   fallback.takerFeeBpsE8 = request.takerFeeBpsE8;
   return fallback;
+}
+
+std::int64_t legInitialBalanceE8(const BacktestRunRequest& request, std::size_t legIndex) noexcept {
+  if (request.legInitialBalancesE8.empty()) return 0;
+  if (legIndex < request.legInitialBalancesE8.size()) return request.legInitialBalancesE8[legIndex];
+  return request.initialBalanceE8;
+}
+
+std::int64_t portfolioInitialBalanceE8(const BacktestRunRequest& request, std::size_t legCount) noexcept {
+  if (request.legInitialBalancesE8.empty()) return request.initialBalanceE8;
+  std::int64_t out = 0;
+  for (std::size_t i = 0u; i < legCount; ++i) out += legInitialBalanceE8(request, i);
+  return out;
 }
 
 detail::BacktestLatencyConfig resolveLatencyConfig(const BacktestRunRequest& request,
@@ -839,6 +839,8 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
   out.timerWakeEvents = engine.timerWakeEvents;
   out.reduceOnlyOrders = engine.reduceOnlyOrders;
   out.reduceOnlyFills = engine.reduceOnlyFills;
+  out.initialBalanceE8 = engine.initialBalanceE8;
+  out.walletBalanceE8 = engine.walletBalanceE8;
   out.grossRealizedPnlE8 = engine.grossRealizedPnlE8;
   out.feesPaidE8 = engine.feesPaidE8;
   out.netRealizedPnlE8 = engine.netRealizedPnlE8;
@@ -846,6 +848,8 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
   out.totalPnlE8 = out.netRealizedPnlE8 + out.unrealizedPnlE8;
   out.walletDeltaE8 = engine.netRealizedPnlE8;
   out.openPositionQtyE8 = engine.netQtyRaw;
+  out.totalPnlCurveE8.reserve(engine.equityPoints.size());
+  for (const detail::JsonEquityPoint& point : engine.equityPoints) out.totalPnlCurveE8.push_back(point.totalPnlE8);
   out.strategyClosed = engine.netQtyRaw == 0 && engine.pending.empty();
   return out;
 }
@@ -1454,7 +1458,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.sessionPath = request.sessionPath;
   result.configPath = request.configPath;
   result.resultPath = resultPathFor(request, result.runId);
+  const bool hasExplicitSessions = !request.sessions.empty();
+  const std::size_t requestedSessionCount = explicitSessionPathCount(request, hasExplicitSessions);
+  const std::int64_t portfolioInitialBalance = portfolioInitialBalanceE8(request, requestedSessionCount);
   BacktestRunRequest effectiveRequest = request;
+  effectiveRequest.initialBalanceE8 = portfolioInitialBalance;
   if (effectiveRequest.latencySeed == 0u) effectiveRequest.latencySeed = hashRunSeed(result.runId);
   const detail::BacktestLatencyConfig latencyConfig = detail::latencyConfigFromRequest(effectiveRequest);
   result.latencySeed = latencyConfig.seed;
@@ -1462,10 +1470,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.marketOrderLatency = latencyConfig.marketOrder;
   result.limitOrderLatency = latencyConfig.limitOrder;
   result.orderLatencyUs = request.orderLatencyUs;
-  result.amendLatencyUs = request.amendLatencyUs;
   result.cancelLatencyUs = request.cancelLatencyUs;
-  result.initialBalanceE8 = request.initialBalanceE8;
-  result.walletBalanceE8 = request.initialBalanceE8;
+  result.initialBalanceE8 = portfolioInitialBalance;
+  result.walletBalanceE8 = portfolioInitialBalance;
   auto writeArtifacts = [&](const detail::EngineState& engine) noexcept -> Status {
     if (!request.writeArtifacts) return Status::Ok;
     return detail::writeResult(result, engine);
@@ -1480,7 +1487,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
   };
 
-  const bool hasExplicitSessions = !request.sessions.empty();
   if ((!hasExplicitSessions && request.sessionPath.empty()) || request.configPath.empty()) {
     result.status = Status::InvalidArgument;
     result.error = "session_path and config_path are required";
@@ -1724,8 +1730,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       legEngine.market = detail::marketFromText(sessions[leg].market);
       legEngine.symbol.copyFrom(sessions[leg].symbol.c_str());
       detail::initializeAccounting(legEngine, request);
-      legEngine.initialBalanceE8 = 0;
-      legEngine.walletBalanceE8 = 0;
+      const std::int64_t legBalance = legInitialBalanceE8(request, leg);
+      legEngine.initialBalanceE8 = legBalance;
+      legEngine.walletBalanceE8 = legBalance;
       const BacktestFeeSchedule fee = resolveFeeSchedule(request, sessions[leg].exchange, sessions[leg].market);
       legEngine.makerFeeBpsE8 = fee.makerFeeBpsE8;
       legEngine.takerFeeBpsE8 = fee.takerFeeBpsE8;
@@ -1836,7 +1843,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   const bool captureProbeTrace = isBacktestProbe(*descriptor);
   const bool captureIndicatorTrace = !result.indicatorProfile.empty();
   const bool captureRangeTrace = isRangeReversion(*descriptor);
-  const bool captureSpreadTrace = isStatArbBestside(*descriptor);
+  const bool captureSpreadTrace = emitsStatArbSpreadTrace(*descriptor);
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
       reserveEngineStorage(legEngine, timeline.size(), captureProbeTrace, captureIndicatorTrace, captureRangeTrace, captureSpreadTrace);
@@ -1854,18 +1861,18 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     detail::appendRiskSnapshot(engine, result.firstTsNs, detail::kRiskSnapshotReasonStart);
   }
   hft_trader::core::StrategyAccountState riskAccount = hasExplicitSessions
-      ? portfolioAccountStateFromEngines(legEngines, request.initialBalanceE8)
+      ? portfolioAccountStateFromEngines(legEngines, portfolioInitialBalance)
       : accountStateFromEngine(engine);
   hft_trader::runtime::PortfolioRiskRuntimeState traderRiskState =
       hft_trader::runtime::makePortfolioRiskRuntimeState(cfg.risk, &riskAccount, 1u);
   auto writeCurrentArtifacts = [&]() noexcept -> Status {
     if (hasExplicitSessions) {
       const std::int64_t tsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
-      populatePortfolioResultPnl(result, sessions, legEngines, request.initialBalanceE8);
+      populatePortfolioResultPnl(result, sessions, legEngines, portfolioInitialBalance);
       try {
         auto aggregate = std::make_unique<detail::EngineState>();
-        populateAggregateArtifactEngine(legEngines, request.initialBalanceE8, tsNs, *aggregate);
-        return writeArtifacts(*aggregate);
+        populateAggregateArtifactEngine(legEngines, portfolioInitialBalance, tsNs, *aggregate);
+        return request.writeArtifacts ? detail::writeResult(result, *aggregate, &legEngines) : Status::Ok;
       } catch (...) {
         return Status::IoError;
       }
@@ -1875,13 +1882,30 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.fills = engine.fills.size();
     return writeArtifacts(engine);
   };
+  bool legLiquidationProblem = false;
   auto tripHardLiquidation = [&](std::int64_t tsNs) noexcept -> bool {
-    if (request.initialBalanceE8 <= 0) return false;
+    if (portfolioInitialBalance <= 0) return false;
     if (hasExplicitSessions) {
-      for (const detail::EngineState& legEngine : legEngines) {
-        if (legEngine.liquidated) return true;
+      for (std::size_t leg = 0u; leg < legEngines.size(); ++leg) {
+        detail::EngineState& legEngine = legEngines[leg];
+        if (legEngine.liquidated) {
+          legLiquidationProblem = true;
+          return true;
+        }
+        if (legEngine.initialBalanceE8 > 0 && detail::equityE8(legEngine) <= 0) {
+          const std::int64_t legEquity = detail::equityE8(legEngine);
+          detail::hardLiquidate(legEngine, tsNs, legEquity);
+          control.killActive = hft_trader::core::kAlgoFlagTrue;
+          control.haltReason = hft_trader::core::kHaltReasonManualKill;
+          result.liquidated = true;
+          result.liquidationTsNs = tsNs;
+          result.liquidationEquityE8 = legEquity;
+          result.error = "leg " + std::to_string(leg) + " liquidated";
+          legLiquidationProblem = true;
+          return true;
+        }
       }
-      const std::int64_t equity = portfolioEquityE8(legEngines, request.initialBalanceE8);
+      const std::int64_t equity = portfolioEquityE8(legEngines, portfolioInitialBalance);
       if (equity > 0) return false;
       for (detail::EngineState& legEngine : legEngines) detail::hardLiquidate(legEngine, tsNs, equity);
       control.killActive = hft_trader::core::kAlgoFlagTrue;
@@ -1908,7 +1932,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
         if (legEngine.liquidated) return false;
         if (legEngine.riskStopped) return true;
       }
-      riskAccount = portfolioAccountStateFromEngines(legEngines, request.initialBalanceE8);
+      riskAccount = portfolioAccountStateFromEngines(legEngines, portfolioInitialBalance);
     } else {
       if (engine.liquidated) return false;
       if (engine.riskStopped) return true;
@@ -2094,10 +2118,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       detail::appendEquityPoint(legEngine, finalTsNs);
       detail::appendRiskSnapshot(legEngine, finalTsNs, detail::kRiskSnapshotReasonFinal);
     }
-    populatePortfolioResultPnl(result, sessions, legEngines, request.initialBalanceE8);
+    populatePortfolioResultPnl(result, sessions, legEngines, portfolioInitialBalance);
     try {
       auto aggregate = std::make_unique<detail::EngineState>();
-      populateAggregateArtifactEngine(legEngines, request.initialBalanceE8, finalTsNs, *aggregate);
+      populateAggregateArtifactEngine(legEngines, portfolioInitialBalance, finalTsNs, *aggregate);
       engine = std::move(*aggregate);
     } catch (...) {
       result.status = Status::IoError;
@@ -2112,13 +2136,20 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.orders = engine.orders.size();
     result.fills = engine.fills.size();
   }
+  if (legLiquidationProblem) {
+    result.status = Status::CorruptData;
+    if (result.error.empty()) result.error = "leg liquidated";
+    Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
+    if (!isOk(writeStatus)) result.status = writeStatus;
+    return result;
+  }
   if (result.strategy == "backtest_probe" && !validateBacktestProbeCoverage(result, engine, result.error)) {
     result.status = Status::CorruptData;
     (void)writeArtifacts(engine);
     return result;
   }
   result.status = Status::Ok;
-  Status writeStatus = writeArtifacts(engine);
+  Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
   if (!isOk(writeStatus)) result.status = writeStatus;
   (void)reportProgress(timeline.size(), timeline.size(), "complete", progressCallback, userData);
   return result;

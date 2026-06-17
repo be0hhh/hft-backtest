@@ -125,9 +125,11 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
          expect(manifest.find("\"curves\"") != std::string::npos, "manifest declares compact curve artifact") &&
          expect(rows.find("\"distance_bps\"") != std::string::npos, "rows include distance_bps") &&
          expect(rows.find("\"trigger_bps\"") != std::string::npos, "rows include trigger_bps") &&
+         expect(rows.find("\"legs\"") != std::string::npos, "rows include per-leg pnl container") &&
          expect(rows.find("\"score_e8\"") == std::string::npos, "rows omit score metric") &&
          expect(rows.find("\"random_seed\"") == std::string::npos, "rows omit random seed") &&
          expect(curves.find("\"curve_e8\"") != std::string::npos, "curves include compact pnl series") &&
+         expect(curves.find("\"legs\"") != std::string::npos, "curves include per-leg pnl series container") &&
          expect(pointConfig.find("[runtime]\nname=probe") != std::string::npos, "point config keeps base config") &&
          expect(pointConfig.find("distance_bps=") != std::string::npos, "point config writes distance override") &&
          expect(!std::filesystem::exists(request.outputPath / (request.sweepId + "-point-0") / "manifest.json"), "sweep does not write full run dirs per point");

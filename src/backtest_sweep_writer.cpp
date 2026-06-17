@@ -23,6 +23,33 @@ std::filesystem::path baseSessionPath(const BacktestSweepRequest& request) {
   return {};
 }
 
+void writeSweepLegs(std::ofstream& out, const BacktestRunResult& run, bool includeCurves) {
+  const char q = '"';
+  out << q << "legs" << q << ":[";
+  for (std::size_t i = 0u; i < run.legs.size(); ++i) {
+    const BacktestLegSummary& leg = run.legs[i];
+    if (i != 0u) out << ',';
+    out << '{';
+    out << q << "leg_index" << q << ':' << i << ',';
+    out << q << "exchange" << q << ':' << quote(leg.exchange) << ',';
+    out << q << "market" << q << ':' << quote(leg.market) << ',';
+    out << q << "symbol" << q << ':' << quote(leg.symbol) << ',';
+    out << q << "initial_balance_e8" << q << ':' << leg.initialBalanceE8 << ',';
+    out << q << "wallet_balance_e8" << q << ':' << leg.walletBalanceE8 << ',';
+    out << q << "total_pnl_e8" << q << ':' << leg.totalPnlE8;
+    if (includeCurves) {
+      out << ',' << q << "curve_e8" << q << ":[";
+      for (std::size_t c = 0u; c < leg.totalPnlCurveE8.size(); ++c) {
+        if (c != 0u) out << ',';
+        out << leg.totalPnlCurveE8[c];
+      }
+      out << ']';
+    }
+    out << '}';
+  }
+  out << ']';
+}
+
 }  // namespace
 
 std::filesystem::path sweepResultPathFor(const BacktestSweepRequest& request, std::string_view sweepId) {
@@ -46,7 +73,8 @@ Status writeSweepRows(const BacktestSweepRequest& request,
     }
     out << "},";
     out << q << "status" << q << ':' << quote(std::string{statusToString(point.run.status)}) << ',';
-    out << q << "total_pnl_e8" << q << ':' << point.run.totalPnlE8;
+    out << q << "total_pnl_e8" << q << ':' << point.run.totalPnlE8 << ',';
+    writeSweepLegs(out, point.run, false);
     if (!point.run.error.empty()) out << ',' << q << "error" << q << ':' << quote(point.run.error);
     out << "}\n";
   }
@@ -76,7 +104,8 @@ Status writeSweepCurves(const BacktestSweepRequest& request,
       if (i != 0u) out << ',';
       out << point.run.totalPnlCurveE8[i];
     }
-    out << ']';
+    out << "],";
+    writeSweepLegs(out, point.run, true);
     if (!point.run.error.empty()) out << ',' << q << "error" << q << ':' << quote(point.run.error);
     out << "}\n";
   }

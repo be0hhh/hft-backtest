@@ -72,7 +72,7 @@ void buildOrderLifetimeIndexes(const EngineState& engine, OrderLifetimeIndexes& 
 
   for (const JsonOrder& order : engine.orders) {
     if (order.targetId == 0 || order.activeTsNs <= 0) continue;
-    if (order.action != kRecordActionAmend && order.action != kRecordActionCancel) continue;
+    if (order.action != kRecordActionCancel) continue;
     if (!isEffectiveOrderStatus(order.status)) continue;
     out.commandsByTargetId[order.targetId].push_back(&order);
   }
@@ -233,7 +233,6 @@ bool writeProbeMetrics(const std::filesystem::path& path, const EngineState& eng
         << ',' << static_cast<unsigned>(row.reasonRaw)
         << ',' << static_cast<unsigned>(row.sideRaw)
         << ',' << row.orderCount
-        << ',' << row.amendCount
         << ',' << row.cancelCount
         << ',' << row.bestBidRaw
         << ',' << row.bestAskRaw
@@ -395,6 +394,8 @@ void writeLegsArray(std::ostream& out, const BacktestRunResult& result, const ch
         << q << "timer_wake_events" << q << ": " << leg.timerWakeEvents << ", "
         << q << "reduce_only_orders" << q << ": " << leg.reduceOnlyOrders << ", "
         << q << "reduce_only_fills" << q << ": " << leg.reduceOnlyFills << ", "
+        << q << "initial_balance_e8" << q << ": " << leg.initialBalanceE8 << ", "
+        << q << "wallet_balance_e8" << q << ": " << leg.walletBalanceE8 << ", "
         << q << "gross_realized_pnl_e8" << q << ": " << leg.grossRealizedPnlE8 << ", "
         << q << "fees_paid_e8" << q << ": " << leg.feesPaidE8 << ", "
         << q << "net_realized_pnl_e8" << q << ": " << leg.netRealizedPnlE8 << ", "
@@ -402,7 +403,11 @@ void writeLegsArray(std::ostream& out, const BacktestRunResult& result, const ch
         << q << "total_pnl_e8" << q << ": " << leg.totalPnlE8 << ", "
         << q << "wallet_delta_e8" << q << ": " << leg.walletDeltaE8 << ", "
         << q << "open_position_qty_e8" << q << ": " << leg.openPositionQtyE8 << ", "
-        << q << "strategy_closed" << q << ": " << (leg.strategyClosed ? "true" : "false")
+        << q << "strategy_closed" << q << ": " << (leg.strategyClosed ? "true" : "false") << ", "
+        << q << "equity" << q << ": {" << q << "path" << q << ": " << quote("legs/" + std::to_string(i) + "/equity.jsonl")
+        << ", " << q << "row_schema" << q << ": "
+        << q << "[ts_ns,gross_realized_pnl_e8,realized_pnl_e8,unrealized_pnl_e8,gross_total_pnl_e8,net_total_pnl_e8,total_pnl_e8,fees_paid_e8,wallet_balance_e8,position_qty_e8,fill_count]" << q
+        << "}"
         << '}';
   }
   if (!result.legs.empty()) out << '\n' << indent;
@@ -419,10 +424,25 @@ bool writeRunConfig(const std::filesystem::path& resultDir, const std::filesyste
   return !ec;
 }
 
+bool writeLegEquityStreams(const std::filesystem::path& resultDir,
+                           const std::vector<EngineState>* legEngines) noexcept {
+  if (legEngines == nullptr) return true;
+  for (std::size_t i = 0u; i < legEngines->size(); ++i) {
+    const std::filesystem::path dir = resultDir / "legs" / std::to_string(i);
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return false;
+    if (!writeEquity(dir / "equity.jsonl", (*legEngines)[i])) return false;
+  }
+  return true;
+}
+
 bool writeManifest(const std::filesystem::path& path,
                    const BacktestRunResult& result,
                    const EngineState& engine,
+                   const std::vector<EngineState>* legEngines,
                    std::size_t orderLifetimeRows) noexcept {
+  (void)legEngines;
   std::ofstream out(path, std::ios::out | std::ios::trunc);
   if (!out.is_open()) return false;
   const char q = '"';
@@ -446,7 +466,6 @@ bool writeManifest(const std::filesystem::path& path,
       << ", " << q << "limit_order" << q << ": {" << q << "base_us" << q << ": " << result.limitOrderLatency.baseUs
       << ", " << q << "jitter_us" << q << ": " << result.limitOrderLatency.jitterUs << "}"
       << ", " << q << "order_latency_us" << q << ": " << result.orderLatencyUs
-      << ", " << q << "amend_latency_us" << q << ": " << result.amendLatencyUs
       << ", " << q << "cancel_latency_us" << q << ": " << result.cancelLatencyUs << "},\n";
   out << "  " << q << "streams" << q << ": {\n";
   out << "    " << q << "order_lifetimes" << q << ": {" << q << "path" << q << ": " << q << "order_lifetimes.jsonl" << q
@@ -488,7 +507,7 @@ bool writeManifest(const std::filesystem::path& path,
   if (!engine.probeMetrics.empty()) {
     out << ",\n";
     out << "    " << q << "probe_metrics" << q << ": {" << q << "path" << q << ": " << q << "probe_metrics.jsonl" << q
-        << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,decision_kind,reason,side,orders,amends,cancels,best_bid,best_ask,trade_range_sample_bps,trade_range_ema_bps,trade_range_observed_seconds,rolling_per_minute_raw,volume_observed_seconds,trade_range_ready,volume_ready,has_trade,has_bookticker,has_price_limit,has_depth,has_orderbook]" << q
+        << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,decision_kind,reason,side,orders,cancels,best_bid,best_ask,trade_range_sample_bps,trade_range_ema_bps,trade_range_observed_seconds,rolling_per_minute_raw,volume_observed_seconds,trade_range_ready,volume_ready,has_trade,has_bookticker,has_price_limit,has_depth,has_orderbook]" << q
         << ", " << q << "rows" << q << ": " << engine.probeMetrics.size() << "}\n";
   } else {
     out << "\n";
@@ -496,7 +515,7 @@ bool writeManifest(const std::filesystem::path& path,
   out << "  },\n";
   out << "  " << q << "enums" << q << ": {\n";
   out << "    " << q << "side" << q << ": {" << q << "0" << q << ": " << q << "sell" << q << ", " << q << "1" << q << ": " << q << "buy" << q << "},\n";
-  out << "    " << q << "action" << q << ": {" << q << "1" << q << ": " << q << "order" << q << ", " << q << "2" << q << ": " << q << "amend" << q << ", " << q << "3" << q << ": " << q << "cancel" << q << "},\n";
+  out << "    " << q << "action" << q << ": {" << q << "1" << q << ": " << q << "order" << q << ", " << q << "3" << q << ": " << q << "cancel" << q << "},\n";
   out << "    " << q << "type" << q << ": {" << q << "1" << q << ": " << q << "limit" << q << ", " << q << "2" << q << ": " << q << "market" << q << "},\n";
   out << "    " << q << "status" << q << ": {" << q << "1" << q << ": " << q << "pending" << q << ", " << q << "2" << q << ": " << q << "acked" << q << ", " << q << "3" << q << ": " << q << "filled" << q << ", " << q << "4" << q << ": " << q << "cancelled" << q << ", " << q << "5" << q << ": " << q << "missing" << q << ", " << q << "6" << q << ": " << q << "rejected" << q << "}\n";
   out << "  },\n";
@@ -517,7 +536,9 @@ bool writeManifest(const std::filesystem::path& path,
 
 }  // namespace
 
-Status writeResult(const BacktestRunResult& result, const EngineState& engine) noexcept {
+Status writeResult(const BacktestRunResult& result,
+                   const EngineState& engine,
+                   const std::vector<EngineState>* legEngines) noexcept {
   std::error_code ec;
   std::filesystem::create_directories(result.resultPath, ec);
   if (ec) return Status::IoError;
@@ -528,12 +549,13 @@ Status writeResult(const BacktestRunResult& result, const EngineState& engine) n
   if (ec) return Status::IoError;
   if (!writeFills(result.resultPath / "fills.jsonl", engine)) return Status::IoError;
   if (!writeEquity(result.resultPath / "equity.jsonl", engine)) return Status::IoError;
+  if (!writeLegEquityStreams(result.resultPath, legEngines)) return Status::IoError;
   if (!writeRiskSnapshots(result.resultPath / "risk_snapshots.jsonl", engine)) return Status::IoError;
   if (!writeProbeMetrics(result.resultPath / "probe_metrics.jsonl", engine)) return Status::IoError;
   if (!writeStrategyIndicator(result.resultPath / "strategy_indicator.jsonl", engine)) return Status::IoError;
   if (!writeStrategyRange(result.resultPath / "strategy_range.jsonl", engine)) return Status::IoError;
   if (!writeStrategySpread(result.resultPath / "strategy_spread.jsonl", engine)) return Status::IoError;
-  if (!writeManifest(result.resultPath / "manifest.json", result, engine, orderLifetimes.size())) return Status::IoError;
+  if (!writeManifest(result.resultPath / "manifest.json", result, engine, legEngines, orderLifetimes.size())) return Status::IoError;
   return Status::Ok;
 }
 

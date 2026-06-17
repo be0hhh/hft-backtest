@@ -59,7 +59,6 @@ constexpr std::uint8_t kTimelineKindOpenInterest = 8u;
 constexpr std::uint8_t kTimelineKindCount = 9u;
 constexpr std::uint8_t kRecordActionNone = 0u;
 constexpr std::uint8_t kRecordActionOrder = 1u;
-constexpr std::uint8_t kRecordActionAmend = 2u;
 constexpr std::uint8_t kRecordActionCancel = 3u;
 constexpr std::uint8_t kRecordSideSell = 0u;
 constexpr std::uint8_t kRecordSideNone = 0u;
@@ -79,8 +78,6 @@ constexpr std::uint8_t kRecordStatusRejected = 6u;
 enum class PendingActionKind : std::uint8_t {
   OrderAck = 0,
   CancelAck = 1,
-  AmendAck = 2,
-  ReplaceCancelAck = 3,
 };
 
 struct JsonOrder {
@@ -97,6 +94,7 @@ struct JsonOrder {
   std::int64_t priceE8{0};
   std::int64_t qtyE8{0};
   bool reduceOnly{false};
+  bool postOnly{false};
 };
 
 struct JsonFill {
@@ -177,7 +175,6 @@ struct JsonProbeMetric {
   std::uint8_t reasonRaw{0u};
   std::uint8_t sideRaw{0u};
   std::uint32_t orderCount{0u};
-  std::uint32_t amendCount{0u};
   std::uint32_t cancelCount{0u};
   std::int64_t bestBidRaw{0};
   std::int64_t bestAskRaw{0};
@@ -202,17 +199,16 @@ struct OpenOrder {
   std::int64_t activeTsNs{0};
   bool active{false};
   bool reduceOnly{false};
+  bool postOnly{false};
 };
 
 struct PendingAction {
   PendingActionKind kind{PendingActionKind::OrderAck};
   std::size_t slotIndex{kNoRecordIndex};
   std::size_t recordIndex{kNoRecordIndex};
-  std::size_t replaceCancelRecordIndex{kNoRecordIndex};
   std::int64_t activeTsNs{0};
   Id targetClientIntentId{};
   Id commandClientIntentId{};
-  hft_trader::core::AmendIntent amend{};
 };
 
 struct EngineState {
@@ -347,7 +343,6 @@ void applyIntents(EngineState& engine,
                   const hft_trader::core::StrategyIo& io,
                   std::int64_t tsNs,
                   std::uint64_t orderLatencyUs,
-                  std::uint64_t amendLatencyUs,
                   std::uint64_t cancelLatencyUs);
 void applyIntents(EngineState& engine,
                   const hft_trader::core::StrategyIo& io,
@@ -356,6 +351,8 @@ void applyIntents(EngineState& engine,
 
 void buildTimeline(const SessionData& session, std::vector<TimelineEvent>& out);
 void buildTimeline(const std::vector<SessionData>& sessions, std::vector<TimelineEvent>& out);
-Status writeResult(const BacktestRunResult& result, const EngineState& engine) noexcept;
+Status writeResult(const BacktestRunResult& result,
+                   const EngineState& engine,
+                   const std::vector<EngineState>* legEngines = nullptr) noexcept;
 
 }  // namespace hft_backtest::detail
