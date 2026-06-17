@@ -1374,9 +1374,9 @@ bool testStatArbBandMetadataRequiresTwoSessions() {
          expect(metadataHasParam(*metadata, "ema_window_ms"), "stat arb band metadata contains ema_window_ms") &&
          expect(metadataHasParam(*metadata, "entry_edge_bps"), "stat arb band metadata contains entry_edge_bps") &&
          expect(metadataHasParam(*metadata, "exit_edge_bps"), "stat arb band metadata contains exit_edge_bps") &&
-         expect(metadataHasParam(*metadata, "pending_timeout_ms"), "stat arb band metadata contains pending_timeout_ms") &&
-         expect(metadataHasParam(*metadata, "max_quote_age_ms"), "stat arb band metadata contains max_quote_age_ms") &&
-         expect(metadataHasParam(*metadata, "max_leg_skew_ms"), "stat arb band metadata contains max_leg_skew_ms") &&
+         expect(!metadataHasParam(*metadata, "pending_timeout_ms"), "stat arb band metadata hides pending_timeout_ms") &&
+         expect(!metadataHasParam(*metadata, "max_quote_age_ms"), "stat arb band metadata hides max_quote_age_ms") &&
+         expect(!metadataHasParam(*metadata, "max_leg_skew_ms"), "stat arb band metadata hides max_leg_skew_ms") &&
          expect(metadataHasParam(*metadata, "amount_qty"), "stat arb band metadata contains amount_qty");
 }
 
@@ -1386,16 +1386,17 @@ bool testStatArbBoundaryMakerMetadataRequiresTwoSessions() {
          expect(metadata->minSessionCount == 2u, "boundary maker requires at least two sessions") &&
          expect(metadata->maxSessionCount == 2u, "boundary maker allows exactly two sessions") &&
          expect(metadataHasParam(*metadata, "ema_window_ms"), "boundary maker metadata contains ema_window_ms") &&
-         expect(metadataHasParam(*metadata, "maker_entry_edge_bps"), "boundary maker metadata contains maker_entry_edge_bps") &&
-         expect(metadataHasParam(*metadata, "maker_slippage_buffer_bps"), "boundary maker metadata contains maker_slippage_buffer_bps") &&
-         expect(metadataHasParam(*metadata, "maker_offset_ticks"), "boundary maker metadata contains maker_offset_ticks") &&
-         expect(metadataHasParam(*metadata, "maker_replace_threshold_ticks"), "boundary maker metadata contains maker_replace_threshold_ticks") &&
-         expect(metadataHasParam(*metadata, "maker_ttl_ms"), "boundary maker metadata contains maker_ttl_ms") &&
-         expect(!metadataHasParam(*metadata, "entry_edge_bps"), "boundary maker metadata does not expose band entry_edge_bps") &&
+         expect(metadataHasParam(*metadata, "entry_edge_bps"), "boundary maker metadata contains entry_edge_bps") &&
+         expect(metadataHasParam(*metadata, "trigger_edge_bps"), "boundary maker metadata contains trigger_edge_bps") &&
+         expect(!metadataHasParam(*metadata, "maker_entry_edge_bps"), "boundary maker metadata hides maker_entry_edge_bps") &&
+         expect(!metadataHasParam(*metadata, "maker_slippage_buffer_bps"), "boundary maker metadata hides maker_slippage_buffer_bps") &&
+         expect(!metadataHasParam(*metadata, "maker_offset_ticks"), "boundary maker metadata hides maker_offset_ticks") &&
+         expect(!metadataHasParam(*metadata, "maker_replace_threshold_ticks"), "boundary maker metadata hides maker_replace_threshold_ticks") &&
+         expect(!metadataHasParam(*metadata, "maker_ttl_ms"), "boundary maker metadata hides maker_ttl_ms") &&
          expect(metadataHasParam(*metadata, "exit_edge_bps"), "boundary maker metadata contains exit_edge_bps") &&
-         expect(metadataHasParam(*metadata, "pending_timeout_ms"), "boundary maker metadata contains pending_timeout_ms") &&
-         expect(metadataHasParam(*metadata, "max_quote_age_ms"), "boundary maker metadata contains max_quote_age_ms") &&
-         expect(metadataHasParam(*metadata, "max_leg_skew_ms"), "boundary maker metadata contains max_leg_skew_ms") &&
+         expect(!metadataHasParam(*metadata, "pending_timeout_ms"), "boundary maker metadata hides pending_timeout_ms") &&
+         expect(!metadataHasParam(*metadata, "max_quote_age_ms"), "boundary maker metadata hides max_quote_age_ms") &&
+         expect(!metadataHasParam(*metadata, "max_leg_skew_ms"), "boundary maker metadata hides max_leg_skew_ms") &&
          expect(metadataHasParam(*metadata, "amount_qty"), "boundary maker metadata contains amount_qty");
 }
 
@@ -1407,11 +1408,11 @@ bool testStatArbBandLadderMetadataRequiresTwoSessions() {
          expect(metadataHasParam(*metadata, "ema_window_ms"), "stat arb band ladder metadata contains ema_window_ms") &&
          expect(metadataHasParam(*metadata, "entry_edge_bps"), "stat arb band ladder metadata contains entry_edge_bps") &&
          expect(metadataHasParam(*metadata, "exit_edge_bps"), "stat arb band ladder metadata contains exit_edge_bps") &&
-         expect(metadataHasParam(*metadata, "pending_timeout_ms"), "stat arb band ladder metadata contains pending_timeout_ms") &&
-         expect(metadataHasParam(*metadata, "max_quote_age_ms"), "stat arb band ladder metadata contains max_quote_age_ms") &&
-         expect(metadataHasParam(*metadata, "max_leg_skew_ms"), "stat arb band ladder metadata contains max_leg_skew_ms") &&
-         expect(metadataHasParam(*metadata, "ladder_step_bps"), "stat arb band ladder metadata contains ladder_step_bps") &&
-         expect(metadataHasParam(*metadata, "max_ladder_levels"), "stat arb band ladder metadata contains max_ladder_levels") &&
+         expect(!metadataHasParam(*metadata, "pending_timeout_ms"), "stat arb band ladder metadata hides pending_timeout_ms") &&
+         expect(!metadataHasParam(*metadata, "max_quote_age_ms"), "stat arb band ladder metadata hides max_quote_age_ms") &&
+         expect(!metadataHasParam(*metadata, "max_leg_skew_ms"), "stat arb band ladder metadata hides max_leg_skew_ms") &&
+         expect(metadataHasParam(*metadata, "ladder_step_bps"), "stat arb band ladder metadata exposes ladder_step_bps") &&
+         expect(metadataHasParam(*metadata, "max_ladder_levels"), "stat arb band ladder metadata exposes max_ladder_levels") &&
          expect(metadataHasParam(*metadata, "amount_qty"), "stat arb band ladder metadata contains amount_qty");
 }
 }  // namespace
