@@ -61,6 +61,15 @@ bool isStrategyParamKey(std::string_view key) noexcept {
   return key != "type" && key != "enabled" && key != "inputs";
 }
 
+bool isIniIdentifier(std::string_view key) noexcept {
+  if (key.empty()) return false;
+  for (char ch : key) {
+    const bool valid = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_';
+    if (!valid) return false;
+  }
+  return true;
+}
+
 bool isUnsignedIntegerText(std::string_view value) noexcept {
   if (value.empty()) return false;
   for (char ch : value) {
@@ -108,7 +117,7 @@ bool parseTemplateFile(const std::filesystem::path& path, IniTemplate& out) {
     const bool isTemplateComment = !templateComment.empty();
     const std::string clean = isTemplateComment ? templateComment : trim(stripComment(line));
     if (clean.empty()) continue;
-    if (!isTemplateComment && clean.front() == '[' && clean.back() == ']') {
+    if (clean.front() == '[' && clean.back() == ']') {
       section = lower(trim(std::string_view{clean}.substr(1u, clean.size() - 2u)));
       continue;
     }
@@ -120,7 +129,7 @@ bool parseTemplateFile(const std::filesystem::path& path, IniTemplate& out) {
     if (section == "strategy") {
       if (!isTemplateComment && key == "type") {
         out.strategyType = value;
-      } else if (isStrategyParamKey(key)) {
+      } else if (isIniIdentifier(key) && isStrategyParamKey(key)) {
         out.strategyParams.push_back({key, value});
       }
     } else if (!isTemplateComment && section == "portfolio.recorder" && key == "legs") {

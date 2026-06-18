@@ -1172,6 +1172,12 @@ bool testStrategyMetadataExposesOnlySupportedSpreadMakerParams() {
          expect(metadataHasParam(*metadata, "order_qty"), "spread metadata contains order_qty") &&
          expect(metadataParamDefaultIs(*metadata, "amount_qty", "25"), "spread amount_qty default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "order_qty", "0.001"), "spread order_qty default comes from commented ini template") &&
+         expect(!metadataHasParam(*metadata, "fixed quote distance in basis points. 1 bps"),
+                "spread metadata ignores prose comments with equals") &&
+         expect(!metadataHasParam(*metadata, "minimum interval between quote refreshes in milliseconds. 0"),
+                "spread metadata ignores prose comments before refresh_ms") &&
+         expect(!metadataHasParam(*metadata, "min_equity_pct"),
+                "spread metadata does not treat commented risk template as a strategy param") &&
          expect(!metadataHasParam(*metadata, "distance_natr_pct"), "spread metadata does not expose unsupported distance_natr_pct") &&
          expect(!metadataHasParam(*metadata, "trigger_natr_pct"), "spread metadata does not expose unsupported trigger_natr_pct") &&
          expect(!metadataHasParam(*metadata, "natr_ema_period_seconds"), "spread metadata does not expose unsupported natr_ema_period_seconds") &&
