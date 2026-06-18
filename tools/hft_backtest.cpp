@@ -272,6 +272,9 @@ int main(int argc, char** argv) {
     return 0;
   }
   const auto result = hft_backtest::runBacktest(request, progress, nullptr);
+  for (const std::string& warning : result.warnings) {
+    std::cerr << "backtest warning: " << warning << "\n";
+  }
   if (!hft_backtest::isOk(result.status)) {
     std::cerr << "backtest failed: " << hft_backtest::statusToString(result.status) << ": " << result.error << "\n";
     return 1;

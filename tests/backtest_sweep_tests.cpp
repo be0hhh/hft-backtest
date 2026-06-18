@@ -95,15 +95,18 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
             "[1,1000000000,10200000000,9800000000,500000000]\n"
             "[2,900000000,10300000000,9700000000,600000000]\n"
             "[3,800000000,10400000000,9600000000,700000000]\n");
-  writeText(dir / "probe.ini",
-            "[runtime]\nname=probe\nenv_path=.env\n"
-            "[strategy]\ntype=backtest_probe\nenabled=1\n"
+  writeText(dir / "spread.ini",
+            "[runtime]\nname=spread\nenv_path=.env\n"
+            "[strategy]\ntype=spread_maker1and2\nenabled=1\n"
+            "distance_bps=100\n"
+            "trigger_bps=5\n"
+            "amount_qty=25\n"
             "[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
 
   hft_backtest::BacktestSweepRequest request{};
   request.baseRun.sessionPath = dir;
-  request.baseRun.configPath = dir / "probe.ini";
-  request.baseRun.strategy = "backtest_probe";
+  request.baseRun.configPath = dir / "spread.ini";
+  request.baseRun.strategy = "spread_maker1and2";
   request.outputPath = dir / "sweep-out";
   request.sweepId = "sweep-contract";
   request.runBudget = 2u;
@@ -130,7 +133,7 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
          expect(rows.find("\"random_seed\"") == std::string::npos, "rows omit random seed") &&
          expect(curves.find("\"curve_e8\"") != std::string::npos, "curves include compact pnl series") &&
          expect(curves.find("\"legs\"") != std::string::npos, "curves include per-leg pnl series container") &&
-         expect(pointConfig.find("[runtime]\nname=probe") != std::string::npos, "point config keeps base config") &&
+         expect(pointConfig.find("[runtime]\nname=spread") != std::string::npos, "point config keeps base config") &&
          expect(pointConfig.find("distance_bps=") != std::string::npos, "point config writes distance override") &&
          expect(!std::filesystem::exists(request.outputPath / (request.sweepId + "-point-0") / "manifest.json"), "sweep does not write full run dirs per point");
 }
@@ -165,16 +168,19 @@ bool testSweepCanRunTwiceInOneProcess() {
             "[1,1000000000,10200000000,9800000000,500000000]\n"
             "[2,900000000,10300000000,9700000000,600000000]\n"
             "[3,800000000,10400000000,9600000000,700000000]\n");
-  writeText(dir / "probe.ini",
-            "[runtime]\nname=probe\nenv_path=.env\n"
-            "[strategy]\ntype=backtest_probe\nenabled=1\n"
+  writeText(dir / "spread.ini",
+            "[runtime]\nname=spread\nenv_path=.env\n"
+            "[strategy]\ntype=spread_maker1and2\nenabled=1\n"
+            "distance_bps=100\n"
+            "trigger_bps=5\n"
+            "amount_qty=25\n"
             "[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
 
   auto makeRequest = [&](const std::filesystem::path& out, std::string_view sweepId) {
     hft_backtest::BacktestSweepRequest request{};
     request.baseRun.sessionPath = dir;
-    request.baseRun.configPath = dir / "probe.ini";
-    request.baseRun.strategy = "backtest_probe";
+    request.baseRun.configPath = dir / "spread.ini";
+    request.baseRun.strategy = "spread_maker1and2";
     request.outputPath = out;
     request.sweepId = std::string{sweepId};
     request.runBudget = 2u;

@@ -160,6 +160,7 @@ struct SessionData {
   std::int64_t lastTsNs{0};
   std::array<bool, kSessionTimelineKindCount> timelineChannelSorted{};
   bool timelineOrderKnown{false};
+  std::vector<std::string> warnings{};
 };
 
 Status loadSession(const std::filesystem::path& sessionPath,

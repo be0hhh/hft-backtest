@@ -382,6 +382,11 @@ bool applyDepthSidecarLine(std::string_view line, std::uint64_t expectedTaggedTs
   }
 }
 
+bool parseDepthSidecarTaggedTs(std::string_view line, std::uint64_t& taggedTs) noexcept {
+  std::size_t pos = 0;
+  return consume(line, pos, '[') && parseU64(line, pos, taggedTs);
+}
+
 bool readLine(std::string_view text, std::size_t& pos, std::string_view& line) noexcept {
   if (pos >= text.size()) return false;
   const std::size_t lineStart = pos;
@@ -391,6 +396,41 @@ bool readLine(std::string_view text, std::size_t& pos, std::string_view& line) n
   if (lineEnd > lineStart && text[lineEnd - 1u] == '\r') --lineEnd;
   line = std::string_view{text.data() + lineStart, lineEnd - lineStart};
   return true;
+}
+
+std::uint64_t countNonEmptyRemainingLines(std::string_view text, std::size_t pos) noexcept {
+  std::uint64_t count = 0u;
+  while (pos < text.size()) {
+    std::string_view line{};
+    if (!readLine(text, pos, line)) break;
+    if (!line.empty()) ++count;
+  }
+  return count;
+}
+
+constexpr std::uint64_t kDepthResyncLookaheadRows = 512u;
+constexpr std::size_t kMaxSessionWarnings = 64u;
+
+void appendSessionWarning(std::vector<std::string>& warnings, std::string warning) {
+  if (warnings.size() < kMaxSessionWarnings) {
+    warnings.push_back(std::move(warning));
+  } else if (warnings.size() == kMaxSessionWarnings) {
+    warnings.push_back("additional session warnings suppressed");
+  }
+}
+
+std::string depthRecoveryWarning(std::uint64_t lineNo,
+                                 std::uint64_t loadedRows,
+                                 std::uint64_t droppedTapeRows,
+                                 std::uint64_t droppedSidecarRows,
+                                 std::string_view reason) {
+  std::ostringstream warning;
+  warning << "partial depth replay: " << reason << " at line " << lineNo
+          << ", loaded " << loadedRows << " paired rows";
+  if (droppedTapeRows > 0u) warning << ", dropped " << droppedTapeRows << " unpaired depth_tape rows";
+  if (droppedSidecarRows > 0u) warning << ", dropped " << droppedSidecarRows << " unpaired depth_sidecar rows";
+  warning << "; exact replay lost";
+  return warning.str();
 }
 
 struct TimelineRowKey {
@@ -504,6 +544,7 @@ Status loadDepthTapeSidecarJsonl(const std::filesystem::path& tapePath,
                                  bool required,
                                  std::vector<DepthRow>& out,
                                  std::string& error,
+                                 std::vector<std::string>& warnings,
                                  bool* sortedOut = nullptr) {
   out.clear();
   if (sortedOut) *sortedOut = true;
@@ -528,23 +569,111 @@ Status loadDepthTapeSidecarJsonl(const std::filesystem::path& tapePath,
   std::size_t sidecarPos = 0u;
   std::uint64_t lineNo = 0u;
   bool sorted = true;
-  while (tapePos < tapeText.size() || sidecarPos < sidecarText.size()) {
+  bool hasPendingTape = false;
+  bool hasPendingSidecar = false;
+  std::string_view pendingTapeLine{};
+  std::string_view pendingSidecarLine{};
+  while (hasPendingTape || hasPendingSidecar || tapePos < tapeText.size() || sidecarPos < sidecarText.size()) {
     std::string_view tapeLine{};
     std::string_view sidecarLine{};
-    const bool hasTape = readLine(tapeText, tapePos, tapeLine);
-    const bool hasSidecar = readLine(sidecarText, sidecarPos, sidecarLine);
+    bool hasTape = false;
+    bool hasSidecar = false;
+    if (hasPendingTape) {
+      tapeLine = pendingTapeLine;
+      hasPendingTape = false;
+      hasTape = true;
+    } else {
+      hasTape = readLine(tapeText, tapePos, tapeLine);
+    }
+    if (hasPendingSidecar) {
+      sidecarLine = pendingSidecarLine;
+      hasPendingSidecar = false;
+      hasSidecar = true;
+    } else {
+      hasSidecar = readLine(sidecarText, sidecarPos, sidecarLine);
+    }
     ++lineNo;
-    if (hasTape != hasSidecar || tapeLine.empty() || sidecarLine.empty()) {
+    if (!hasTape && !hasSidecar) break;
+    if (hasTape != hasSidecar) {
+      if (!out.empty()) {
+        const std::uint64_t loadedRows = static_cast<std::uint64_t>(out.size());
+        const std::uint64_t droppedTapeRows =
+            (hasTape && !tapeLine.empty() ? 1u : 0u) + countNonEmptyRemainingLines(tapeText, tapePos);
+        const std::uint64_t droppedSidecarRows =
+            (hasSidecar && !sidecarLine.empty() ? 1u : 0u) + countNonEmptyRemainingLines(sidecarText, sidecarPos);
+        appendSessionWarning(warnings,
+                             depthRecoveryWarning(lineNo, loadedRows, droppedTapeRows, droppedSidecarRows,
+                                                  "depth_tape/depth_sidecar unpaired tail"));
+        break;
+      }
       error = "depth_tape/depth_sidecar line count mismatch at line ";
       error += std::to_string(lineNo);
       return Status::CorruptData;
     }
+    if (tapeLine.empty() && sidecarLine.empty()) {
+      continue;
+    }
     DepthRow row{};
     std::uint64_t taggedTs = 0u;
-    if (!parseDepthTapeLine(tapeLine, row, taggedTs) || !applyDepthSidecarLine(sidecarLine, taggedTs, row)) {
-      error = "failed to parse depth_tape/depth_sidecar line ";
-      error += std::to_string(lineNo);
-      return Status::CorruptData;
+    const bool tapeOk = !tapeLine.empty() && parseDepthTapeLine(tapeLine, row, taggedTs);
+    const bool pairOk = tapeOk && !sidecarLine.empty() && applyDepthSidecarLine(sidecarLine, taggedTs, row);
+    if (!pairOk) {
+      std::uint64_t sidecarTaggedTs = 0u;
+      const bool sidecarTagged = !sidecarLine.empty() && parseDepthSidecarTaggedTs(sidecarLine, sidecarTaggedTs);
+      std::uint64_t droppedTapeRows = 0u;
+      std::uint64_t droppedSidecarRows = 0u;
+      bool recovered = false;
+      if (tapeOk) {
+        std::size_t scanPos = sidecarPos;
+        for (std::uint64_t skipped = 1u; skipped <= kDepthResyncLookaheadRows && scanPos < sidecarText.size(); ++skipped) {
+          std::string_view candidate{};
+          if (!readLine(sidecarText, scanPos, candidate)) break;
+          std::uint64_t candidateTaggedTs = 0u;
+          if (!candidate.empty() && parseDepthSidecarTaggedTs(candidate, candidateTaggedTs) && candidateTaggedTs == taggedTs) {
+            pendingTapeLine = tapeLine;
+            pendingSidecarLine = candidate;
+            hasPendingTape = true;
+            hasPendingSidecar = true;
+            sidecarPos = scanPos;
+            droppedSidecarRows = skipped;
+            recovered = true;
+            break;
+          }
+        }
+      }
+      if (!recovered && sidecarTagged) {
+        std::size_t scanPos = tapePos;
+        for (std::uint64_t skipped = 1u; skipped <= kDepthResyncLookaheadRows && scanPos < tapeText.size(); ++skipped) {
+          std::string_view candidate{};
+          if (!readLine(tapeText, scanPos, candidate)) break;
+          DepthRow candidateRow{};
+          std::uint64_t candidateTaggedTs = 0u;
+          if (!candidate.empty() && parseDepthTapeLine(candidate, candidateRow, candidateTaggedTs) &&
+              candidateTaggedTs == sidecarTaggedTs) {
+            pendingTapeLine = candidate;
+            pendingSidecarLine = sidecarLine;
+            hasPendingTape = true;
+            hasPendingSidecar = true;
+            tapePos = scanPos;
+            droppedTapeRows = skipped;
+            recovered = true;
+            break;
+          }
+        }
+      }
+      if (recovered) {
+        appendSessionWarning(warnings,
+                             depthRecoveryWarning(lineNo, static_cast<std::uint64_t>(out.size()),
+                                                  droppedTapeRows, droppedSidecarRows,
+                                                  "depth_tape/depth_sidecar resynced"));
+        continue;
+      }
+      appendSessionWarning(warnings,
+                           depthRecoveryWarning(lineNo, static_cast<std::uint64_t>(out.size()),
+                                                tapeLine.empty() ? 0u : 1u,
+                                                sidecarLine.empty() ? 0u : 1u,
+                                                "dropped corrupt depth_tape/depth_sidecar row"));
+      continue;
     }
     if (!out.empty() && rowKeyLess(rowKey(row), rowKey(out.back()))) sorted = false;
     out.push_back(std::move(row));
@@ -777,7 +906,7 @@ Status loadSession(const std::filesystem::path& sessionPath,
                                                   : existingPath(sessionPath, std::string_view{}, "depth_sidecar.jsonl");
     Status status = Status::Ok;
     if (std::filesystem::exists(tapePath) || std::filesystem::exists(sidecarPath)) {
-      status = loadDepthTapeSidecarJsonl(tapePath, sidecarPath, plan.requireDepths, out.depths, error);
+      status = loadDepthTapeSidecarJsonl(tapePath, sidecarPath, plan.requireDepths, out.depths, error, out.warnings);
     } else {
       status = loadJsonl<DepthRow>(existingPath(sessionPath, depthPath, "depth.jsonl"), "depth", plan.requireDepths, out.depths, [](std::string_view line, DepthRow& row) noexcept {
         return parseBookDocument(line, row.levels, row.tsNs, &row.ingestSeq);

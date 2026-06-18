@@ -81,6 +81,15 @@ struct BacktestInputCoverage {
   std::uint64_t seedD1Candles{0};
 };
 
+struct BacktestLiveProbeSummary {
+  bool configured{false};
+  bool enabled{false};
+  bool ignored{false};
+  std::int64_t notionalUsdtE8{0};
+  unsigned timeoutMs{0};
+  unsigned limitOffsetSpreadPct{0};
+};
+
 struct BacktestLegSummary {
   std::filesystem::path sessionPath{};
   std::string exchange{};
@@ -120,6 +129,7 @@ struct BacktestRunResult {
   std::filesystem::path configPath{};
   std::filesystem::path resultPath{};
   std::string error{};
+  std::vector<std::string> warnings{};
   std::uint64_t latencySeed{0};
   BacktestLatencyProfile marketDataLatency{};
   BacktestLatencyProfile marketOrderLatency{};
@@ -164,6 +174,7 @@ struct BacktestRunResult {
   std::vector<std::int64_t> totalPnlCurveE8{};
   std::vector<BacktestLegSummary> legs{};
   BacktestInputCoverage inputCoverage{};
+  BacktestLiveProbeSummary liveProbe{};
   bool strategyClosed{false};
   bool liquidated{false};
   bool riskStopped{false};

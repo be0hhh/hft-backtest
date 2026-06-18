@@ -131,6 +131,19 @@ void storePreparedSessions(detail::PreparedBacktestInput& prepared,
   prepared.timeline.clear();
 }
 
+void appendSessionWarnings(BacktestRunResult& result, const std::vector<detail::SessionData>& sessions) {
+  for (std::size_t i = 0u; i < sessions.size(); ++i) {
+    const detail::SessionData& session = sessions[i];
+    for (const std::string& warning : session.warnings) {
+      if (sessions.size() <= 1u) {
+        result.warnings.push_back(warning);
+      } else {
+        result.warnings.push_back("leg " + std::to_string(i) + ": " + warning);
+      }
+    }
+  }
+}
+
 bool marketDataLatencyKeepsOrder(const detail::BacktestLatencyConfig& config) noexcept {
   return config.marketData.jitterUs == 0u;
 }
@@ -239,18 +252,8 @@ bool strategySnapshotReady(const StrategyDescriptor& descriptor,
   return true;
 }
 
-bool isBacktestProbe(const StrategyDescriptor& descriptor) noexcept {
-  return descriptor.name && std::string_view{descriptor.name} == "backtest_probe";
-}
-
-bool isRangeReversion(const StrategyDescriptor& descriptor) noexcept {
-  return descriptor.name && std::string_view{descriptor.name} == "range_reversion";
-}
-
-bool emitsStatArbSpreadTrace(const StrategyDescriptor& descriptor) noexcept {
-  if (!descriptor.name) return false;
-  const std::string_view name{descriptor.name};
-  return name == "stat_arb_bestside" || name == "stat_arb_boundary_maker";
+bool emitsArbSpreadTrace(const StrategyDescriptor& descriptor) noexcept {
+  return descriptor.emitsArbSpreadTrace;
 }
 
 void prefetchRead(const void* ptr) noexcept {
@@ -267,7 +270,6 @@ std::size_t boundedReserve(std::size_t events, std::size_t divisor, std::size_t 
 
 void reserveEngineStorage(detail::EngineState& engine,
                           std::size_t events,
-                          bool captureProbeTrace,
                           bool captureIndicatorTrace,
                           bool captureRangeTrace,
                           bool captureSpreadTrace) {
@@ -278,8 +280,7 @@ void reserveEngineStorage(detail::EngineState& engine,
   engine.userEvents.reserve(tradeRows);
   engine.equityPoints.reserve(boundedReserve(events, 64u, 16u));
   engine.riskSnapshots.reserve(boundedReserve(events, 1024u, 8u));
-  if (captureProbeTrace) engine.probeMetrics.reserve(events + 8u);
-  if (captureIndicatorTrace) engine.strategyIndicator.reserve(events + 8u);
+  if (captureIndicatorTrace) engine.strategyIndicator.reserve(boundedReserve(events, 64u, 64u));
   if (captureRangeTrace) engine.strategyRange.reserve(events + 8u);
   if (captureSpreadTrace) engine.strategySpread.reserve(events + 8u);
 }
@@ -295,20 +296,16 @@ struct StrategyIndicatorProfileInfo {
 bool resolveStrategyIndicatorProfile(std::string_view id, StrategyIndicatorProfileInfo& out) noexcept {
   out = StrategyIndicatorProfileInfo{};
   if (id.empty() || id == "none") return true;
-  if (id == "rolling_volume") {
-    out = StrategyIndicatorProfileInfo{"rolling_volume", "Rolling volume", "Rolling/min", "EMA/min", "raw"};
+  if (id == "trend_score") {
+    out = StrategyIndicatorProfileInfo{"trend_score", "Trend score", "Score", "Raw", "score"};
     return true;
   }
-  if (id == "trade_range") {
-    out = StrategyIndicatorProfileInfo{"trade_range", "Trade range", "EMA", "Sample", "bps"};
+  if (id == "toxic_flow") {
+    out = StrategyIndicatorProfileInfo{"toxic_flow", "Toxic flow", "Score", "Raw", "score"};
     return true;
   }
-  if (id == "wall_density") {
-    out = StrategyIndicatorProfileInfo{"wall_density", "Wall density", "Current", "Max seen", "notional"};
-    return true;
-  }
-  if (id == "range_position") {
-    out = StrategyIndicatorProfileInfo{"range_position", "Range position", "Position", "Trend", "score"};
+  if (id == "volatility_bps") {
+    out = StrategyIndicatorProfileInfo{"volatility_bps", "Volatility", "EMA", "Sample", "bps"};
     return true;
   }
   return false;
@@ -373,29 +370,38 @@ std::int64_t clampU64ToI64(std::uint64_t value) noexcept {
   return static_cast<std::int64_t>(value > max ? max : value);
 }
 
+std::int64_t strategyIndicatorSecond(std::int64_t tsNs) noexcept {
+  constexpr std::int64_t nsPerSecond = 1000000000ll;
+  return tsNs >= 0 ? tsNs / nsPerSecond : (tsNs - (nsPerSecond - 1ll)) / nsPerSecond;
+}
+
 void appendStrategyIndicator(detail::EngineState& engine,
                              std::int64_t tsNs,
                              const hft_trader::core::StrategyDecisionTrace& trace) {
   if (!strategyIndicatorEnabled(engine)) return;
   detail::JsonStrategyIndicatorPoint row{};
   row.tsNs = tsNs;
-  if (engine.strategyIndicatorProfile == "rolling_volume") {
-    row.valueRaw = clampU64ToI64(trace.rollingPerMinuteRaw);
-    row.auxRaw = clampU64ToI64(trace.volumeEmaPerMinuteRaw);
-  } else if (engine.strategyIndicatorProfile == "trade_range") {
-    row.valueRaw = static_cast<std::int64_t>(trace.tradeRangeEmaBps);
-    row.auxRaw = static_cast<std::int64_t>(trace.tradeRangeSampleBps);
-  } else if (engine.strategyIndicatorProfile == "wall_density") {
-    row.valueRaw = maxWallValue(trace, false);
-    row.auxRaw = maxWallValue(trace, true);
-  } else if (engine.strategyIndicatorProfile == "range_position") {
-    row.valueRaw = static_cast<std::int64_t>(trace.rangePositionBps / 100u);
-    row.auxRaw = static_cast<std::int64_t>(trace.trendScoreRaw);
+  if (engine.strategyIndicatorProfile == "trend_score") {
+    row.valueRaw = static_cast<std::int64_t>(trace.trendScoreRaw);
+    row.auxRaw = static_cast<std::int64_t>(trace.trendRawScore);
+  } else if (engine.strategyIndicatorProfile == "toxic_flow") {
+    row.valueRaw = static_cast<std::int64_t>(trace.toxicFlowScoreRaw);
+    row.auxRaw = static_cast<std::int64_t>(trace.toxicFlowRawScore);
+  } else if (engine.strategyIndicatorProfile == "volatility_bps") {
+    row.valueRaw = static_cast<std::int64_t>(trace.volatilityBps);
+    row.auxRaw = static_cast<std::int64_t>(trace.volatilitySampleBps);
   }
   row.eventCode = indicatorEventCode(trace);
   row.reasonRaw = trace.reasonRaw;
   row.decisionKind = trace.decisionKind;
   row.sideRaw = trace.sideRaw;
+  if ((engine.strategyIndicatorProfile == "trend_score" || engine.strategyIndicatorProfile == "toxic_flow" ||
+       engine.strategyIndicatorProfile == "volatility_bps") &&
+      !engine.strategyIndicator.empty() &&
+      strategyIndicatorSecond(engine.strategyIndicator.back().tsNs) == strategyIndicatorSecond(row.tsNs)) {
+    engine.strategyIndicator.back() = row;
+    return;
+  }
   engine.strategyIndicator.push_back(row);
 }
 
@@ -435,80 +441,6 @@ void recordInputCoverage(detail::EngineState& engine) noexcept {
   if (engine.snapshot.hasPriceLimit.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithPriceLimit;
   if (engine.snapshot.hasDepth.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithDepth;
   if (engine.snapshot.hasOrderBook.raw == hft_trader::core::kAlgoFlagTrue.raw && engine.snapshot.orderBook) ++engine.inputCoverage.cyclesWithOrderBook;
-}
-
-void appendProbeMetric(detail::EngineState& engine,
-                       std::int64_t tsNs,
-                       const hft_trader::core::StrategyDecisionTrace& trace) {
-  detail::JsonProbeMetric row{};
-  row.tsNs = tsNs;
-  row.decisionKind = trace.decisionKind;
-  row.reasonRaw = trace.reasonRaw;
-  row.sideRaw = trace.sideRaw;
-  row.orderCount = trace.orderCount;
-  row.cancelCount = trace.cancelCount;
-  row.bestBidRaw = trace.bestBidRaw;
-  row.bestAskRaw = trace.bestAskRaw;
-  row.tradeRangeSampleBps = trace.tradeRangeSampleBps;
-  row.tradeRangeEmaBps = trace.tradeRangeEmaBps;
-  row.tradeRangeObservedSeconds = trace.tradeRangeObservedSeconds;
-  row.rollingPerMinuteRaw = trace.rollingPerMinuteRaw;
-  row.volumeWindowObservedSeconds = trace.volumeWindowObservedSeconds;
-  row.tradeRangeReady = trace.tradeRangeReady;
-  row.volumeWindowReady = trace.volumeWindowReady;
-  row.hasTrade = engine.snapshot.hasTrade.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
-  row.hasBookTicker = engine.snapshot.hasBookTicker.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
-  row.hasPriceLimit = engine.snapshot.hasPriceLimit.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
-  row.hasDepth = engine.snapshot.hasDepth.raw == hft_trader::core::kAlgoFlagTrue.raw ? 1u : 0u;
-  row.hasOrderBook = engine.snapshot.hasOrderBook.raw == hft_trader::core::kAlgoFlagTrue.raw && engine.snapshot.orderBook ? 1u : 0u;
-  engine.probeMetrics.push_back(row);
-}
-
-bool probeMetricsReady(const std::vector<detail::JsonProbeMetric>& metrics) noexcept {
-  for (const detail::JsonProbeMetric& metric : metrics) {
-    if (metric.tradeRangeReady != 0u && metric.volumeWindowReady != 0u && metric.tradeRangeObservedSeconds != 0u &&
-        metric.volumeWindowObservedSeconds != 0u && metric.rollingPerMinuteRaw != 0u) return true;
-  }
-  return false;
-}
-
-bool probeMetricsUpdatedFromReplay(const std::vector<detail::JsonProbeMetric>& metrics) noexcept {
-  for (const detail::JsonProbeMetric& metric : metrics) {
-    if (metric.hasTrade != 0u && metric.tradeRangeReady != 0u && metric.volumeWindowReady != 0u) return true;
-  }
-  return false;
-}
-
-bool validateBacktestProbeCoverage(const BacktestRunResult& result, const detail::EngineState& engine, std::string& error) {
-  error.clear();
-  const BacktestInputCoverage& coverage = result.inputCoverage;
-  if (coverage.strategyCycles == 0u) error = "backtest_probe did not run strategy cycles";
-  else if (coverage.cyclesWithTrade == 0u) error = "backtest_probe did not observe trade input";
-  else if (coverage.cyclesWithBookTicker == 0u) error = "backtest_probe did not observe bookticker input";
-  else if (coverage.cyclesWithPriceLimit == 0u) error = "backtest_probe did not observe price_limit input";
-  else if (coverage.cyclesWithDepth == 0u) error = "backtest_probe did not observe depth input";
-  else if (coverage.cyclesWithOrderBook == 0u) error = "backtest_probe did not observe reconstructed orderbook input";
-  else if (coverage.seedTradeRows == 0u) error = "backtest_probe did not receive trade warmup rows";
-  else if (coverage.seedM1Candles == 0u || coverage.seedM15Candles == 0u || coverage.seedD1Candles == 0u) {
-    error = "backtest_probe did not receive full m1/m15/d1 candle seed";
-  } else if (engine.probeMetrics.empty()) {
-    error = "backtest_probe did not write probe metrics";
-  } else if (!probeMetricsReady(engine.probeMetrics)) {
-    error = "backtest_probe warmup did not produce ready range and volume metrics";
-  } else if (!probeMetricsUpdatedFromReplay(engine.probeMetrics)) {
-    error = "backtest_probe did not update range and volume metrics from replay trades";
-  } else if (result.orders == 0u) {
-    error = "backtest_probe did not emit an order";
-  } else if (result.fills == 0u) {
-    error = "backtest_probe did not receive simulated fills";
-  } else if (result.userEvents == 0u) {
-    error = "backtest_probe did not receive user events";
-  } else if (result.timerWakeEvents == 0u) {
-    error = "backtest_probe did not receive timer wake events";
-  } else if (!result.strategyClosed) {
-    error = "backtest_probe did not close its position";
-  }
-  return error.empty();
 }
 
 bool runCycle(const StrategyDescriptor& descriptor,
@@ -553,11 +485,10 @@ bool runCycle(const StrategyDescriptor& descriptor,
   ctx.io.clear();
   recordInputCoverage(engine);
   hft_trader::core::StrategyDecisionTrace trace{};
-  const bool captureProbeTrace = isBacktestProbe(descriptor);
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engine);
-  const bool captureRangeTrace = isRangeReversion(descriptor);
-  const bool captureSpreadTrace = emitsStatArbSpreadTrace(descriptor);
-  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
+  const bool captureRangeTrace = false;
+  const bool captureSpreadTrace = emitsArbSpreadTrace(descriptor);
+  if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
@@ -565,15 +496,14 @@ bool runCycle(const StrategyDescriptor& descriptor,
   if (!hft_trader::core::canEmitNewOrder(control)) {
     ctx.io.orderCount = 0u;
   }
-  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
+  if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
     trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
-    if (captureProbeTrace) appendProbeMetric(engine, tsNs, trace);
     if (captureIndicatorTrace) appendStrategyIndicator(engine, tsNs, trace);
     if (captureRangeTrace) appendStrategyRange(engine, tsNs, trace);
     if (captureSpreadTrace) appendStrategySpread(engine, tsNs, trace);
   }
-  if (!ok && (captureProbeTrace || captureSpreadTrace)) return false;
+  if (!ok && captureSpreadTrace) return false;
   detail::applyIntents(engine, ctx.io, tsNs, engine.latency);
   return true;
 }
@@ -701,11 +631,10 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   ctx.io.clear();
   recordInputCoverage(engines[0]);
   hft_trader::core::StrategyDecisionTrace trace{};
-  const bool captureProbeTrace = isBacktestProbe(descriptor);
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engines[0]);
-  const bool captureRangeTrace = isRangeReversion(descriptor);
-  const bool captureSpreadTrace = emitsStatArbSpreadTrace(descriptor);
-  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
+  const bool captureRangeTrace = false;
+  const bool captureSpreadTrace = emitsArbSpreadTrace(descriptor);
+  if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
@@ -713,15 +642,14 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   if (!hft_trader::core::canEmitNewOrder(control)) {
     ctx.io.orderCount = 0u;
   }
-  if (captureProbeTrace || captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
+  if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
     trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
-    if (captureProbeTrace) appendProbeMetric(engines[0], tsNs, trace);
     if (captureIndicatorTrace) appendStrategyIndicator(engines[0], tsNs, trace);
     if (captureRangeTrace) appendStrategyRange(engines[0], tsNs, trace);
     if (captureSpreadTrace) appendStrategySpread(engines[0], tsNs, trace);
   }
-  if (!ok && (captureProbeTrace || captureSpreadTrace)) return false;
+  if (!ok && captureSpreadTrace) return false;
   applyIntentsToLegs(engines, ctx.io, tsNs);
   return true;
 }
@@ -863,7 +791,6 @@ void populateAggregateArtifactEngine(const std::vector<detail::EngineState>& eng
   for (const detail::EngineState& engine : engines) {
     out.orders.insert(out.orders.end(), engine.orders.begin(), engine.orders.end());
     out.fills.insert(out.fills.end(), engine.fills.begin(), engine.fills.end());
-    out.probeMetrics.insert(out.probeMetrics.end(), engine.probeMetrics.begin(), engine.probeMetrics.end());
     out.strategyIndicator.insert(out.strategyIndicator.end(), engine.strategyIndicator.begin(), engine.strategyIndicator.end());
     out.strategyRange.insert(out.strategyRange.end(), engine.strategyRange.begin(), engine.strategyRange.end());
     out.strategySpread.insert(out.strategySpread.end(), engine.strategySpread.begin(), engine.strategySpread.end());
@@ -963,22 +890,30 @@ bool seedTradeWarmupFromSession(const StrategyDescriptor& descriptor,
   }
   if (!request.enabled) return true;
   if (session.tradeHistoryRequestedStartNs <= 0 || session.tradeHistoryRequestedEndNs <= 0) {
+    if (!request.required) return true;
     error = "strategy requires trade warmup but recorder manifest has no trade history coverage";
     return false;
   }
   if (static_cast<std::uint64_t>(session.tradeHistoryRequestedStartNs) > request.startTime.raw) {
+    if (!request.required) return true;
     error = "recorder trade warmup is shorter than strategy requires";
     return false;
   }
   std::vector<cxet::composite::TradeRuntimeV1> rows{};
   hft_trader::runtime::StrategyTradeHistorySeedStats stats{};
   if (!buildTradeWarmupRows(session, rows, stats)) {
+    if (!request.required) return true;
     error = "strategy requires trade warmup but warmup trades are empty";
     return false;
   }
   const hft_trader::runtime::StrategySeedTradesStatus seedStatus = descriptor.seedTrades(state, rows.data(), rows.size(), stats);
   if (seedStatus == hft_trader::runtime::StrategySeedTradesStatus::BadData) {
+    if (!request.required) return true;
     error = "strategy seedTrades rejected warmup data; calculated warmup metrics are not ready";
+    return false;
+  }
+  if (seedStatus == hft_trader::runtime::StrategySeedTradesStatus::WarmupNotReady && request.required) {
+    error = "strategy seedTrades did not produce ready warmup metrics";
     return false;
   }
   return true;
@@ -1511,6 +1446,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)writeEmptyArtifacts();
     return result;
   }
+  result.liveProbe.configured = cfg.liveProbe.configured;
+  result.liveProbe.enabled = cfg.liveProbe.enabled;
+  result.liveProbe.ignored = cfg.liveProbe.configured;
+  result.liveProbe.notionalUsdtE8 = cfg.liveProbe.notionalUsdtE8;
+  result.liveProbe.timeoutMs = cfg.liveProbe.timeoutMs;
+  result.liveProbe.limitOffsetSpreadPct = cfg.liveProbe.limitOffsetSpreadPct;
   result.strategy = request.strategy.empty() ? cfg.strategyType : request.strategy;
   StrategyIndicatorProfileInfo indicatorProfile{};
   if (!resolveStrategyIndicatorProfile(request.indicatorProfile, indicatorProfile)) {
@@ -1579,6 +1520,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       sessionsView = &loadedSessions;
     }
   }
+  if (sessionsView != nullptr) appendSessionWarnings(result, *sessionsView);
   if (!isOk(result.status)) {
     result.error = error;
     (void)writeEmptyArtifacts();
@@ -1676,13 +1618,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (!descriptor->seedHistory(state.data(), history, &stats)) {
       result.status = Status::InvalidArgument;
       result.error = "strategy seedHistory failed";
-      (void)writeEmptyArtifacts();
-      return result;
-    }
-    if (isBacktestProbe(*descriptor) &&
-        (seedCoverage.seedM1Candles == 0u || seedCoverage.seedM15Candles == 0u || seedCoverage.seedD1Candles == 0u)) {
-      result.status = Status::CorruptData;
-      result.error = "backtest_probe did not receive full m1/m15/d1 candle seed";
       (void)writeEmptyArtifacts();
       return result;
     }
@@ -1840,16 +1775,15 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
   if (result.firstTsNs == std::numeric_limits<std::int64_t>::max()) result.firstTsNs = session.firstTsNs;
   result.events = timeline.size();
-  const bool captureProbeTrace = isBacktestProbe(*descriptor);
   const bool captureIndicatorTrace = !result.indicatorProfile.empty();
-  const bool captureRangeTrace = isRangeReversion(*descriptor);
-  const bool captureSpreadTrace = emitsStatArbSpreadTrace(*descriptor);
+  const bool captureRangeTrace = false;
+  const bool captureSpreadTrace = emitsArbSpreadTrace(*descriptor);
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
-      reserveEngineStorage(legEngine, timeline.size(), captureProbeTrace, captureIndicatorTrace, captureRangeTrace, captureSpreadTrace);
+      reserveEngineStorage(legEngine, timeline.size(), captureIndicatorTrace, captureRangeTrace, captureSpreadTrace);
     }
   } else {
-    reserveEngineStorage(engine, timeline.size(), captureProbeTrace, captureIndicatorTrace, captureRangeTrace, captureSpreadTrace);
+    reserveEngineStorage(engine, timeline.size(), captureIndicatorTrace, captureRangeTrace, captureSpreadTrace);
   }
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
@@ -2141,11 +2075,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (result.error.empty()) result.error = "leg liquidated";
     Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
     if (!isOk(writeStatus)) result.status = writeStatus;
-    return result;
-  }
-  if (result.strategy == "backtest_probe" && !validateBacktestProbeCoverage(result, engine, result.error)) {
-    result.status = Status::CorruptData;
-    (void)writeArtifacts(engine);
     return result;
   }
   result.status = Status::Ok;

@@ -1,162 +1,281 @@
 #include "hft_backtest/strategy_metadata.hpp"
 
+#include "hft_trader/runtime/GeneratedStrategyRegistry.hpp"
+
+#include <cctype>
+#include <cstddef>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
+
 namespace hft_backtest {
 namespace {
 
-inline constexpr StrategyMetadata kStrategies[] = {
-    StrategyMetadata{
-        .id = "spread_maker1and2",
-        .displayNameRu = "Спред-мейкер 1/2",
-        .configTemplateFile = "1and2.ini",
-        .minSessionCount = 1u,
-        .maxSessionCount = 1u,
-        .paramCount = 6u,
-        .params = {
-            StrategyParamMetadata{"distance_bps", "Дистанция котировки, bps", "На сколько базисных пунктов отступать от текущего bid/ask при выставлении лимитных заявок.", "250", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"trigger_bps", "Триггер перекотировки, bps", "Минимальное движение базового bid/ask в bps, после которого стратегия пересчитывает и заменяет котировку.", "10", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"refresh_ms", "Минимальный интервал обновления, мс", "Защита от слишком частой перекотировки. 0 означает обновлять сразу при выполнении триггера.", "0", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"close_delay_us", "Задержка закрытия, мкс", "Пауза перед reduce-only market close после появления позиции.", "2000000", StrategyParamKind::Uint, 0u, false, true, true},
-            StrategyParamMetadata{"amount_qty", "Размер в котируемой валюте", "Размер заявки как сумма в quote currency; стратегия сама переведет его в количество по цене и шагу инструмента.", "8", StrategyParamKind::DecimalQuoteAmount, 1u, true, false, true},
-            StrategyParamMetadata{"order_qty", "Размер в базовой валюте", "Фиксированное количество base asset. Используется вместо размера в quote currency.", "0.001", StrategyParamKind::DecimalAmount, 1u, true, false, false},
-        },
-        .paramGroupCount = 1u,
-        .paramGroups = {StrategyParamGroupMetadata{1u, "sizing_mode"}},
-    },
-    StrategyMetadata{
-        .id = "backtest_probe",
-        .displayNameRu = "Диагностический backtest probe",
-        .configTemplateFile = "probe.ini",
-        .minSessionCount = 1u,
-        .maxSessionCount = 1u,
-        .indicatorCount = 2u,
-        .indicators = {
-            StrategyIndicatorMetadata{"trade_range", "Trade range"},
-            StrategyIndicatorMetadata{"rolling_volume", "Rolling volume"},
-        },
-    },
-    StrategyMetadata{
-        .id = "two_leg_probe",
-        .displayNameRu = "Диагностический two-leg probe",
-        .configTemplateFile = "two_leg_probe.ini",
-        .minSessionCount = 2u,
-        .maxSessionCount = 2u,
-    },
-    StrategyMetadata{
-        .id = "stat_arb_bestside",
-        .displayNameRu = "Стат-арбитраж best-side",
-        .configTemplateFile = "stat_arb_bestside.ini",
-        .minSessionCount = 2u,
-        .maxSessionCount = 2u,
-        .paramCount = 5u,
-        .params = {
-            StrategyParamMetadata{"ema_window_ms", "Окно EMA, мс", "Окно EMA нормального spread отклонения.", "5000", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"entry_edge_bps", "Запас входа, bps", "Signed edge от cost boundary: плюс = дальше снаружи границы, минус = ближе внутри границы.", "0", StrategyParamKind::DecimalQuoteAmount, 0u, true, false, true},
-            StrategyParamMetadata{"exit_edge_bps", "Запас выхода, bps", "Signed edge от close boundary: плюс = дальше снаружи границы, минус = ближе внутри границы.", "0", StrategyParamKind::DecimalQuoteAmount, 0u, true, false, true},
-            StrategyParamMetadata{"amount_qty", "Размер в котируемой валюте", "USD/quote notional для расчета общего base qty по самой дорогой ноге с округлением до общего лота обеих ног.", "10", StrategyParamKind::DecimalQuoteAmount, 1u, true, false, true},
-            StrategyParamMetadata{"order_qty", "Размер в базовой валюте", "Фиксированное количество base asset для каждой ноги.", "0.001", StrategyParamKind::DecimalAmount, 1u, true, false, false},
-        },
-        .paramGroupCount = 1u,
-        .paramGroups = {StrategyParamGroupMetadata{1u, "sizing_mode"}},
-    },
-    StrategyMetadata{
-        .id = "stat_arb_band",
-        .displayNameRu = "Стат-арбитраж band",
-        .configTemplateFile = "stat_arb_band.ini",
-        .minSessionCount = 2u,
-        .maxSessionCount = 2u,
-        .paramCount = 5u,
-        .params = {
-            StrategyParamMetadata{"ema_window_ms", "Окно EMA, мс", "Окно EMA центральной линии spread band.", "5000", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"entry_edge_bps", "Запас входа, bps", "Signed edge от band boundary: плюс = дальше снаружи серой границы, минус = ближе внутри серой границы.", "0", StrategyParamKind::DecimalQuoteAmount, 0u, true, false, true},
-            StrategyParamMetadata{"exit_edge_bps", "Запас выхода, bps", "Signed edge от противоположной band boundary: плюс = дальше снаружи серой границы, минус = ближе внутри серой границы.", "0", StrategyParamKind::DecimalQuoteAmount, 0u, true, false, true},
-            StrategyParamMetadata{"amount_qty", "Размер в котируемой валюте", "USD/quote notional для расчета общего base qty по самой дорогой ноге с округлением до общего лота обеих ног.", "10", StrategyParamKind::DecimalQuoteAmount, 1u, true, false, true},
-            StrategyParamMetadata{"order_qty", "Размер в базовой валюте", "Фиксированное количество base asset для каждой ноги.", "0.001", StrategyParamKind::DecimalAmount, 1u, true, false, false},
-        },
-        .paramGroupCount = 1u,
-        .paramGroups = {StrategyParamGroupMetadata{1u, "sizing_mode"}},
-    },
-    StrategyMetadata{
-        .id = "stat_arb_boundary_maker",
-        .displayNameRu = "Стат-арбитраж boundary maker",
-        .configTemplateFile = "stat_arb_boundary_maker.ini",
-        .minSessionCount = 2u,
-        .maxSessionCount = 2u,
-        .paramCount = 6u,
-        .params = {
-            StrategyParamMetadata{"ema_window_ms", "Окно EMA, мс", "Окно EMA центральной линии spread boundary.", "5000", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"entry_edge_bps", "Запас входа, bps", "Пассивные лимитки ставятся от EMA spread boundary с учетом costBand и этого edge.", "3", StrategyParamKind::DecimalQuoteAmount, 0u, true, false, true},
-            StrategyParamMetadata{"trigger_edge_bps", "Триггер перекотировки, bps", "Минимальное изменение entry boundary от EMA, после которого стратегия заменяет пассивные лимитки. 0 обновляет при любом изменении цены.", "1", StrategyParamKind::DecimalQuoteAmount, 0u, true, false, true},
-            StrategyParamMetadata{"exit_edge_bps", "Запас выхода, bps", "Signed edge от противоположной spread boundary для taker-taker закрытия.", "-5", StrategyParamKind::DecimalQuoteAmount, 0u, true, false, true},
-            StrategyParamMetadata{"amount_qty", "Размер в котируемой валюте", "USD/quote notional для расчета общего base qty по самой дорогой ноге с округлением до общего лота обеих ног.", "10", StrategyParamKind::DecimalQuoteAmount, 1u, true, false, true},
-            StrategyParamMetadata{"order_qty", "Размер в базовой валюте", "Фиксированное количество base asset для каждой ноги.", "0.001", StrategyParamKind::DecimalAmount, 1u, true, false, false},
-        },
-        .paramGroupCount = 1u,
-        .paramGroups = {StrategyParamGroupMetadata{1u, "sizing_mode"}},
-    },
-    StrategyMetadata{
-        .id = "stat_arb_band_ladder",
-        .displayNameRu = "Стат-арбитраж band ladder",
-        .configTemplateFile = "stat_arb_band_ladder.ini",
-        .minSessionCount = 2u,
-        .maxSessionCount = 2u,
-        .paramCount = 7u,
-        .params = {
-            StrategyParamMetadata{"ema_window_ms", "Окно EMA, мс", "Окно EMA центральной линии spread band.", "5000", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"entry_edge_bps", "Запас входа, bps", "Первый threshold по edge_after_cost от band boundary.", "0", StrategyParamKind::DecimalQuoteAmount, 0u, true, false, true},
-            StrategyParamMetadata{"ladder_step_bps", "Шаг ladder, bps", "Дополнительный edge до следующего уровня при расширении spread в сторону открытой ladder-позиции.", "2", StrategyParamKind::DecimalQuoteAmount, 0u, true, false, true},
-            StrategyParamMetadata{"exit_edge_bps", "Запас выхода, bps", "Signed edge от противоположной band boundary для полного reduce-only выхода.", "0", StrategyParamKind::DecimalQuoteAmount, 0u, true, false, true},
-            StrategyParamMetadata{"max_ladder_levels", "Макс. уровней ladder", "Сколько per-level входов можно набрать в одну сторону до полного выхода.", "3", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"amount_qty", "Размер в котируемой валюте", "USD/quote notional для расчета per-level base qty по самой дорогой ноге с округлением до общего лота обеих ног.", "10", StrategyParamKind::DecimalQuoteAmount, 1u, true, false, true},
-            StrategyParamMetadata{"order_qty", "Размер в базовой валюте", "Фиксированное per-level количество base asset для каждой ноги.", "0.001", StrategyParamKind::DecimalAmount, 1u, true, false, false},
-        },
-        .paramGroupCount = 1u,
-        .paramGroups = {StrategyParamGroupMetadata{1u, "sizing_mode"}},
-    },
-    StrategyMetadata{
-        .id = "range_reversion",
-        .displayNameRu = "Ренж-реверсия",
-        .configTemplateFile = "range_reversion.ini",
-        .minSessionCount = 1u,
-        .maxSessionCount = 1u,
-        .paramCount = 12u,
-        .params = {
-            StrategyParamMetadata{"range_window_ms", "Окно ренжа, мс", "Сколько миллисекунд держать в rolling high/low диапазоне.", "30000", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"range_bucket_ms", "Bucket ренжа, мс", "Размер временного bucket для сырого high/low перед сглаживанием.", "250", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"range_smooth_shift", "Сглаживание ренжа, shift", "Integer smoothing: граница += (raw - граница) >> shift. 0 означает без сглаживания.", "3", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"trend_lookback_ms", "Lookback тренда, мс", "Окно для диагностического trend score по наклону mid ренжа.", "5000", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"entry_edge_pct", "Вход от края, %", "Покупать у нижнего края и шортить у верхнего края, если позиция цены внутри ренжа ближе этого процента к границе.", "20", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"exit_neutral_band_pct", "Выход около mid, %", "Закрывать позицию reduce-only limit, когда цена возвращается в нейтральную зону вокруг середины ренжа.", "5", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"min_range_bps", "Минимальный ренж, bps", "Не торговать слишком узкий диапазон.", "3", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"max_spread_bps", "Максимальный spread, bps", "0 отключает фильтр; иначе стратегия не выставляется при большем spread.", "8", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"post_only_offset_ticks", "Post-only offset, ticks", "На сколько ticks отступать от bid/ask для maker limit.", "0", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"refresh_ms", "Минимальный интервал replace, мс", "0 означает обновлять лимитку сразу при новом сигнале.", "0", StrategyParamKind::Uint, 0u, true, false, true},
-            StrategyParamMetadata{"amount_qty", "Размер в котируемой валюте", "Размер заявки как сумма в quote currency.", "200", StrategyParamKind::DecimalQuoteAmount, 1u, true, false, true},
-            StrategyParamMetadata{"order_qty", "Размер в базовой валюте", "Фиксированное количество base asset. Используется вместо amount_qty.", "0.001", StrategyParamKind::DecimalAmount, 1u, true, false, false},
-        },
-        .paramGroupCount = 1u,
-        .paramGroups = {StrategyParamGroupMetadata{1u, "sizing_mode"}},
-        .indicatorCount = 1u,
-        .indicators = {
-            StrategyIndicatorMetadata{"range_position", "Range position"},
-        },
-    },
+#ifndef HFT_BACKTEST_TRADER_SOURCE_DIR
+#define HFT_BACKTEST_TRADER_SOURCE_DIR "../hft-trader"
+#endif
+
+struct IniTemplate {
+  std::string fileName{};
+  std::string strategyType{};
+  std::vector<std::pair<std::string, std::string>> strategyParams{};
+  std::size_t recorderLegCount{1u};
 };
+
+struct MetadataCache {
+  std::deque<std::string> strings{};
+  std::vector<StrategyMetadata> strategies{};
+};
+
+std::string trim(std::string_view text) {
+  std::size_t begin = 0u;
+  while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin])) != 0) ++begin;
+  std::size_t end = text.size();
+  while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1u])) != 0) --end;
+  return std::string{text.substr(begin, end - begin)};
+}
+
+std::string lower(std::string text) {
+  for (char& ch : text) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  return text;
+}
+
+std::string stripComment(std::string_view line) {
+  const std::size_t hash = line.find('#');
+  if (hash == std::string_view::npos) return std::string{line};
+  return std::string{line.substr(0u, hash)};
+}
+
+std::string commentedTemplateValue(std::string_view line) {
+  std::string text = trim(line);
+  if (text.empty() || text.front() != '#') return {};
+  text.erase(text.begin());
+  return trim(text);
+}
+
+bool isStrategyParamKey(std::string_view key) noexcept {
+  return key != "type" && key != "enabled" && key != "inputs";
+}
+
+bool isUnsignedIntegerText(std::string_view value) noexcept {
+  if (value.empty()) return false;
+  for (char ch : value) {
+    if (ch < '0' || ch > '9') return false;
+  }
+  return true;
+}
+
+StrategyParamKind inferParamKind(std::string_view key, std::string_view value) noexcept {
+  if (key.find("qty") != std::string_view::npos) {
+    return key.find("amount") != std::string_view::npos ? StrategyParamKind::DecimalQuoteAmount
+                                                        : StrategyParamKind::DecimalAmount;
+  }
+  if (value.find('.') != std::string_view::npos || value.find('-') != std::string_view::npos) {
+    return StrategyParamKind::DecimalQuoteAmount;
+  }
+  return isUnsignedIntegerText(value) ? StrategyParamKind::Uint : StrategyParamKind::Text;
+}
+
+std::size_t commaSeparatedCount(std::string_view text) noexcept {
+  std::size_t count = 0u;
+  bool hasToken = false;
+  for (char ch : text) {
+    if (ch == ',') {
+      if (hasToken) ++count;
+      hasToken = false;
+      continue;
+    }
+    if (std::isspace(static_cast<unsigned char>(ch)) == 0) hasToken = true;
+  }
+  if (hasToken) ++count;
+  return count;
+}
+
+bool parseTemplateFile(const std::filesystem::path& path, IniTemplate& out) {
+  out = IniTemplate{};
+  out.fileName = path.filename().string();
+  std::ifstream in(path);
+  if (!in) return false;
+
+  std::string section{};
+  std::string line{};
+  while (std::getline(in, line)) {
+    const std::string templateComment = commentedTemplateValue(line);
+    const bool isTemplateComment = !templateComment.empty();
+    const std::string clean = isTemplateComment ? templateComment : trim(stripComment(line));
+    if (clean.empty()) continue;
+    if (!isTemplateComment && clean.front() == '[' && clean.back() == ']') {
+      section = lower(trim(std::string_view{clean}.substr(1u, clean.size() - 2u)));
+      continue;
+    }
+
+    const std::size_t eq = clean.find('=');
+    if (eq == std::string::npos) continue;
+    const std::string key = lower(trim(std::string_view{clean}.substr(0u, eq)));
+    const std::string value = trim(std::string_view{clean}.substr(eq + 1u));
+    if (section == "strategy") {
+      if (!isTemplateComment && key == "type") {
+        out.strategyType = value;
+      } else if (isStrategyParamKey(key)) {
+        out.strategyParams.push_back({key, value});
+      }
+    } else if (!isTemplateComment && section == "portfolio.recorder" && key == "legs") {
+      const std::size_t legCount = commaSeparatedCount(value);
+      if (legCount > out.recorderLegCount) out.recorderLegCount = legCount;
+    }
+  }
+  return !out.strategyType.empty();
+}
+
+std::vector<IniTemplate> loadTemplates() {
+  std::vector<IniTemplate> out{};
+  const std::filesystem::path root{HFT_BACKTEST_TRADER_SOURCE_DIR};
+  std::error_code ec{};
+  std::filesystem::directory_iterator it(root, ec);
+  if (ec) return out;
+  for (const std::filesystem::directory_entry& entry : it) {
+    if (!entry.is_regular_file(ec) || ec) {
+      ec.clear();
+      continue;
+    }
+    const std::filesystem::path path = entry.path();
+    if (path.extension() != ".ini") continue;
+    IniTemplate parsed{};
+    if (parseTemplateFile(path, parsed)) out.push_back(std::move(parsed));
+  }
+  return out;
+}
+
+const IniTemplate* templateForStrategy(const std::vector<IniTemplate>& templates, std::string_view strategy) noexcept {
+  for (const IniTemplate& candidate : templates) {
+    if (candidate.strategyType == strategy) return &candidate;
+  }
+  return nullptr;
+}
+
+const char* keepString(MetadataCache& cache, std::string value) {
+  cache.strings.push_back(std::move(value));
+  return cache.strings.back().c_str();
+}
+
+void appendParam(MetadataCache& cache,
+                 StrategyMetadata& metadata,
+                 const std::string& key,
+                 const std::string& value) {
+  if (metadata.paramCount >= kStrategyMetadataMaxParams) return;
+  for (std::size_t i = 0u; i < metadata.paramCount; ++i) {
+    if (metadata.params[i].key != nullptr && key == metadata.params[i].key) return;
+  }
+  StrategyParamMetadata& param = metadata.params[metadata.paramCount++];
+  param.key = keepString(cache, key);
+  param.labelRu = param.key;
+  param.descriptionRu = "";
+  param.defaultValue = keepString(cache, value);
+  param.kind = inferParamKind(key, value);
+  if (key == "amount_qty" || key == "order_qty") {
+    param.exclusiveGroup = 1u;
+    param.defaultActive = key == "amount_qty";
+  }
+}
+
+void applySizingGroupIfNeeded(StrategyMetadata& metadata) noexcept {
+  bool hasAmount = false;
+  bool hasOrder = false;
+  for (std::size_t i = 0u; i < metadata.paramCount; ++i) {
+    if (metadata.params[i].key == nullptr) continue;
+    if (std::string_view{metadata.params[i].key} == "amount_qty") hasAmount = true;
+    if (std::string_view{metadata.params[i].key} == "order_qty") hasOrder = true;
+  }
+  if (!hasAmount || !hasOrder || metadata.paramGroupCount >= kStrategyMetadataMaxParamGroups) return;
+  metadata.paramGroups[metadata.paramGroupCount++] = StrategyParamGroupMetadata{1u, "sizing_mode"};
+}
+
+void applyStrategySpecificMetadata(StrategyMetadata& metadata) noexcept {
+  if (metadata.id == nullptr) return;
+  const std::string_view id{metadata.id};
+  if (id == "spread_maker1and2") {
+    metadata.displayNameRu = "Спред-мейкер 1/2";
+  } else if (id == "stat_arb_band_ladder") {
+    metadata.displayNameRu = "Стат-арбитраж band ladder";
+  } else if (id == "trend_probe") {
+    metadata.displayNameRu = "Диагностика тренда";
+    metadata.indicatorCount = 1u;
+    metadata.indicators[0] = StrategyIndicatorMetadata{"trend_score", "Trend score"};
+  } else if (id == "toxic_flow_probe") {
+    metadata.displayNameRu = "Диагностика toxic flow";
+    metadata.indicatorCount = 1u;
+    metadata.indicators[0] = StrategyIndicatorMetadata{"toxic_flow", "Toxic flow"};
+  } else if (id == "volatility_probe") {
+    metadata.displayNameRu = "Диагностика волатильности";
+    metadata.indicatorCount = 1u;
+    metadata.indicators[0] = StrategyIndicatorMetadata{"volatility_bps", "Volatility"};
+  }
+}
+
+MetadataCache buildMetadataCache() {
+  MetadataCache cache{};
+  const std::vector<IniTemplate> templates = loadTemplates();
+  const std::size_t count = hft_trader::runtime::strategyDescriptorCount();
+  cache.strategies.reserve(count);
+  for (std::size_t i = 0u; i < count; ++i) {
+    const hft_trader::runtime::StrategyDescriptor* descriptor = hft_trader::runtime::strategyDescriptorAt(i);
+    if (descriptor == nullptr || descriptor->name == nullptr || descriptor->name[0] == '\0') continue;
+
+    StrategyMetadata metadata{};
+    metadata.id = keepString(cache, descriptor->name);
+    metadata.displayNameRu = metadata.id;
+    metadata.minSessionCount = 1u;
+    metadata.maxSessionCount = 1u;
+
+    const IniTemplate* ini = templateForStrategy(templates, descriptor->name);
+    if (ini != nullptr) {
+      metadata.configTemplateFile = keepString(cache, ini->fileName);
+      const std::size_t legCount = ini->recorderLegCount == 0u ? 1u : ini->recorderLegCount;
+      const std::size_t boundedLegCount = legCount > 255u ? 255u : legCount;
+      metadata.minSessionCount = static_cast<std::uint8_t>(boundedLegCount);
+      metadata.maxSessionCount = static_cast<std::uint8_t>(boundedLegCount);
+      for (const auto& [key, value] : ini->strategyParams) appendParam(cache, metadata, key, value);
+      applySizingGroupIfNeeded(metadata);
+    }
+
+    applyStrategySpecificMetadata(metadata);
+    cache.strategies.push_back(metadata);
+  }
+  return cache;
+}
+
+const MetadataCache& metadataCache() noexcept {
+  static const MetadataCache cache = [] {
+    try {
+      return buildMetadataCache();
+    } catch (...) {
+      return MetadataCache{};
+    }
+  }();
+  return cache;
+}
 
 }  // namespace
 
 const StrategyMetadata* findStrategyMetadata(std::string_view id) noexcept {
-  for (const StrategyMetadata& metadata : kStrategies) {
-    if (metadata.id && id == metadata.id) return &metadata;
+  const MetadataCache& cache = metadataCache();
+  for (const StrategyMetadata& metadata : cache.strategies) {
+    if (metadata.id != nullptr && id == std::string_view{metadata.id}) return &metadata;
   }
   return nullptr;
 }
 
 const StrategyMetadata* strategyMetadataAt(std::size_t index) noexcept {
-  return index < strategyMetadataCount() ? &kStrategies[index] : nullptr;
+  const MetadataCache& cache = metadataCache();
+  return index < cache.strategies.size() ? &cache.strategies[index] : nullptr;
 }
 
 std::size_t strategyMetadataCount() noexcept {
-  return sizeof(kStrategies) / sizeof(kStrategies[0]);
+  return metadataCache().strategies.size();
 }
 
 }  // namespace hft_backtest

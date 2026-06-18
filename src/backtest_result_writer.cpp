@@ -219,40 +219,6 @@ bool writeRiskSnapshots(const std::filesystem::path& path, const EngineState& en
   return out.good();
 }
 
-bool writeProbeMetrics(const std::filesystem::path& path, const EngineState& engine) noexcept {
-  if (engine.probeMetrics.empty()) {
-    std::error_code ec;
-    std::filesystem::remove(path, ec);
-    return true;
-  }
-  std::ofstream out(path, std::ios::out | std::ios::trunc);
-  if (!out.is_open()) return false;
-  for (const JsonProbeMetric& row : engine.probeMetrics) {
-    out << '[' << row.tsNs
-        << ',' << static_cast<unsigned>(row.decisionKind)
-        << ',' << static_cast<unsigned>(row.reasonRaw)
-        << ',' << static_cast<unsigned>(row.sideRaw)
-        << ',' << row.orderCount
-        << ',' << row.cancelCount
-        << ',' << row.bestBidRaw
-        << ',' << row.bestAskRaw
-        << ',' << row.tradeRangeSampleBps
-        << ',' << row.tradeRangeEmaBps
-        << ',' << row.tradeRangeObservedSeconds
-        << ',' << row.rollingPerMinuteRaw
-        << ',' << row.volumeWindowObservedSeconds
-        << ',' << static_cast<unsigned>(row.tradeRangeReady)
-        << ',' << static_cast<unsigned>(row.volumeWindowReady)
-        << ',' << static_cast<unsigned>(row.hasTrade)
-        << ',' << static_cast<unsigned>(row.hasBookTicker)
-        << ',' << static_cast<unsigned>(row.hasPriceLimit)
-        << ',' << static_cast<unsigned>(row.hasDepth)
-        << ',' << static_cast<unsigned>(row.hasOrderBook)
-        << "]\n";
-  }
-  return out.good();
-}
-
 bool writeStrategyIndicator(const std::filesystem::path& path, const EngineState& engine) noexcept {
   if (engine.strategyIndicator.empty()) {
     std::error_code ec;
@@ -414,6 +380,16 @@ void writeLegsArray(std::ostream& out, const BacktestRunResult& result, const ch
   out << ']';
 }
 
+void writeMessageArray(std::ostream& out, const std::vector<std::string>& messages) {
+  const char q = '"';
+  out << '[';
+  for (std::size_t i = 0u; i < messages.size(); ++i) {
+    if (i != 0u) out << ", ";
+    out << '{' << q << "message" << q << ": " << quote(messages[i]) << '}';
+  }
+  out << ']';
+}
+
 bool writeRunConfig(const std::filesystem::path& resultDir, const std::filesystem::path& configPath) noexcept {
   if (configPath.empty()) return true;
   const std::filesystem::path target = resultDir / "config.ini";
@@ -467,6 +443,16 @@ bool writeManifest(const std::filesystem::path& path,
       << ", " << q << "jitter_us" << q << ": " << result.limitOrderLatency.jitterUs << "}"
       << ", " << q << "order_latency_us" << q << ": " << result.orderLatencyUs
       << ", " << q << "cancel_latency_us" << q << ": " << result.cancelLatencyUs << "},\n";
+  if (result.liveProbe.configured) {
+    out << "  " << q << "live_probe" << q << ": {"
+        << q << "configured" << q << ": true"
+        << ", " << q << "enabled" << q << ": " << (result.liveProbe.enabled ? "true" : "false")
+        << ", " << q << "mode" << q << ": " << q << "ignored_backtest" << q
+        << ", " << q << "notional_usdt_e8" << q << ": " << result.liveProbe.notionalUsdtE8
+        << ", " << q << "timeout_ms" << q << ": " << result.liveProbe.timeoutMs
+        << ", " << q << "limit_offset_spread_pct" << q << ": " << result.liveProbe.limitOffsetSpreadPct
+        << "},\n";
+  }
   out << "  " << q << "streams" << q << ": {\n";
   out << "    " << q << "order_lifetimes" << q << ": {" << q << "path" << q << ": " << q << "order_lifetimes.jsonl" << q
       << ", " << q << "row_schema" << q << ": " << q << "[ts_start_ns,ts_end_ns,price_e8,qty_e8,side,open_ended,leg_index]" << q
@@ -504,14 +490,7 @@ bool writeManifest(const std::filesystem::path& path,
         << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,spread_bps_e8,ema_bps_e8,deviation_bps_e8,cost_band_bps_e8,edge_after_cost_bps_e8,direction,decision_kind,reason_raw]" << q
         << ", " << q << "rows" << q << ": " << engine.strategySpread.size() << "}";
   }
-  if (!engine.probeMetrics.empty()) {
-    out << ",\n";
-    out << "    " << q << "probe_metrics" << q << ": {" << q << "path" << q << ": " << q << "probe_metrics.jsonl" << q
-        << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,decision_kind,reason,side,orders,cancels,best_bid,best_ask,trade_range_sample_bps,trade_range_ema_bps,trade_range_observed_seconds,rolling_per_minute_raw,volume_observed_seconds,trade_range_ready,volume_ready,has_trade,has_bookticker,has_price_limit,has_depth,has_orderbook]" << q
-        << ", " << q << "rows" << q << ": " << engine.probeMetrics.size() << "}\n";
-  } else {
-    out << "\n";
-  }
+  out << "\n";
   out << "  },\n";
   out << "  " << q << "enums" << q << ": {\n";
   out << "    " << q << "side" << q << ": {" << q << "0" << q << ": " << q << "sell" << q << ", " << q << "1" << q << ": " << q << "buy" << q << "},\n";
@@ -527,9 +506,17 @@ bool writeManifest(const std::filesystem::path& path,
     writeLegsArray(out, result, "  ");
   }
   out << ",\n";
+  out << "  " << q << "warnings" << q << ": ";
+  writeMessageArray(out, result.warnings);
+  out << ",\n";
   out << "  " << q << "errors" << q << ": ";
-  if (result.error.empty()) out << "[]\n";
-  else out << "[{" << q << "message" << q << ": " << quote(result.error) << "}]\n";
+  if (result.error.empty()) {
+    out << "[]\n";
+  } else {
+    const std::vector<std::string> errors{result.error};
+    writeMessageArray(out, errors);
+    out << '\n';
+  }
   out << "}\n";
   return out.good();
 }
@@ -551,7 +538,8 @@ Status writeResult(const BacktestRunResult& result,
   if (!writeEquity(result.resultPath / "equity.jsonl", engine)) return Status::IoError;
   if (!writeLegEquityStreams(result.resultPath, legEngines)) return Status::IoError;
   if (!writeRiskSnapshots(result.resultPath / "risk_snapshots.jsonl", engine)) return Status::IoError;
-  if (!writeProbeMetrics(result.resultPath / "probe_metrics.jsonl", engine)) return Status::IoError;
+  std::filesystem::remove(result.resultPath / "probe_metrics.jsonl", ec);
+  if (ec) return Status::IoError;
   if (!writeStrategyIndicator(result.resultPath / "strategy_indicator.jsonl", engine)) return Status::IoError;
   if (!writeStrategyRange(result.resultPath / "strategy_range.jsonl", engine)) return Status::IoError;
   if (!writeStrategySpread(result.resultPath / "strategy_spread.jsonl", engine)) return Status::IoError;

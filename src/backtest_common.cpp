@@ -48,6 +48,7 @@ ExchangeId exchangeFromText(const std::string& value) noexcept {
   if (value == "kucoin") return canon::kExchangeIdKucoin;
   if (value == "gate") return canon::kExchangeIdGate;
   if (value == "bitget") return canon::kExchangeIdBitget;
+  if (value == "aster") return canon::kExchangeIdAster;
   if (value == "okx") return canon::kExchangeIdOkx;
   return canon::kExchangeIdUnknown;
 }

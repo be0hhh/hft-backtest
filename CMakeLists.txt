@@ -86,7 +86,10 @@ add_library(hft_backtest::core ALIAS hft_backtest_core)
 target_include_directories(hft_backtest_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(hft_backtest_core PUBLIC hft_trader_runtime cxet_lib Threads::Threads)
 target_compile_features(hft_backtest_core PUBLIC cxx_std_23)
-target_compile_definitions(hft_backtest_core PRIVATE HFT_BACKTEST_BUILDING_LIBRARY=1)
+target_compile_definitions(hft_backtest_core PRIVATE
+  HFT_BACKTEST_BUILDING_LIBRARY=1
+  HFT_BACKTEST_TRADER_SOURCE_DIR="${HFT_BACKTEST_TRADER_ROOT}"
+)
 target_compile_options(hft_backtest_core PRIVATE
   $<$<CONFIG:Release>:-O3>
   $<$<AND:$<CONFIG:Release>,$<NOT:$<BOOL:${CXET_PORTABLE_BUILD}>>>:-march=native>
