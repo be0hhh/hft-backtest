@@ -78,6 +78,10 @@ BacktestLatencyConfig latencyConfigFromRequest(const BacktestRunRequest& request
   out.limitOrder = request.limitOrderLatency.baseUs != 0u || request.limitOrderLatency.jitterUs != 0u
       ? request.limitOrderLatency
       : legacyProfile(request.orderLatencyUs);
+  out.cancelOrder = request.cancelOrderLatency.baseUs != 0u || request.cancelOrderLatency.jitterUs != 0u
+      ? request.cancelOrderLatency
+      : (request.cancelLatencyUs != 1000u ? legacyProfile(request.cancelLatencyUs) : out.limitOrder);
+  out.userData = request.userDataLatency;
   out.seed = request.latencySeed;
   return out;
 }
@@ -87,6 +91,8 @@ void initLatencyRuntime(BacktestLatencyRuntime& runtime, const BacktestLatencyCo
   runtime.marketDataState = mixSeed(config.seed, 0x6d61726b65745f64ull);
   runtime.marketOrderState = mixSeed(config.seed, 0x6d61726b65745f6full);
   runtime.limitOrderState = mixSeed(config.seed, 0x6c696d69745f6full);
+  runtime.cancelOrderState = mixSeed(config.seed, 0x63616e63656c5f6full);
+  runtime.userDataState = mixSeed(config.seed, 0x757365725f646174ull);
 }
 
 std::uint64_t latencyProfileMaxUs(BacktestLatencyProfile profile) noexcept {
@@ -100,6 +106,8 @@ std::uint64_t sampleLatencyUs(BacktestLatencyRuntime& runtime, BacktestLatencyCh
     case BacktestLatencyChannel::MarketData: return sampleProfile(runtime.config.marketData, runtime.marketDataState);
     case BacktestLatencyChannel::MarketOrder: return sampleProfile(runtime.config.marketOrder, runtime.marketOrderState);
     case BacktestLatencyChannel::LimitOrder: return sampleProfile(runtime.config.limitOrder, runtime.limitOrderState);
+    case BacktestLatencyChannel::CancelOrder: return sampleProfile(runtime.config.cancelOrder, runtime.cancelOrderState);
+    case BacktestLatencyChannel::UserData: return sampleProfile(runtime.config.userData, runtime.userDataState);
     default: return 0u;
   }
 }

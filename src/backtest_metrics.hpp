@@ -3,6 +3,7 @@
 #include "backtest_engine.hpp"
 
 #include <cstdint>
+#include <vector>
 
 namespace hft_backtest::detail {
 
@@ -13,5 +14,7 @@ struct BacktestExcursionMetrics {
 };
 
 BacktestExcursionMetrics calculateExcursionMetrics(const EngineState& engine) noexcept;
+BacktestExcursionMetrics calculatePortfolioExcursionMetrics(const std::vector<EngineState>& engines);
+std::vector<std::int64_t> buildPortfolioTotalPnlCurveE8(const std::vector<EngineState>& engines);
 
 }  // namespace hft_backtest::detail

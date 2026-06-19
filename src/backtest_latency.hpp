@@ -10,12 +10,16 @@ enum class BacktestLatencyChannel : std::uint8_t {
   MarketData = 0,
   MarketOrder = 1,
   LimitOrder = 2,
+  CancelOrder = 3,
+  UserData = 4,
 };
 
 struct BacktestLatencyConfig {
   BacktestLatencyProfile marketData{};
   BacktestLatencyProfile marketOrder{1000u, 0u};
   BacktestLatencyProfile limitOrder{1000u, 0u};
+  BacktestLatencyProfile cancelOrder{1000u, 0u};
+  BacktestLatencyProfile userData{};
   std::uint64_t seed{0u};
 };
 
@@ -24,6 +28,8 @@ struct BacktestLatencyRuntime {
   std::uint64_t marketDataState{0u};
   std::uint64_t marketOrderState{0u};
   std::uint64_t limitOrderState{0u};
+  std::uint64_t cancelOrderState{0u};
+  std::uint64_t userDataState{0u};
 };
 
 [[nodiscard]] BacktestLatencyConfig latencyConfigFromRequest(const BacktestRunRequest& request) noexcept;

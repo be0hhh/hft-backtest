@@ -13,7 +13,7 @@
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--order-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps] [--latency exchange:market:md_base:md_jitter:mkt_base:mkt_jitter:limit_base:limit_jitter]\n";
+  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--cancel-order-latency-us N] [--cancel-order-jitter-us N] [--user-data-latency-us N] [--user-data-jitter-us N] [--order-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps] [--latency exchange:market:md_base:md_jitter:mkt_base:mkt_jitter:limit_base:limit_jitter[:cancel_base:cancel_jitter:user_base:user_jitter]]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {
@@ -96,19 +96,30 @@ bool parseU64Text(const char* first, const char* last, std::uint64_t& out) noexc
 
 bool parseLatencySchedule(const char* text, hft_backtest::BacktestLatencySchedule& out) noexcept {
   if (!text || *text == '\0') return false;
-  const char* parts[8]{};
-  const char* ends[8]{};
+  const char* parts[12]{};
+  const char* ends[12]{};
   const char* cursor = text;
   const char* textEnd = text + std::strlen(text);
-  for (std::uint32_t i = 0u; i < 8u; ++i) {
-    parts[i] = cursor;
-    const char* end = i == 7u ? textEnd : std::strchr(cursor, ':');
-    if (!end || end == cursor) return false;
-    ends[i] = end;
+  std::uint32_t partCount = 0u;
+  bool consumedAll = false;
+  for (; partCount < 12u; ++partCount) {
+    if (cursor >= textEnd) return false;
+    parts[partCount] = cursor;
+    const char* end = std::strchr(cursor, ':');
+    if (!end) {
+      ends[partCount] = textEnd;
+      ++partCount;
+      consumedAll = true;
+      break;
+    }
+    if (end == cursor) return false;
+    ends[partCount] = end;
     cursor = end + 1;
   }
-  std::uint64_t values[6]{};
-  for (std::uint32_t i = 0u; i < 6u; ++i) {
+  if (partCount != 8u && partCount != 12u) return false;
+  if (!consumedAll) return false;
+  std::uint64_t values[10]{};
+  for (std::uint32_t i = 0u; i < partCount - 2u; ++i) {
     if (!parseU64Text(parts[i + 2u], ends[i + 2u], values[i])) return false;
   }
   out.exchange.assign(parts[0], static_cast<std::size_t>(ends[0] - parts[0]));
@@ -119,6 +130,12 @@ bool parseLatencySchedule(const char* text, hft_backtest::BacktestLatencySchedul
   out.marketOrder.jitterUs = values[3];
   out.limitOrder.baseUs = values[4];
   out.limitOrder.jitterUs = values[5];
+  if (partCount == 12u) {
+    out.cancelOrder.baseUs = values[6];
+    out.cancelOrder.jitterUs = values[7];
+    out.userData.baseUs = values[8];
+    out.userData.jitterUs = values[9];
+  }
   return true;
 }
 
@@ -218,12 +235,22 @@ int main(int argc, char** argv) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.limitOrderLatency.baseUs)) return 2;
     } else if (std::strcmp(arg, "--limit-order-jitter-us") == 0) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.limitOrderLatency.jitterUs)) return 2;
+    } else if (std::strcmp(arg, "--cancel-order-latency-us") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.cancelOrderLatency.baseUs)) return 2;
+      request.cancelLatencyUs = request.cancelOrderLatency.baseUs;
+    } else if (std::strcmp(arg, "--cancel-order-jitter-us") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.cancelOrderLatency.jitterUs)) return 2;
+    } else if (std::strcmp(arg, "--user-data-latency-us") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.userDataLatency.baseUs)) return 2;
+    } else if (std::strcmp(arg, "--user-data-jitter-us") == 0) {
+      if (const char* value = needValue(arg); value && !parseU64(value, request.userDataLatency.jitterUs)) return 2;
     } else if (std::strcmp(arg, "--order-latency-us") == 0) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.orderLatencyUs)) return 2;
       request.marketOrderLatency.baseUs = request.orderLatencyUs;
       request.limitOrderLatency.baseUs = request.orderLatencyUs;
     } else if (std::strcmp(arg, "--cancel-latency-us") == 0) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.cancelLatencyUs)) return 2;
+      request.cancelOrderLatency.baseUs = request.cancelLatencyUs;
     } else if (std::strcmp(arg, "--initial-balance-usdt") == 0) {
       if (const char* value = needValue(arg); value && (!parseDecimalE8(value, request.initialBalanceE8) || request.initialBalanceE8 < 0)) return 2;
     } else if (std::strcmp(arg, "--maker-fee-bps") == 0) {

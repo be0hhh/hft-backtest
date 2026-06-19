@@ -122,6 +122,18 @@ cxet::composite::UserDataEvent makeRejectedOrderEvent(EngineState& engine,
   return event;
 }
 
+std::int64_t userEventDeliveryTs(EngineState& engine, std::int64_t eventTsNs) noexcept {
+  const std::uint64_t latencyUs = sampleLatencyUs(engine.latency, BacktestLatencyChannel::UserData);
+  const std::int64_t add = latencyNs(latencyUs);
+  if (eventTsNs > std::numeric_limits<std::int64_t>::max() - add) return std::numeric_limits<std::int64_t>::max();
+  return eventTsNs + add;
+}
+
+void pushUserEvent(EngineState& engine, cxet::composite::UserDataEvent event, std::int64_t eventTsNs) {
+  engine.userEvents.push_back(event);
+  engine.userEventDeliveryTsNs.push_back(userEventDeliveryTs(engine, eventTsNs));
+}
+
 std::int64_t reduceOnlyFillQty(const EngineState& engine, const OpenOrder& order) noexcept {
   const std::int64_t requested = order.state.qty.raw;
   if (!order.reduceOnly) return requested;
@@ -137,7 +149,7 @@ std::int64_t reduceOnlyFillQty(const EngineState& engine, const OpenOrder& order
 
 bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
   if (!order.state.valid) return false;
-  engine.userEvents.push_back(makeRejectedOrderEvent(engine, order, tsNs));
+  pushUserEvent(engine, makeRejectedOrderEvent(engine, order, tsNs), tsNs);
   if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusRejected;
   order = OpenOrder{};
   bumpContextRevision(engine);
@@ -163,6 +175,7 @@ bool postOnlyCrossesTop(const EngineState& engine, const OpenOrder& order) noexc
 void activateOrder(EngineState& engine, OpenOrder& order, std::int64_t activeTsNs) {
   order.active = true;
   order.activeTsNs = activeTsNs;
+  order.state.state = hft_trader::core::StrategyOrderLocalState::LiveLocal;
   if (order.recordIndex < engine.orders.size()) {
     engine.orders[order.recordIndex].activeTsNs = activeTsNs;
     engine.orders[order.recordIndex].status = kRecordStatusActive;
@@ -222,7 +235,7 @@ void submitOrderIntent(EngineState& engine,
     slot.state.qty = intent.qty;
     slot.state.desiredPrice = intent.price;
     slot.state.desiredQty = intent.qty;
-    slot.state.state = hft_trader::core::StrategyOrderLocalState::LiveLocal;
+    slot.state.state = hft_trader::core::StrategyOrderLocalState::PendingNew;
     slot.recordIndex = recordIndex;
     slot.createdTsNs = tsNs;
     slot.activeTsNs = activeTs;
@@ -284,7 +297,7 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
   appendEquityPoint(engine, tsNs);
   appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonFill);
   if (order.reduceOnly) ++engine.reduceOnlyFills;
-  engine.userEvents.push_back(makeFillEvent(engine, order, priceE8, fillQty, tsNs, feeE8, netRealized, taker));
+  pushUserEvent(engine, makeFillEvent(engine, order, priceE8, fillQty, tsNs, feeE8, netRealized, taker), tsNs);
   if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
   order = OpenOrder{};
   bumpContextRevision(engine);
@@ -427,7 +440,9 @@ void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, BacktestLatencyRun
   hft_trader::core::StrategyIo io{};
   io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancelCount);
   io.cancelCount = cancelCount;
+  const std::uint64_t maxCancelLatencyUs = latencyProfileMaxUs(latency.config.cancelOrder);
   applyIntents(engine, io, tsNs, latency);
+  applyDueActions(engine, delayedTs(tsNs, maxCancelLatencyUs));
 }
 
 void applyIntents(EngineState& engine,
@@ -459,7 +474,7 @@ void applyIntents(EngineState& engine,
   const bool hasIntents = io.cancelCount != 0u || io.orderCount != 0u;
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
     const auto& intent = io.cancelOut[i];
-    const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
+    const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::CancelOrder));
     (void)submitCancelIntent(engine, intent, tsNs, activeTs);
   }
   for (std::size_t i = 0; i < io.orderCount; ++i) {

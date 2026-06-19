@@ -35,6 +35,8 @@ struct BacktestLatencySchedule {
   BacktestLatencyProfile marketData{};
   BacktestLatencyProfile marketOrder{};
   BacktestLatencyProfile limitOrder{};
+  BacktestLatencyProfile cancelOrder{};
+  BacktestLatencyProfile userData{};
 };
 
 struct BacktestRunRequest {
@@ -50,6 +52,8 @@ struct BacktestRunRequest {
   BacktestLatencyProfile marketDataLatency{};
   BacktestLatencyProfile marketOrderLatency{};
   BacktestLatencyProfile limitOrderLatency{};
+  BacktestLatencyProfile cancelOrderLatency{};
+  BacktestLatencyProfile userDataLatency{};
   std::uint64_t orderLatencyUs{1000};
   std::uint64_t cancelLatencyUs{1000};
   std::int64_t initialBalanceE8{0};
@@ -100,6 +104,8 @@ struct BacktestLegSummary {
   BacktestLatencyProfile marketDataLatency{};
   BacktestLatencyProfile marketOrderLatency{};
   BacktestLatencyProfile limitOrderLatency{};
+  BacktestLatencyProfile cancelOrderLatency{};
+  BacktestLatencyProfile userDataLatency{};
   std::uint64_t orders{0};
   std::uint64_t fills{0};
   std::uint64_t userEvents{0};
@@ -134,6 +140,8 @@ struct BacktestRunResult {
   BacktestLatencyProfile marketDataLatency{};
   BacktestLatencyProfile marketOrderLatency{};
   BacktestLatencyProfile limitOrderLatency{};
+  BacktestLatencyProfile cancelOrderLatency{};
+  BacktestLatencyProfile userDataLatency{};
   std::uint64_t orderLatencyUs{1000};
   std::uint64_t cancelLatencyUs{1000};
   std::uint64_t trades{0};

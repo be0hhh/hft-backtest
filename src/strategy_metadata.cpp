@@ -208,6 +208,8 @@ void applyStrategySpecificMetadata(StrategyMetadata& metadata) noexcept {
   const std::string_view id{metadata.id};
   if (id == "spread_maker1and2") {
     metadata.displayNameRu = "Спред-мейкер 1/2";
+  } else if (id == "stat_arb_edge_maker") {
+    metadata.displayNameRu = "Стат-арбитраж reactive maker/taker";
   } else if (id == "stat_arb_band_ladder") {
     metadata.displayNameRu = "Стат-арбитраж band ladder";
   } else if (id == "trend_probe") {

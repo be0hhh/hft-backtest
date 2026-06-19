@@ -354,6 +354,10 @@ void writeLegsArray(std::ostream& out, const BacktestRunResult& result, const ch
         << ", " << q << "jitter_us" << q << ": " << leg.marketOrderLatency.jitterUs << "}, "
         << q << "limit_order_latency" << q << ": {" << q << "base_us" << q << ": " << leg.limitOrderLatency.baseUs
         << ", " << q << "jitter_us" << q << ": " << leg.limitOrderLatency.jitterUs << "}, "
+        << q << "cancel_order_latency" << q << ": {" << q << "base_us" << q << ": " << leg.cancelOrderLatency.baseUs
+        << ", " << q << "jitter_us" << q << ": " << leg.cancelOrderLatency.jitterUs << "}, "
+        << q << "user_data_latency" << q << ": {" << q << "base_us" << q << ": " << leg.userDataLatency.baseUs
+        << ", " << q << "jitter_us" << q << ": " << leg.userDataLatency.jitterUs << "}, "
         << q << "orders" << q << ": " << leg.orders << ", "
         << q << "fills" << q << ": " << leg.fills << ", "
         << q << "user_events" << q << ": " << leg.userEvents << ", "
@@ -441,6 +445,10 @@ bool writeManifest(const std::filesystem::path& path,
       << ", " << q << "jitter_us" << q << ": " << result.marketOrderLatency.jitterUs << "}"
       << ", " << q << "limit_order" << q << ": {" << q << "base_us" << q << ": " << result.limitOrderLatency.baseUs
       << ", " << q << "jitter_us" << q << ": " << result.limitOrderLatency.jitterUs << "}"
+      << ", " << q << "cancel_order" << q << ": {" << q << "base_us" << q << ": " << result.cancelOrderLatency.baseUs
+      << ", " << q << "jitter_us" << q << ": " << result.cancelOrderLatency.jitterUs << "}"
+      << ", " << q << "user_data" << q << ": {" << q << "base_us" << q << ": " << result.userDataLatency.baseUs
+      << ", " << q << "jitter_us" << q << ": " << result.userDataLatency.jitterUs << "}"
       << ", " << q << "order_latency_us" << q << ": " << result.orderLatencyUs
       << ", " << q << "cancel_latency_us" << q << ": " << result.cancelLatencyUs << "},\n";
   if (result.liveProbe.configured) {

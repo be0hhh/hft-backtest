@@ -145,8 +145,12 @@ bool testPendingDrainActivatesLateOrder() {
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 100, 0);
   return expect(engine.orders[0].status == kRecordStatusPending, "late order initially pending") &&
+         expect(engine.open[0].state.state == hft_trader::core::StrategyOrderLocalState::PendingNew,
+                "late order is strategy-visible but not exchange-live before latency drain") &&
          (applyDueActions(engine, 101000), true) &&
-         expect(engine.orders[0].status == kRecordStatusActive, "final drain activates due order");
+         expect(engine.orders[0].status == kRecordStatusActive, "final drain activates due order") &&
+         expect(engine.open[0].state.state == hft_trader::core::StrategyOrderLocalState::LiveLocal,
+                "late order becomes exchange-live after latency drain");
 }
 
 bool testCancelThenReplacementLimitMaterializesReplace() {
@@ -237,6 +241,32 @@ bool testLatencyRuntimeSplitsMarketAndLimitOrderActivation() {
          expect(engine.orders[1].activeTsNs == 701000, "limit order uses limit order latency");
 }
 
+bool testLatencyRuntimeUsesDedicatedCancelChannel() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  BacktestLatencyConfig config{};
+  config.seed = 6u;
+  config.limitOrder.baseUs = 700u;
+  config.cancelOrder.baseUs = 120u;
+  initLatencyRuntime(engine.latency, config);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(61, Side::Buy(), kPx100 - 200000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  std::array<hft_trader::core::CancelIntent, 1> cancels{cancelIntent(62, 61)};
+  io.clear();
+  io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancels.size());
+  io.cancelCount = cancels.size();
+  applyIntents(engine, io, 2000, engine.latency);
+
+  return expect(engine.orders.size() == 2u, "cancel channel test records order and cancel") &&
+         expect(engine.orders[1].action == kRecordActionCancel, "second record is cancel") &&
+         expect(engine.orders[1].activeTsNs == 122000, "cancel uses dedicated cancel latency, not limit latency");
+}
+
 bool testFillPublishesRuntimeUserEvent() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
@@ -254,6 +284,29 @@ bool testFillPublishesRuntimeUserEvent() {
          expect(engine.userEvents[0].lastFilledQty.raw == kQty1, "user event has last fill qty") &&
          expect(hft_trader::strategy::parseRuntimeClientOrderId(engine.userEvents[0].clientOrderId, parsed), "client order id parses") &&
          expect(parsed.clientIntentId.raw == 4, "client order id carries intent id");
+}
+
+bool testFillUserEventHasSeparateDeliveryLatency() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  BacktestLatencyConfig config{};
+  config.seed = 7u;
+  config.userData.baseUs = 500u;
+  initLatencyRuntime(engine.latency, config);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(64, Side::Buy(), kPx100 - 200000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 0, 0, 0);
+  const bool filled = fillOrder(engine, engine.open[0], kPx100, 20, false);
+
+  return expect(filled, "manual fill succeeds with user-data latency config") &&
+         expect(engine.userEvents.size() == 1u, "fill creates one user event") &&
+         expect(engine.userEventDeliveryTsNs.size() == 1u, "fill stores one user delivery timestamp") &&
+         expect(engine.userEvents[0].eventTime.raw == 20u, "exchange event time remains fill timestamp") &&
+         expect(engine.userEvents[0].updateTime.raw == 20u, "exchange update time remains fill timestamp") &&
+         expect(engine.userEventDeliveryTsNs[0] == 500020, "user event delivery applies user-data latency");
 }
 
 bool testPostOnlyCrossingBuyRejectsWithoutTakerFill() {
@@ -867,6 +920,8 @@ bool testWriterCreatesV2RunDirectory() {
   result.resultPath = dir;
   result.orderLatencyUs = 3000;
   result.cancelLatencyUs = 3000;
+  result.cancelOrderLatency = hft_backtest::BacktestLatencyProfile{1200u, 400u};
+  result.userDataLatency = hft_backtest::BacktestLatencyProfile{800u, 200u};
   result.events = 2;
   result.trades = 1;
   result.bookTickers = 1;
@@ -887,6 +942,8 @@ bool testWriterCreatesV2RunDirectory() {
   leg.marketDataLatency = hft_backtest::BacktestLatencyProfile{250u, 100u};
   leg.marketOrderLatency = hft_backtest::BacktestLatencyProfile{2500u, 1000u};
   leg.limitOrderLatency = hft_backtest::BacktestLatencyProfile{1800u, 700u};
+  leg.cancelOrderLatency = hft_backtest::BacktestLatencyProfile{1200u, 400u};
+  leg.userDataLatency = hft_backtest::BacktestLatencyProfile{800u, 200u};
   result.legs.push_back(leg);
 
   std::filesystem::create_directories(dir);
@@ -922,6 +979,8 @@ bool testWriterCreatesV2RunDirectory() {
          expect(manifest.find("\"type\": \"run.result.v2\"") != std::string::npos, "manifest declares v2 result") &&
          expect(manifest.find("\"orders\": 1") != std::string::npos, "manifest summary includes order count") &&
          expect(manifest.find("\"order_lifetimes\": {") != std::string::npos, "manifest declares order lifetimes stream") &&
+         expect(manifest.find("\"cancel_order\": {\"base_us\": 1200") != std::string::npos, "manifest includes cancel latency profile") &&
+         expect(manifest.find("\"user_data\": {\"base_us\": 800") != std::string::npos, "manifest includes user-data latency profile") &&
          expect(manifest.find("\"risk_snapshots\": {") != std::string::npos, "manifest declares risk snapshots stream") &&
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
          expect(manifest.find("\"strategy_spread\": {") != std::string::npos, "manifest declares strategy spread stream") &&
@@ -1136,6 +1195,13 @@ bool metadataHasParam(const hft_backtest::StrategyMetadata& metadata, std::strin
   return false;
 }
 
+bool metadataHasIndicator(const hft_backtest::StrategyMetadata& metadata, std::string_view id) noexcept {
+  for (std::size_t i = 0; i < metadata.indicatorCount; ++i) {
+    if (metadata.indicators[i].id && id == metadata.indicators[i].id) return true;
+  }
+  return false;
+}
+
 bool metadataParamDefaultIs(const hft_backtest::StrategyMetadata& metadata,
                             std::string_view key,
                             std::string_view expected) noexcept {
@@ -1247,7 +1313,9 @@ int main() {
   ok = testCancelThenReplacementLimitMaterializesReplace() && ok;
   ok = testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() && ok;
   ok = testLatencyRuntimeSplitsMarketAndLimitOrderActivation() && ok;
+  ok = testLatencyRuntimeUsesDedicatedCancelChannel() && ok;
   ok = testFillPublishesRuntimeUserEvent() && ok;
+  ok = testFillUserEventHasSeparateDeliveryLatency() && ok;
   ok = testPostOnlyCrossingBuyRejectsWithoutTakerFill() && ok;
   ok = testPostOnlyCrossingSellRejectsWithoutTakerFill() && ok;
   ok = testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() && ok;

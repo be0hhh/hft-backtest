@@ -278,6 +278,7 @@ void reserveEngineStorage(detail::EngineState& engine,
   engine.orders.reserve(tradeRows);
   engine.fills.reserve(tradeRows);
   engine.userEvents.reserve(tradeRows);
+  engine.userEventDeliveryTsNs.reserve(tradeRows);
   engine.equityPoints.reserve(boundedReserve(events, 64u, 16u));
   engine.riskSnapshots.reserve(boundedReserve(events, 1024u, 8u));
   if (captureIndicatorTrace) engine.strategyIndicator.reserve(boundedReserve(events, 64u, 64u));
@@ -706,6 +707,8 @@ detail::BacktestLatencyConfig resolveLatencyConfig(const BacktestRunRequest& req
     fallback.marketData = schedule.marketData;
     fallback.marketOrder = schedule.marketOrder;
     fallback.limitOrder = schedule.limitOrder;
+    fallback.cancelOrder = schedule.cancelOrder.baseUs != 0u || schedule.cancelOrder.jitterUs != 0u ? schedule.cancelOrder : fallback.cancelOrder;
+    if (schedule.userData.baseUs != 0u || schedule.userData.jitterUs != 0u) fallback.userData = schedule.userData;
     return fallback;
   }
   return fallback;
@@ -761,6 +764,8 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
   out.marketDataLatency = engine.latency.config.marketData;
   out.marketOrderLatency = engine.latency.config.marketOrder;
   out.limitOrderLatency = engine.latency.config.limitOrder;
+  out.cancelOrderLatency = engine.latency.config.cancelOrder;
+  out.userDataLatency = engine.latency.config.userData;
   out.orders = engine.orders.size();
   out.fills = engine.fills.size();
   out.userEvents = engine.userEvents.size();
@@ -795,6 +800,7 @@ void populateAggregateArtifactEngine(const std::vector<detail::EngineState>& eng
     out.strategyRange.insert(out.strategyRange.end(), engine.strategyRange.begin(), engine.strategyRange.end());
     out.strategySpread.insert(out.strategySpread.end(), engine.strategySpread.begin(), engine.strategySpread.end());
     out.userEvents.insert(out.userEvents.end(), engine.userEvents.begin(), engine.userEvents.end());
+    out.userEventDeliveryTsNs.insert(out.userEventDeliveryTsNs.end(), engine.userEventDeliveryTsNs.begin(), engine.userEventDeliveryTsNs.end());
     out.inputCoverage = addCoverage(out.inputCoverage, engine.inputCoverage);
     out.timerWakeEvents += engine.timerWakeEvents;
     out.reduceOnlyOrders += engine.reduceOnlyOrders;
@@ -838,15 +844,23 @@ std::uint64_t maxLatencyUs(const BacktestRunRequest& request) noexcept {
   std::uint64_t out = detail::latencyProfileMaxUs(config.marketData);
   const std::uint64_t marketOrder = detail::latencyProfileMaxUs(config.marketOrder);
   const std::uint64_t limitOrder = detail::latencyProfileMaxUs(config.limitOrder);
+  const std::uint64_t cancelOrder = detail::latencyProfileMaxUs(config.cancelOrder);
+  const std::uint64_t userData = detail::latencyProfileMaxUs(config.userData);
   if (marketOrder > out) out = marketOrder;
   if (limitOrder > out) out = limitOrder;
+  if (cancelOrder > out) out = cancelOrder;
+  if (userData > out) out = userData;
   for (const BacktestLatencySchedule& schedule : request.latencySchedules) {
     const std::uint64_t md = detail::latencyProfileMaxUs(schedule.marketData);
     const std::uint64_t mo = detail::latencyProfileMaxUs(schedule.marketOrder);
     const std::uint64_t lo = detail::latencyProfileMaxUs(schedule.limitOrder);
+    const std::uint64_t co = detail::latencyProfileMaxUs(schedule.cancelOrder);
+    const std::uint64_t ud = detail::latencyProfileMaxUs(schedule.userData);
     if (md > out) out = md;
     if (mo > out) out = mo;
     if (lo > out) out = lo;
+    if (co > out) out = co;
+    if (ud > out) out = ud;
   }
   return out;
 }
@@ -923,6 +937,18 @@ std::int64_t nextPendingTs(const detail::EngineState& engine) noexcept {
   return engine.pending.empty()
       ? std::numeric_limits<std::int64_t>::max()
       : engine.pending.front().activeTsNs;
+}
+
+std::int64_t userEventFallbackTs(const cxet::composite::UserDataEvent& event) noexcept {
+  return event.updateTime.raw != 0u ? toInt64Time(event.updateTime) : toInt64Time(event.eventTime);
+}
+
+std::int64_t nextUserEventDeliveryTs(const detail::EngineState& engine) noexcept {
+  if (engine.deliveredUserEvents >= engine.userEvents.size()) return std::numeric_limits<std::int64_t>::max();
+  if (engine.deliveredUserEvents < engine.userEventDeliveryTsNs.size()) {
+    return engine.userEventDeliveryTsNs[engine.deliveredUserEvents];
+  }
+  return userEventFallbackTs(engine.userEvents[engine.deliveredUserEvents]);
 }
 
 void applyBacktestReconstructedBbo(hft_trader::core::StrategyMarketSnapshot& snapshot,
@@ -1065,13 +1091,17 @@ bool drainUserEvents(const StrategyDescriptor& descriptor,
                      const StrategyInstrumentSpec& instrument,
                      const hft_trader::core::SymbolShardConfig& shard,
                      const hft_trader::core::ShardControlState& control,
-                     const BacktestRunRequest& request) {
+                     const BacktestRunRequest& request,
+                     std::int64_t untilTs) {
   if (engine.liquidated || engine.riskStopped) return true;
   std::uint32_t guard = 0u;
-  while (engine.deliveredUserEvents < engine.userEvents.size()) {
+  while (nextUserEventDeliveryTs(engine) <= untilTs) {
     if (++guard > 4096u) return false;
-    const cxet::composite::UserDataEvent event = engine.userEvents[engine.deliveredUserEvents++];
-    const std::int64_t tsNs = event.updateTime.raw != 0u ? toInt64Time(event.updateTime) : toInt64Time(event.eventTime);
+    const std::size_t eventIndex = engine.deliveredUserEvents++;
+    const cxet::composite::UserDataEvent event = engine.userEvents[eventIndex];
+    const std::int64_t tsNs = eventIndex < engine.userEventDeliveryTsNs.size()
+        ? engine.userEventDeliveryTsNs[eventIndex]
+        : userEventFallbackTs(event);
     if (!runCycle(descriptor, state, engine, instrument, shard, control, tsNs, request, &event)) return false;
   }
   return true;
@@ -1089,25 +1119,36 @@ bool runUntil(const StrategyDescriptor& descriptor,
   std::uint32_t guard = 0u;
   while (true) {
     if (++guard > 8192u) return false;
-    if (!drainUserEvents(descriptor, state, engine, instrument, shard, control, request)) return false;
     const std::int64_t pendingTs = nextPendingTs(engine);
     const std::int64_t wakeTs = nextWakeTs(descriptor, state);
-    std::int64_t nextTs = pendingTs < wakeTs ? pendingTs : wakeTs;
+    const std::int64_t userTs = nextUserEventDeliveryTs(engine);
+    std::int64_t nextTs = std::min(std::min(pendingTs, wakeTs), userTs);
     if (nextTs == std::numeric_limits<std::int64_t>::max() || nextTs > untilTs) break;
-    if (pendingTs <= wakeTs) {
+    if (userTs <= pendingTs && userTs <= wakeTs) {
+      if (!drainUserEvents(descriptor, state, engine, instrument, shard, control, request, userTs)) return false;
+    } else if (pendingTs <= wakeTs) {
       detail::applyDueActions(engine, pendingTs);
     } else {
       ++engine.timerWakeEvents;
       if (!runCycle(descriptor, state, engine, instrument, shard, control, wakeTs, request, nullptr)) return false;
     }
   }
-  return drainUserEvents(descriptor, state, engine, instrument, shard, control, request);
+  return drainUserEvents(descriptor, state, engine, instrument, shard, control, request, untilTs);
 }
 
 std::int64_t nextPendingTs(const std::vector<detail::EngineState>& engines) noexcept {
   std::int64_t out = std::numeric_limits<std::int64_t>::max();
   for (const detail::EngineState& engine : engines) {
     const std::int64_t candidate = nextPendingTs(engine);
+    if (candidate < out) out = candidate;
+  }
+  return out;
+}
+
+std::int64_t nextUserEventDeliveryTs(const std::vector<detail::EngineState>& engines) noexcept {
+  std::int64_t out = std::numeric_limits<std::int64_t>::max();
+  for (const detail::EngineState& engine : engines) {
+    const std::int64_t candidate = nextUserEventDeliveryTs(engine);
     if (candidate < out) out = candidate;
   }
   return out;
@@ -1120,7 +1161,8 @@ bool drainUserEventsMulti(const StrategyDescriptor& descriptor,
                           MultiLegCycleScratch& scratch,
                           const hft_trader::core::SymbolShardConfig& shard,
                           const hft_trader::core::ShardControlState& control,
-                          const BacktestRunRequest& request) {
+                          const BacktestRunRequest& request,
+                          std::int64_t untilTs) {
   for (const detail::EngineState& engine : engines) {
     if (engine.liquidated || engine.riskStopped) return true;
   }
@@ -1130,10 +1172,13 @@ bool drainUserEventsMulti(const StrategyDescriptor& descriptor,
     progressed = false;
     for (std::size_t leg = 0; leg < engines.size(); ++leg) {
       detail::EngineState& engine = engines[leg];
-      if (engine.deliveredUserEvents >= engine.userEvents.size()) continue;
+      if (nextUserEventDeliveryTs(engine) > untilTs) continue;
       if (++guard > 4096u) return false;
-      const cxet::composite::UserDataEvent event = engine.userEvents[engine.deliveredUserEvents++];
-      const std::int64_t tsNs = event.updateTime.raw != 0u ? toInt64Time(event.updateTime) : toInt64Time(event.eventTime);
+      const std::size_t eventIndex = engine.deliveredUserEvents++;
+      const cxet::composite::UserDataEvent event = engine.userEvents[eventIndex];
+      const std::int64_t tsNs = eventIndex < engine.userEventDeliveryTsNs.size()
+          ? engine.userEventDeliveryTsNs[eventIndex]
+          : userEventFallbackTs(event);
       if (!runCycleMulti(descriptor, state, engines, legInstruments, scratch, shard, control, static_cast<std::uint32_t>(leg), tsNs, request, &event)) return false;
       progressed = true;
     }
@@ -1162,7 +1207,8 @@ bool runUntilMulti(const StrategyDescriptor& descriptor,
   }
   const std::int64_t pendingTs = nextPendingTs(engines);
   const std::int64_t wakeTs = nextWakeTs(descriptor, state);
-  const std::int64_t nextTs = pendingTs < wakeTs ? pendingTs : wakeTs;
+  const std::int64_t userTs = nextUserEventDeliveryTs(engines);
+  const std::int64_t nextTs = std::min(std::min(pendingTs, wakeTs), userTs);
   if (!hasUndeliveredUserEvents(engines) &&
       (nextTs == std::numeric_limits<std::int64_t>::max() || nextTs > untilTs)) {
     return true;
@@ -1170,19 +1216,21 @@ bool runUntilMulti(const StrategyDescriptor& descriptor,
   std::uint32_t guard = 0u;
   while (true) {
     if (++guard > 8192u) return false;
-    if (!drainUserEventsMulti(descriptor, state, engines, legInstruments, scratch, shard, control, request)) return false;
     const std::int64_t pendingTs = nextPendingTs(engines);
     const std::int64_t wakeTs = nextWakeTs(descriptor, state);
-    std::int64_t nextTs = pendingTs < wakeTs ? pendingTs : wakeTs;
+    const std::int64_t userTs = nextUserEventDeliveryTs(engines);
+    std::int64_t nextTs = std::min(std::min(pendingTs, wakeTs), userTs);
     if (nextTs == std::numeric_limits<std::int64_t>::max() || nextTs > untilTs) break;
-    if (pendingTs <= wakeTs) {
+    if (userTs <= pendingTs && userTs <= wakeTs) {
+      if (!drainUserEventsMulti(descriptor, state, engines, legInstruments, scratch, shard, control, request, userTs)) return false;
+    } else if (pendingTs <= wakeTs) {
       for (detail::EngineState& engine : engines) detail::applyDueActions(engine, pendingTs);
     } else {
       if (!engines.empty()) ++engines[0].timerWakeEvents;
       if (!runCycleMulti(descriptor, state, engines, legInstruments, scratch, shard, control, 0u, wakeTs, request, nullptr)) return false;
     }
   }
-  return drainUserEventsMulti(descriptor, state, engines, legInstruments, scratch, shard, control, request);
+  return drainUserEventsMulti(descriptor, state, engines, legInstruments, scratch, shard, control, request, untilTs);
 }
 
 bool settleAfterReplay(const StrategyDescriptor& descriptor,
@@ -1361,6 +1409,11 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
   result.realizedPnlE8 = result.netRealizedPnlE8;
   result.totalPnlE8 = result.realizedPnlE8 + result.unrealizedPnlE8;
   result.walletBalanceE8 = initialBalanceE8 + result.netRealizedPnlE8;
+  const detail::BacktestExcursionMetrics metrics = detail::calculatePortfolioExcursionMetrics(engines);
+  result.maxDrawdownE8 = metrics.maxDrawdownE8;
+  result.mfeE8 = metrics.mfeE8;
+  result.maeE8 = metrics.maeE8;
+  result.totalPnlCurveE8 = detail::buildPortfolioTotalPnlCurveE8(engines);
   if (liquidated && initialBalanceE8 > 0) {
     result.walletBalanceE8 = 0;
     result.grossRealizedPnlE8 = -initialBalanceE8 + result.feesPaidE8;
@@ -1379,7 +1432,6 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
   result.riskStopEquityE8 = riskStopEquityE8;
   result.riskStopThresholdEquityE8 = riskStopThresholdEquityE8;
   result.strategyClosed = closed;
-  result.totalPnlCurveE8.clear();
 }
 
 }  // namespace
@@ -1404,8 +1456,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.marketDataLatency = latencyConfig.marketData;
   result.marketOrderLatency = latencyConfig.marketOrder;
   result.limitOrderLatency = latencyConfig.limitOrder;
+  result.cancelOrderLatency = latencyConfig.cancelOrder;
+  result.userDataLatency = latencyConfig.userData;
   result.orderLatencyUs = request.orderLatencyUs;
-  result.cancelLatencyUs = request.cancelLatencyUs;
+  result.cancelLatencyUs = latencyConfig.cancelOrder.baseUs;
   result.initialBalanceE8 = portfolioInitialBalance;
   result.walletBalanceE8 = portfolioInitialBalance;
   auto writeArtifacts = [&](const detail::EngineState& engine) noexcept -> Status {

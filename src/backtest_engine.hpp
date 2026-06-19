@@ -217,6 +217,7 @@ struct EngineState {
   canon::MarketType market{};
   Symbol symbol{};
   std::vector<cxet::composite::UserDataEvent> userEvents{};
+  std::vector<std::int64_t> userEventDeliveryTsNs{};
   BacktestLatencyRuntime latency{};
   std::size_t deliveredUserEvents{0};
   std::uint64_t fillSequence{0};
