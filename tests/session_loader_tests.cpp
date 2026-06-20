@@ -242,6 +242,68 @@ bool testBuildTimelineFallbackSortsUnorderedChannel() {
          expect(out[2].tsNs == 300 && out[2].kind == 1u, "fallback sorts second trade");
 }
 
+bool testLoadSessionPrefersCandles2ManifestPath() {
+  const std::filesystem::path dir = makeSessionDir("candles2_manifest");
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"finam\", \"market\": \"spot\", \"symbols\": [\"SBER@MISX\"]},\n"
+            "  \"channels\": {\n"
+            "    \"candles\": {\"path\": \"jsonl/candles_15m.jsonl\"},\n"
+            "    \"candles2\": {\"path\": \"jsonl/candles2_15m.jsonl\"}\n"
+            "  }\n"
+            "}\n");
+  writeText(dir / "jsonl" / "candles_15m.jsonl", "[2,1000,10200000000,9800000000,500000000]\n");
+  writeText(dir / "jsonl" / "candles2_15m.jsonl",
+            "[2,1000,10000000000,10300000000,9900000000,10100000000,1000000000,101000000000]\n");
+
+  hft_backtest::detail::SessionData data{};
+  hft_backtest::detail::SessionLoadPlan plan{};
+  plan.loadTrades = false;
+  plan.loadBookTickers = false;
+  plan.loadDepths = false;
+  plan.loadCandles = true;
+  plan.requireCandles = true;
+  std::string error{};
+  const hft_backtest::Status status = hft_backtest::detail::loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::Ok, "loader accepts candles2 manifest path") &&
+         expect(data.candles.size() == 1u, "loader reads one candles2 row") &&
+         expect(data.candles[0].tier == 2, "candles2 15m tier parsed") &&
+         expect(data.candles[0].hasOhlc, "candles2 OHLC flag parsed") &&
+         expect(data.candles[0].openE8 == 10000000000ll, "candles2 open parsed") &&
+         expect(data.candles[0].closeE8 == 10100000000ll, "candles2 close parsed") &&
+         expect(data.candles[0].quoteAmountE8 == 101000000000ll, "candles2 quote amount parsed");
+}
+
+bool testLoadSessionParsesStringDetailedCandles2Rows() {
+  const std::filesystem::path dir = makeSessionDir("candles2_string");
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"finam\", \"market\": \"spot\", \"symbols\": [\"SBER@MISX\"]},\n"
+            "  \"channels\": {\n"
+            "    \"candles2\": {\"path\": \"jsonl/candles2_5m.jsonl\"}\n"
+            "  }\n"
+            "}\n");
+  writeText(dir / "jsonl" / "candles2_5m.jsonl",
+            "[\"finam\",\"spot\",\"SBER@MISX\",\"5m\",1000,10000000000,10300000000,9900000000,10100000000,1000000000,101000000000]\n");
+
+  hft_backtest::detail::SessionData data{};
+  hft_backtest::detail::SessionLoadPlan plan{};
+  plan.loadTrades = false;
+  plan.loadBookTickers = false;
+  plan.loadDepths = false;
+  plan.loadCandles = true;
+  plan.requireCandles = true;
+  std::string error{};
+  const hft_backtest::Status status = hft_backtest::detail::loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::Ok, "loader accepts string candles2 rows") &&
+         expect(data.candles.size() == 1u, "loader reads one string candles2 row") &&
+         expect(data.candles[0].tier == 0, "unknown non-tier timeframe is kept as tier zero") &&
+         expect(data.candles[0].hasOhlc, "string candles2 OHLC flag parsed") &&
+         expect(data.candles[0].closeE8 == 10100000000ll, "string candles2 close parsed");
+}
+
 }  // namespace
 
 int main() {
@@ -253,5 +315,7 @@ int main() {
   ok = testBuildTimelineMergesSortedChannelsInStableOrder() && ok;
   ok = testBuildTimelineIncludesOptionalReferenceStreams() && ok;
   ok = testBuildTimelineFallbackSortsUnorderedChannel() && ok;
+  ok = testLoadSessionPrefersCandles2ManifestPath() && ok;
+  ok = testLoadSessionParsesStringDetailedCandles2Rows() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -25,6 +25,10 @@ bool appendCandle(cxet::composite::CandleLite* out, CountVal& count, const Candl
   return true;
 }
 
+std::int64_t midpointE8(std::int64_t high, std::int64_t low) noexcept {
+  return (high / 2) + (low / 2) + ((high & 1ll) && (low & 1ll) ? 1 : 0);
+}
+
 }  // namespace
 
 std::string quote(std::string_view value) {
@@ -140,6 +144,24 @@ cxet::composite::OpenInterestRuntimeV1 toRuntime(const OpenInterestRow& row) noe
   out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
   out.openInterest.raw = row.openInterestE8;
   out.openInterestValue.raw = row.openInterestValueE8;
+  return out;
+}
+
+hft_trader::core::StrategyCandleSnapshot toRuntime(const CandleRow& row) noexcept {
+  hft_trader::core::StrategyCandleSnapshot out{};
+  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+  out.tier.raw = static_cast<std::uint64_t>(row.tier > 0 ? row.tier : 0);
+  out.high.raw = row.highE8;
+  out.low.raw = row.lowE8;
+  const std::int64_t fallbackClose = midpointE8(row.highE8, row.lowE8);
+  out.open.raw = row.hasOhlc ? row.openE8 : fallbackClose;
+  out.close.raw = row.hasOhlc ? row.closeE8 : fallbackClose;
+  out.volume.raw = row.volumeE8;
+  out.quoteAmount.raw = row.quoteAmountE8;
+  out.hasOhlc = row.hasOhlc ? hft_trader::core::kAlgoFlagTrue : hft_trader::core::kAlgoFlagFalse;
+  out.valid = row.tsNs > 0 && out.close.raw > 0 && out.high.raw >= out.low.raw
+      ? hft_trader::core::kAlgoFlagTrue
+      : hft_trader::core::kAlgoFlagFalse;
   return out;
 }
 

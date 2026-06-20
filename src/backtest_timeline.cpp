@@ -23,6 +23,7 @@ TimelineEvent makeEvent(const SessionData& session, std::uint8_t leg, std::uint8
   if (kind == kTimelineKindIndexPrice) return TimelineEvent{session.indexPrices[index].tsNs, session.indexPrices[index].tsNs, session.indexPrices[index].ingestSeq, kind, leg, index};
   if (kind == kTimelineKindFunding) return TimelineEvent{session.funding[index].tsNs, session.funding[index].tsNs, session.funding[index].ingestSeq, kind, leg, index};
   if (kind == kTimelineKindOpenInterest) return TimelineEvent{session.openInterest[index].tsNs, session.openInterest[index].tsNs, session.openInterest[index].ingestSeq, kind, leg, index};
+  if (kind == kTimelineKindCandle) return TimelineEvent{session.candles[index].tsNs, session.candles[index].tsNs, 0, kind, leg, index};
   return TimelineEvent{session.priceLimits[index].tsNs, session.priceLimits[index].tsNs, session.priceLimits[index].ingestSeq, kind, leg, index};
 }
 
@@ -36,6 +37,7 @@ std::size_t channelSize(const SessionData& session, std::uint8_t kind) noexcept 
   if (kind == kTimelineKindIndexPrice) return session.indexPrices.size();
   if (kind == kTimelineKindFunding) return session.funding.size();
   if (kind == kTimelineKindOpenInterest) return session.openInterest.size();
+  if (kind == kTimelineKindCandle) return session.candles.size();
   return session.priceLimits.size();
 }
 

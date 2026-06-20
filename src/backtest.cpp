@@ -187,34 +187,40 @@ bool buildSessionLoadPlan(const StrategyDescriptor& descriptor, detail::SessionL
   out.loadBookTickers = false;
   out.loadPriceLimits = false;
   out.loadDepths = false;
-  out.loadCandles = descriptor.seedHistory != nullptr;
-  out.requireCandles = descriptor.seedHistory != nullptr;
+  out.loadCandles = descriptor.seedHistory != nullptr || descriptor.loadCandleHistory;
+  out.requireCandles = descriptor.seedHistory != nullptr || descriptor.requireCandleHistory;
   if (descriptor.resolveTradeHistory && descriptor.seedTrades) out.loadTrades = true;
   const std::size_t streamCount = hft_trader::runtime::descriptorStreamCount(descriptor);
   for (std::size_t i = 0u; i < streamCount; ++i) {
     const cxet::api::market::PublicMarketDataStream stream = hft_trader::runtime::descriptorStreamAt(descriptor, i);
+    const bool required = hft_trader::runtime::descriptorStreamRequired(descriptor, i);
     if (stream == cxet::api::market::PublicMarketDataStream::Trades) {
       out.loadTrades = true;
-      out.requireTrades = true;
+      out.requireTrades = out.requireTrades || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::BookTicker) {
       out.loadBookTickers = true;
-      out.requireBookTickers = true;
+      out.requireBookTickers = out.requireBookTickers || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::PriceLimit) {
       out.loadPriceLimits = true;
-      out.requirePriceLimits = true;
+      out.requirePriceLimits = out.requirePriceLimits || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::Orderbook) {
       out.loadDepths = true;
-      out.requireDepths = true;
+      out.requireDepths = out.requireDepths || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::Liquidations) {
       out.loadLiquidations = true;
+      out.requireLiquidations = out.requireLiquidations || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::MarkPrice) {
       out.loadMarkPrices = true;
+      out.requireMarkPrices = out.requireMarkPrices || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::IndexPrice) {
       out.loadIndexPrices = true;
+      out.requireIndexPrices = out.requireIndexPrices || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::Funding) {
       out.loadFunding = true;
+      out.requireFunding = out.requireFunding || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::OpenInterest) {
       out.loadOpenInterest = true;
+      out.requireOpenInterest = out.requireOpenInterest || required;
     } else {
       error = "strategy requires unsupported market data stream for backtest";
       return false;
@@ -246,6 +252,7 @@ bool strategySnapshotReady(const StrategyDescriptor& descriptor,
   const std::size_t streamCount = hft_trader::runtime::descriptorStreamCount(descriptor);
   for (std::size_t i = 0u; i < streamCount; ++i) {
     const cxet::api::market::PublicMarketDataStream stream = hft_trader::runtime::descriptorStreamAt(descriptor, i);
+    if (hft_trader::runtime::descriptorStreamOptional(descriptor, i)) continue;
     if (!backtestStreamRequiredForReadiness(stream)) continue;
     if (!hft_trader::runtime::snapshotHasRequiredStream(snapshot, stream, &descriptor)) return false;
   }
@@ -465,6 +472,9 @@ bool runCycle(const StrategyDescriptor& descriptor,
   ctx.snapshot = &engine.snapshot;
   ctx.marketData.snapshots = &engine.snapshot;
   ctx.marketData.count = 1;
+  ctx.candle = engine.candle;
+  ctx.candles.candles = &engine.candle;
+  ctx.candles.count = 1;
   ctx.instrumentSpec = instrument;
   ctx.instrumentSpecs.legs = &instrument;
   ctx.instrumentSpecs.count = 1u;
@@ -542,6 +552,7 @@ struct MultiLegCycleScratch {
   std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
   std::array<hft_trader::core::StrategyMarketSnapshot, hft_trader::core::kStrategyRuntimeMaxLegs> snapshots{};
+  std::array<hft_trader::core::StrategyCandleSnapshot, hft_trader::core::kStrategyRuntimeMaxLegs> candles{};
   std::array<std::array<hft_trader::core::StrategyOrderState, detail::kMaxOrderStates>, hft_trader::core::kStrategyRuntimeMaxLegs> orderStorage{};
   std::array<hft_trader::core::StrategyOrderStateView, hft_trader::core::kStrategyRuntimeMaxLegs> orderViews{};
   std::array<hft_trader::core::StrategyPositionState, hft_trader::core::kStrategyRuntimeMaxLegs> positions{};
@@ -561,6 +572,7 @@ struct MultiLegCycleScratch {
     if (leg >= legCount || leg >= engines.size()) return;
     const detail::EngineState& engine = engines[leg];
     snapshots[leg] = engine.snapshot;
+    candles[leg] = engine.candle;
     orderViews[leg].orders = orderStorage[leg].data();
     orderViews[leg].count = detail::visibleOrders(engine, orderStorage[leg].data(), orderStorage[leg].size());
     positions[leg] = engine.position;
@@ -606,6 +618,9 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   ctx.snapshot = &scratch.snapshots[0];
   ctx.marketData.snapshots = scratch.snapshots.data();
   ctx.marketData.count = legCount;
+  ctx.candle = scratch.candles[0];
+  ctx.candles.candles = scratch.candles.data();
+  ctx.candles.count = legCount;
   ctx.instrumentSpec = scratch.instruments[0];
   ctx.instrumentSpecs.legs = scratch.instruments.data();
   ctx.instrumentSpecs.count = legCount;
@@ -1001,6 +1016,7 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
                                  const StrategyInstrumentSpec& instrument,
                                  bool strategyVisible) {
   hft_trader::core::StrategyMarketSnapshot& snapshot = strategyVisible ? engine.snapshot : engine.venueSnapshot;
+  hft_trader::core::StrategyCandleSnapshot& candle = strategyVisible ? engine.candle : engine.venueCandle;
   hft_trader::core::LocalOrderBookState& orderBook = strategyVisible ? engine.orderBook : engine.venueOrderBook;
   hft_trader::core::BboReconstructionState& bbo = strategyVisible ? engine.bboReconstruction : engine.venueBboReconstruction;
   bool changed = false;
@@ -1059,6 +1075,9 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     const auto openInterest = detail::toRuntime(session.openInterest[event.index]);
     hft_trader::core::copyOpenInterestSnapshot(snapshot, openInterest);
     changed = true;
+  } else if (event.kind == detail::kTimelineKindCandle) {
+    candle = detail::toRuntime(session.candles[event.index]);
+    changed = true;
   }
   if (changed) detail::bumpContextRevision(engine);
 }
@@ -1085,6 +1104,16 @@ void applyMarketEventToSnapshots(std::vector<detail::EngineState>& engines,
   applyMarketEventToSnapshots(engines[legIndex], sessions[legIndex], event, symbols[legIndex], instruments[legIndex], strategyVisible);
 }
 
+enum class RunUntilBoundary : std::uint8_t {
+  Inclusive,
+  Exclusive,
+};
+
+bool dueWithinBoundary(std::int64_t tsNs, std::int64_t untilTs, RunUntilBoundary boundary) noexcept {
+  if (tsNs == std::numeric_limits<std::int64_t>::max()) return false;
+  return boundary == RunUntilBoundary::Exclusive ? tsNs < untilTs : tsNs <= untilTs;
+}
+
 bool drainUserEvents(const StrategyDescriptor& descriptor,
                      void* state,
                      detail::EngineState& engine,
@@ -1092,10 +1121,11 @@ bool drainUserEvents(const StrategyDescriptor& descriptor,
                      const hft_trader::core::SymbolShardConfig& shard,
                      const hft_trader::core::ShardControlState& control,
                      const BacktestRunRequest& request,
-                     std::int64_t untilTs) {
+                     std::int64_t untilTs,
+                     RunUntilBoundary boundary = RunUntilBoundary::Inclusive) {
   if (engine.liquidated || engine.riskStopped) return true;
   std::uint32_t guard = 0u;
-  while (nextUserEventDeliveryTs(engine) <= untilTs) {
+  while (dueWithinBoundary(nextUserEventDeliveryTs(engine), untilTs, boundary)) {
     if (++guard > 4096u) return false;
     const std::size_t eventIndex = engine.deliveredUserEvents++;
     const cxet::composite::UserDataEvent event = engine.userEvents[eventIndex];
@@ -1114,7 +1144,8 @@ bool runUntil(const StrategyDescriptor& descriptor,
               const hft_trader::core::SymbolShardConfig& shard,
               const hft_trader::core::ShardControlState& control,
               std::int64_t untilTs,
-              const BacktestRunRequest& request) {
+              const BacktestRunRequest& request,
+              RunUntilBoundary boundary = RunUntilBoundary::Inclusive) {
   if (engine.liquidated || engine.riskStopped) return true;
   std::uint32_t guard = 0u;
   while (true) {
@@ -1123,7 +1154,7 @@ bool runUntil(const StrategyDescriptor& descriptor,
     const std::int64_t wakeTs = nextWakeTs(descriptor, state);
     const std::int64_t userTs = nextUserEventDeliveryTs(engine);
     std::int64_t nextTs = std::min(std::min(pendingTs, wakeTs), userTs);
-    if (nextTs == std::numeric_limits<std::int64_t>::max() || nextTs > untilTs) break;
+    if (nextTs == std::numeric_limits<std::int64_t>::max() || !dueWithinBoundary(nextTs, untilTs, boundary)) break;
     if (userTs <= pendingTs && userTs <= wakeTs) {
       if (!drainUserEvents(descriptor, state, engine, instrument, shard, control, request, userTs)) return false;
     } else if (pendingTs <= wakeTs) {
@@ -1133,7 +1164,7 @@ bool runUntil(const StrategyDescriptor& descriptor,
       if (!runCycle(descriptor, state, engine, instrument, shard, control, wakeTs, request, nullptr)) return false;
     }
   }
-  return drainUserEvents(descriptor, state, engine, instrument, shard, control, request, untilTs);
+  return drainUserEvents(descriptor, state, engine, instrument, shard, control, request, untilTs, boundary);
 }
 
 std::int64_t nextPendingTs(const std::vector<detail::EngineState>& engines) noexcept {
@@ -1162,7 +1193,8 @@ bool drainUserEventsMulti(const StrategyDescriptor& descriptor,
                           const hft_trader::core::SymbolShardConfig& shard,
                           const hft_trader::core::ShardControlState& control,
                           const BacktestRunRequest& request,
-                          std::int64_t untilTs) {
+                          std::int64_t untilTs,
+                          RunUntilBoundary boundary = RunUntilBoundary::Inclusive) {
   for (const detail::EngineState& engine : engines) {
     if (engine.liquidated || engine.riskStopped) return true;
   }
@@ -1172,7 +1204,7 @@ bool drainUserEventsMulti(const StrategyDescriptor& descriptor,
     progressed = false;
     for (std::size_t leg = 0; leg < engines.size(); ++leg) {
       detail::EngineState& engine = engines[leg];
-      if (nextUserEventDeliveryTs(engine) > untilTs) continue;
+      if (!dueWithinBoundary(nextUserEventDeliveryTs(engine), untilTs, boundary)) continue;
       if (++guard > 4096u) return false;
       const std::size_t eventIndex = engine.deliveredUserEvents++;
       const cxet::composite::UserDataEvent event = engine.userEvents[eventIndex];
@@ -1201,7 +1233,8 @@ bool runUntilMulti(const StrategyDescriptor& descriptor,
                    const hft_trader::core::SymbolShardConfig& shard,
                    const hft_trader::core::ShardControlState& control,
                    std::int64_t untilTs,
-                   const BacktestRunRequest& request) {
+                   const BacktestRunRequest& request,
+                   RunUntilBoundary boundary = RunUntilBoundary::Inclusive) {
   for (const detail::EngineState& engine : engines) {
     if (engine.liquidated || engine.riskStopped) return true;
   }
@@ -1210,7 +1243,7 @@ bool runUntilMulti(const StrategyDescriptor& descriptor,
   const std::int64_t userTs = nextUserEventDeliveryTs(engines);
   const std::int64_t nextTs = std::min(std::min(pendingTs, wakeTs), userTs);
   if (!hasUndeliveredUserEvents(engines) &&
-      (nextTs == std::numeric_limits<std::int64_t>::max() || nextTs > untilTs)) {
+      (nextTs == std::numeric_limits<std::int64_t>::max() || !dueWithinBoundary(nextTs, untilTs, boundary))) {
     return true;
   }
   std::uint32_t guard = 0u;
@@ -1220,7 +1253,7 @@ bool runUntilMulti(const StrategyDescriptor& descriptor,
     const std::int64_t wakeTs = nextWakeTs(descriptor, state);
     const std::int64_t userTs = nextUserEventDeliveryTs(engines);
     std::int64_t nextTs = std::min(std::min(pendingTs, wakeTs), userTs);
-    if (nextTs == std::numeric_limits<std::int64_t>::max() || nextTs > untilTs) break;
+    if (nextTs == std::numeric_limits<std::int64_t>::max() || !dueWithinBoundary(nextTs, untilTs, boundary)) break;
     if (userTs <= pendingTs && userTs <= wakeTs) {
       if (!drainUserEventsMulti(descriptor, state, engines, legInstruments, scratch, shard, control, request, userTs)) return false;
     } else if (pendingTs <= wakeTs) {
@@ -1230,7 +1263,7 @@ bool runUntilMulti(const StrategyDescriptor& descriptor,
       if (!runCycleMulti(descriptor, state, engines, legInstruments, scratch, shard, control, 0u, wakeTs, request, nullptr)) return false;
     }
   }
-  return drainUserEventsMulti(descriptor, state, engines, legInstruments, scratch, shard, control, request, untilTs);
+  return drainUserEventsMulti(descriptor, state, engines, legInstruments, scratch, shard, control, request, untilTs, boundary);
 }
 
 bool settleAfterReplay(const StrategyDescriptor& descriptor,
@@ -1954,24 +1987,26 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   MultiLegCycleScratch multiScratch{};
   if (hasExplicitSessions) multiScratch.reset(legEngines.size() < hft_trader::core::kStrategyRuntimeMaxLegs ? legEngines.size() : hft_trader::core::kStrategyRuntimeMaxLegs);
   bool replayStopped = false;
-  for (std::size_t i = 0; i < timeline.size(); ++i) {
+  std::size_t i = 0u;
+  while (i < timeline.size()) {
     if (i + 1u < timeline.size()) prefetchRead(&timeline[i + 1u]);
     if (deliveryCursor < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor]);
-    const detail::TimelineEvent& event = timeline[i];
+    const std::int64_t eventTsNs = timeline[i].tsNs;
+    // Same-timestamp venue updates win the tie: orders due at raw ts activate after the raw BBO is applied.
     const bool beforeOk = hasExplicitSessions
-        ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, multiScratch, shard, control, event.tsNs, request)
-        : runUntil(*descriptor, state.data(), engine, instrument, shard, control, event.tsNs, request);
+        ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, multiScratch, shard, control, eventTsNs, request, RunUntilBoundary::Exclusive)
+        : runUntil(*descriptor, state.data(), engine, instrument, shard, control, eventTsNs, request, RunUntilBoundary::Exclusive);
     if (!beforeOk) {
       result.status = Status::InvalidArgument;
       result.error = "strategy event loop did not settle before market event";
       (void)writeCurrentArtifacts();
       return result;
     }
-    if (tripHardLiquidation(event.tsNs) || tripTraderRiskStop(event.tsNs)) {
+    if (tripHardLiquidation(eventTsNs) || tripTraderRiskStop(eventTsNs)) {
       replayStopped = true;
       break;
     }
-    while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs < event.tsNs) {
+    while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs < eventTsNs) {
       if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
       const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
       if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, delivered, legSymbols, legInstruments, true);
@@ -1996,18 +2031,32 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       }
     }
     if (replayStopped) break;
-    if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, event, legSymbols, legInstruments, false);
-    else applyMarketEventToSnapshots(engine, session, event, selectedSymbol, instrument, false);
-    if (hasExplicitSessions) {
-      for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, event.tsNs);
-    } else {
-      (void)detail::appendRiskSnapshotIfDue(engine, event.tsNs);
+    const bool beforeRawOk = hasExplicitSessions
+        ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, multiScratch, shard, control, eventTsNs, request, RunUntilBoundary::Exclusive)
+        : runUntil(*descriptor, state.data(), engine, instrument, shard, control, eventTsNs, request, RunUntilBoundary::Exclusive);
+    if (!beforeRawOk) {
+      result.status = Status::InvalidArgument;
+      result.error = "strategy event loop did not settle before raw market event";
+      (void)writeCurrentArtifacts();
+      return result;
     }
-    if (tripHardLiquidation(event.tsNs) || tripTraderRiskStop(event.tsNs)) {
-      replayStopped = true;
-      break;
+    while (i < timeline.size() && timeline[i].tsNs == eventTsNs) {
+      if (i + 1u < timeline.size()) prefetchRead(&timeline[i + 1u]);
+      const detail::TimelineEvent& event = timeline[i++];
+      if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, event, legSymbols, legInstruments, false);
+      else applyMarketEventToSnapshots(engine, session, event, selectedSymbol, instrument, false);
+      if (hasExplicitSessions) {
+        for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, event.tsNs);
+      } else {
+        (void)detail::appendRiskSnapshotIfDue(engine, event.tsNs);
+      }
+      if (tripHardLiquidation(event.tsNs) || tripTraderRiskStop(event.tsNs)) {
+        replayStopped = true;
+        break;
+      }
     }
-    while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs <= event.tsNs) {
+    if (replayStopped) break;
+    while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs <= eventTsNs) {
       if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
       const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
       if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, delivered, legSymbols, legInstruments, true);
@@ -2033,15 +2082,15 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
     if (replayStopped) break;
     const bool afterOk = hasExplicitSessions
-        ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, multiScratch, shard, control, event.tsNs, request)
-        : runUntil(*descriptor, state.data(), engine, instrument, shard, control, event.tsNs, request);
+        ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, multiScratch, shard, control, eventTsNs, request)
+        : runUntil(*descriptor, state.data(), engine, instrument, shard, control, eventTsNs, request);
     if (!afterOk) {
       result.status = Status::InvalidArgument;
       result.error = "strategy event loop did not settle after market event";
       (void)writeCurrentArtifacts();
       return result;
     }
-    if (tripHardLiquidation(event.tsNs) || tripTraderRiskStop(event.tsNs)) {
+    if (tripHardLiquidation(eventTsNs) || tripTraderRiskStop(eventTsNs)) {
       replayStopped = true;
       break;
     }

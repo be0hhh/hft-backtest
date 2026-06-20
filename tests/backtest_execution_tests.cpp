@@ -65,6 +65,15 @@ hft_trader::core::OrderIntent reduceMarketIntent(std::uint64_t orderId, Side sid
   return out;
 }
 
+hft_trader::core::OrderIntent marketIntent(std::uint64_t orderId, Side side) noexcept {
+  hft_trader::core::OrderIntent out{};
+  out.clientIntentId = id(orderId);
+  out.side = side;
+  out.orderType = canon::OrderType::Market;
+  out.qty = amount(kQty1);
+  return out;
+}
+
 hft_trader::core::CancelIntent cancelIntent(std::uint64_t commandId, std::uint64_t targetId) noexcept {
   hft_trader::core::CancelIntent out{};
   out.clientIntentId = id(commandId);
@@ -241,6 +250,48 @@ bool testLatencyRuntimeSplitsMarketAndLimitOrderActivation() {
          expect(engine.orders[1].activeTsNs == 701000, "limit order uses limit order latency");
 }
 
+bool testMarketOrderAtSameTimestampWaitsForVenueTopUpdate() {
+  EngineState engine{};
+  setTop(engine, 120000000ll, 121000000ll);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(70, Side::Buy())};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 0, 1000, 0);
+
+  applyDueActionsBefore(engine, 1000);
+  const bool notFilledBeforeMarketEvent = engine.fills.empty() && !engine.pending.empty();
+
+  setTop(engine, 114000000ll, 115000000ll);
+  applyDueActions(engine, 1000);
+
+  return expect(notFilledBeforeMarketEvent, "market order active at market timestamp waits for that market event") &&
+         expect(engine.fills.size() == 1u, "market order fills after same-timestamp venue update") &&
+         expect(engine.fills[0].priceE8 == 115000000ll, "market buy fills at updated same-timestamp ask");
+}
+
+bool testSellMarketOrderAtSameTimestampWaitsForVenueTopUpdate() {
+  EngineState engine{};
+  setTop(engine, 120000000ll, 121000000ll);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(71, Side::Sell())};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 0, 1000, 0);
+
+  applyDueActionsBefore(engine, 1000);
+  const bool notFilledBeforeMarketEvent = engine.fills.empty() && !engine.pending.empty();
+
+  setTop(engine, 114000000ll, 115000000ll);
+  applyDueActions(engine, 1000);
+
+  return expect(notFilledBeforeMarketEvent, "sell market order active at market timestamp waits for that market event") &&
+         expect(engine.fills.size() == 1u, "sell market order fills after same-timestamp venue update") &&
+         expect(engine.fills[0].priceE8 == 114000000ll, "market sell fills at updated same-timestamp bid");
+}
+
 bool testLatencyRuntimeUsesDedicatedCancelChannel() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
@@ -342,6 +393,30 @@ bool testPostOnlyCrossingSellRejectsWithoutTakerFill() {
          expect(engine.orders[0].status == kRecordStatusRejected, "post-only crossing sell is rejected") &&
          expect(engine.fills.empty(), "post-only crossing sell does not taker-fill") &&
          expect(!engine.open[0].state.valid, "post-only crossing sell leaves no open order");
+}
+
+bool testNoFreeOrderSlotPublishesRejectedUserEvent() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, kMaxOrderStates + 1u> orders{};
+  for (std::size_t i = 0u; i < orders.size(); ++i) {
+    orders[i] = orderIntent(1000u + i, Side::Buy(), kPx100 - 200000000ll);
+  }
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+
+  applyIntents(engine, io, 1000, 100, 0);
+
+  hft_trader::strategy::RuntimeClientOrderId parsed{};
+  return expect(engine.orders.size() == kMaxOrderStates + 1u, "overflow order is recorded") &&
+         expect(engine.orders[kMaxOrderStates].status == kRecordStatusRejected, "overflow order is rejected") &&
+         expect(engine.userEvents.size() == 1u, "overflow order publishes rejected user event") &&
+         expect(engine.userEventDeliveryTsNs.size() == 1u, "overflow rejection stores delivery timestamp") &&
+         expect(engine.userEvents[0].orderStatus == canon::OrderStatus::Rejected, "overflow user event is rejected") &&
+         expect(hft_trader::strategy::parseRuntimeClientOrderId(engine.userEvents[0].clientOrderId, parsed),
+                "overflow rejected client order id parses") &&
+         expect(parsed.clientIntentId.raw == 1000u + kMaxOrderStates, "overflow rejection carries intent id");
 }
 
 bool testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() {
@@ -1318,6 +1393,9 @@ int main() {
   ok = testFillUserEventHasSeparateDeliveryLatency() && ok;
   ok = testPostOnlyCrossingBuyRejectsWithoutTakerFill() && ok;
   ok = testPostOnlyCrossingSellRejectsWithoutTakerFill() && ok;
+  ok = testNoFreeOrderSlotPublishesRejectedUserEvent() && ok;
+  ok = testMarketOrderAtSameTimestampWaitsForVenueTopUpdate() && ok;
+  ok = testSellMarketOrderAtSameTimestampWaitsForVenueTopUpdate() && ok;
   ok = testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() && ok;
   ok = testGtcCrossingLimitStillTakerFills() && ok;
   ok = testReduceOnlyMarketBuyDoesNotOpenWhenFlat() && ok;

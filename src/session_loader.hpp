@@ -11,7 +11,7 @@
 
 namespace hft_backtest::detail {
 
-constexpr std::size_t kSessionTimelineKindCount = 9u;
+constexpr std::size_t kSessionTimelineKindCount = 10u;
 
 struct PriceLevelRow {
   std::int64_t priceE8{0};
@@ -97,6 +97,10 @@ struct CandleRow {
   std::int64_t highE8{0};
   std::int64_t lowE8{0};
   std::int64_t quoteAmountE8{0};
+  std::int64_t openE8{0};
+  std::int64_t closeE8{0};
+  std::int64_t volumeE8{0};
+  bool hasOhlc{false};
 };
 
 struct SnapshotDocument {

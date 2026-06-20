@@ -251,6 +251,24 @@ void submitOrderIntent(EngineState& engine,
     action.commandClientIntentId = intent.clientIntentId;
     pushPendingAction(engine, std::move(action));
   } else {
+    OpenOrder rejected{};
+    rejected.state.valid = true;
+    rejected.state.clientIntentId = intent.clientIntentId;
+    rejected.state.desiredClientIntentId = intent.clientIntentId;
+    rejected.state.quoteSlotId = intent.quoteSlotId;
+    rejected.state.side = intent.side;
+    rejected.state.orderType = intent.orderType;
+    rejected.state.limitTimeInForcePolicy = intent.limitTimeInForcePolicy;
+    rejected.state.price = intent.price;
+    rejected.state.qty = intent.qty;
+    rejected.state.desiredPrice = intent.price;
+    rejected.state.desiredQty = intent.qty;
+    rejected.recordIndex = recordIndex;
+    rejected.createdTsNs = tsNs;
+    rejected.activeTsNs = activeTs;
+    rejected.reduceOnly = intent.reduceOnly;
+    rejected.postOnly = postOnly;
+    pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs), tsNs);
     engine.orders[recordIndex].status = kRecordStatusRejected;
   }
 }
@@ -361,6 +379,11 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
     }
   }
   if (changed) bumpContextRevision(engine);
+}
+
+void applyDueActionsBefore(EngineState& engine, std::int64_t tsNs) {
+  if (tsNs <= std::numeric_limits<std::int64_t>::min()) return;
+  applyDueActions(engine, tsNs - 1);
 }
 
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs) {

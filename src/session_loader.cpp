@@ -83,6 +83,48 @@ bool consume(std::string_view text, std::size_t& pos, char expected) noexcept {
   return true;
 }
 
+bool skipJsonString(std::string_view text, std::size_t& pos) noexcept {
+  skipWs(text, pos);
+  if (pos >= text.size() || text[pos] != '"') return false;
+  ++pos;
+  while (pos < text.size()) {
+    const char c = text[pos++];
+    if (c == '"') return true;
+    if (c == '\\') {
+      if (pos >= text.size()) return false;
+      ++pos;
+    }
+  }
+  return false;
+}
+
+std::int64_t candleTierFromTimeframe(std::string_view text, std::size_t begin, std::size_t end) noexcept {
+  const std::string_view timeframe = text.substr(begin, end - begin);
+  if (timeframe == "1m") return 1;
+  if (timeframe == "10m" || timeframe == "15m") return 2;
+  if (timeframe == "1d") return 3;
+  return 0;
+}
+
+bool parseJsonStringTier(std::string_view text, std::size_t& pos, std::int64_t& tier) noexcept {
+  skipWs(text, pos);
+  if (pos >= text.size() || text[pos] != '"') return false;
+  ++pos;
+  const std::size_t begin = pos;
+  while (pos < text.size()) {
+    const char c = text[pos++];
+    if (c == '"') {
+      tier = candleTierFromTimeframe(text, begin, pos - 1u);
+      return true;
+    }
+    if (c == '\\') {
+      if (pos >= text.size()) return false;
+      ++pos;
+    }
+  }
+  return false;
+}
+
 bool parseI64(std::string_view text, std::size_t& pos, std::int64_t& out) noexcept {
   skipWs(text, pos);
   if (pos >= text.size()) return false;
@@ -187,24 +229,6 @@ bool parsePriceLimitLine(std::string_view line, PriceLimitRow& out) noexcept {
   return true;
 }
 
-bool skipJsonString(std::string_view text, std::size_t& pos) noexcept {
-  skipWs(text, pos);
-  if (pos >= text.size() || text[pos] != '"') return false;
-  ++pos;
-  bool escaped = false;
-  while (pos < text.size()) {
-    const char c = text[pos++];
-    if (escaped) {
-      escaped = false;
-    } else if (c == '\\') {
-      escaped = true;
-    } else if (c == '"') {
-      return true;
-    }
-  }
-  return false;
-}
-
 bool skipJsonAtom(std::string_view text, std::size_t& pos) noexcept {
   skipWs(text, pos);
   if (pos >= text.size()) return false;
@@ -300,12 +324,49 @@ bool parseOpenInterestLine(std::string_view line, OpenInterestRow& out) noexcept
 bool parseCandleLine(std::string_view line, CandleRow& out) noexcept {
   std::size_t pos = 0;
   out = CandleRow{};
-  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tier) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') || !parseI64(line, pos, out.highE8) ||
-      !consume(line, pos, ',') || !parseI64(line, pos, out.lowE8) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.quoteAmountE8)) return false;
+  if (!consume(line, pos, '[')) return false;
+  skipWs(line, pos);
+  if (pos < line.size() && line[pos] == '"') {
+    if (!skipJsonString(line, pos) || !consume(line, pos, ',') ||
+        !skipJsonString(line, pos) || !consume(line, pos, ',') ||
+        !skipJsonString(line, pos) || !consume(line, pos, ',') ||
+        !parseJsonStringTier(line, pos, out.tier) || !consume(line, pos, ',') ||
+        !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
+        !parseI64(line, pos, out.openE8) || !consume(line, pos, ',') ||
+        !parseI64(line, pos, out.highE8) || !consume(line, pos, ',') ||
+        !parseI64(line, pos, out.lowE8) || !consume(line, pos, ',') ||
+        !parseI64(line, pos, out.closeE8) || !consume(line, pos, ',') ||
+        !parseI64(line, pos, out.volumeE8) || !consume(line, pos, ',') ||
+        !parseI64(line, pos, out.quoteAmountE8)) return false;
+    out.hasOhlc = true;
+    return out.tsNs > 0 && out.openE8 > 0 && out.highE8 > 0 && out.lowE8 > 0 &&
+           out.closeE8 > 0 && out.highE8 >= out.lowE8 &&
+           out.volumeE8 >= 0 && out.quoteAmountE8 >= 0;
+  }
+  if (!parseI64(line, pos, out.tier) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',')) return false;
+  std::int64_t firstPrice = 0;
+  std::int64_t secondPrice = 0;
+  std::int64_t thirdPrice = 0;
+  if (!parseI64(line, pos, firstPrice) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, secondPrice) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, thirdPrice)) return false;
+  if (consume(line, pos, ',')) {
+    out.openE8 = firstPrice;
+    out.highE8 = secondPrice;
+    out.lowE8 = thirdPrice;
+    if (!parseI64(line, pos, out.closeE8) || !consume(line, pos, ',') ||
+        !parseI64(line, pos, out.volumeE8) || !consume(line, pos, ',') ||
+        !parseI64(line, pos, out.quoteAmountE8)) return false;
+    out.hasOhlc = true;
+  } else {
+    out.highE8 = firstPrice;
+    out.lowE8 = secondPrice;
+    out.quoteAmountE8 = thirdPrice;
+  }
   return (out.tier >= 1 && out.tier <= 3 && out.tsNs > 0 && out.highE8 > 0 && out.lowE8 > 0 &&
-          out.highE8 >= out.lowE8 && out.quoteAmountE8 >= 0);
+          out.highE8 >= out.lowE8 && out.quoteAmountE8 >= 0 &&
+          (!out.hasOhlc || (out.openE8 > 0 && out.closeE8 > 0 && out.volumeE8 >= 0)));
 }
 
 bool parseBookDocument(std::string_view line, std::vector<PriceLevelRow>& levels, std::int64_t& tsNs, std::int64_t* ingestSeq = nullptr) noexcept {
@@ -458,7 +519,8 @@ std::size_t estimatedRowsFor(std::size_t bytes, std::string_view channel) noexce
   if (bytes == 0u) return 0u;
   std::size_t avgBytes = 96u;
   if (channel == "bookticker" || channel == "mark_price" || channel == "index_price" ||
-      channel == "funding" || channel == "open_interest" || channel == "candles") {
+      channel == "funding" || channel == "open_interest" || channel == "candles" ||
+      channel == "candles2" || channel == "candlesv2") {
     avgBytes = 64u;
   } else if (channel == "depth" || channel == "depth_tape") {
     avgBytes = 192u;
@@ -832,6 +894,7 @@ void rebuildReplayRange(SessionData& out) noexcept {
   for (const BookTickerRow& row : out.bookTickers) updateRange(out, row.tsNs);
   for (const PriceLimitRow& row : out.priceLimits) updateRange(out, row.tsNs);
   for (const DepthRow& row : out.depths) updateRange(out, row.tsNs);
+  for (const CandleRow& row : out.candles) updateRange(out, row.tsNs);
   for (const LiquidationRow& row : out.liquidations) updateRange(out, row.tsNs);
   for (const MarkPriceRow& row : out.markPrices) updateRange(out, row.tsNs);
   for (const IndexPriceRow& row : out.indexPrices) updateRange(out, row.tsNs);
@@ -866,6 +929,8 @@ Status loadSession(const std::filesystem::path& sessionPath,
   const std::string depthPath = extractChannelPath(manifest, "depth");
   const std::string depthSidecarPath = extractChannelSidecarPath(manifest, "depth");
   const std::string candlesPath = extractChannelPath(manifest, "candles");
+  std::string candles2Path = extractChannelPath(manifest, "candles2");
+  if (candles2Path.empty()) candles2Path = extractChannelPath(manifest, "candlesv2");
   const std::string liquidationsPath = extractChannelPath(manifest, "liquidations");
   const std::string markPricePath = extractChannelPath(manifest, "mark_price");
   const std::string indexPricePath = extractChannelPath(manifest, "index_price");
@@ -915,7 +980,19 @@ Status loadSession(const std::filesystem::path& sessionPath,
     if (!isOk(status)) return status;
   }
   if (plan.loadCandles) {
-    Status status = loadJsonl<CandleRow>(existingPath(sessionPath, candlesPath, "candles.jsonl"), "candles", plan.requireCandles, out.candles, parseCandleLine, error);
+    std::filesystem::path detailedPath = existingPath(sessionPath, candles2Path, "candles2.jsonl");
+    if (!std::filesystem::exists(detailedPath)) {
+      const std::filesystem::path candlesV2Path = existingPath(sessionPath, std::string_view{}, "candlesv2.jsonl");
+      if (std::filesystem::exists(candlesV2Path)) detailedPath = candlesV2Path;
+    }
+    const std::filesystem::path legacyPath = existingPath(sessionPath, candlesPath, "candles.jsonl");
+    const bool detailedExists = std::filesystem::exists(detailedPath);
+    Status status = loadJsonl<CandleRow>(detailedExists ? detailedPath : legacyPath,
+                                         detailedExists ? "candles2" : "candles",
+                                         plan.requireCandles,
+                                         out.candles,
+                                         parseCandleLine,
+                                         error);
     if (!isOk(status)) return status;
   }
   if (plan.loadLiquidations) {

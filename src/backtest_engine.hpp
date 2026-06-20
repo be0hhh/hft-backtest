@@ -56,7 +56,8 @@ constexpr std::uint8_t kTimelineKindMarkPrice = 5u;
 constexpr std::uint8_t kTimelineKindIndexPrice = 6u;
 constexpr std::uint8_t kTimelineKindFunding = 7u;
 constexpr std::uint8_t kTimelineKindOpenInterest = 8u;
-constexpr std::uint8_t kTimelineKindCount = 9u;
+constexpr std::uint8_t kTimelineKindCandle = 9u;
+constexpr std::uint8_t kTimelineKindCount = 10u;
 constexpr std::uint8_t kRecordActionNone = 0u;
 constexpr std::uint8_t kRecordActionOrder = 1u;
 constexpr std::uint8_t kRecordActionCancel = 3u;
@@ -205,7 +206,9 @@ struct EngineState {
   std::array<OpenOrder, kMaxOrderStates> open{};
   hft_trader::core::StrategyPositionState position{};
   hft_trader::core::StrategyMarketSnapshot snapshot{};
+  hft_trader::core::StrategyCandleSnapshot candle{};
   hft_trader::core::StrategyMarketSnapshot venueSnapshot{};
+  hft_trader::core::StrategyCandleSnapshot venueCandle{};
   hft_trader::core::LocalOrderBookState orderBook{};
   hft_trader::core::LocalOrderBookState venueOrderBook{};
   hft_trader::core::BboReconstructionState bboReconstruction{};
@@ -281,6 +284,7 @@ cxet::composite::MarkPriceRuntimeV1 toRuntime(const MarkPriceRow& row) noexcept;
 cxet::composite::IndexPriceRuntimeV1 toRuntime(const IndexPriceRow& row) noexcept;
 cxet::composite::FundingRuntimeV1 toRuntime(const FundingRow& row) noexcept;
 cxet::composite::OpenInterestRuntimeV1 toRuntime(const OpenInterestRow& row) noexcept;
+hft_trader::core::StrategyCandleSnapshot toRuntime(const CandleRow& row) noexcept;
 void toRuntime(const DepthRow& row,
                cxet::composite::OrderBookTapeRuntimeV1& tape,
                cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept;
@@ -312,6 +316,7 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
 void tryFillOnTop(EngineState& engine, std::int64_t tsNs);
 void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& trade);
 void applyDueActions(EngineState& engine, std::int64_t tsNs);
+void applyDueActionsBefore(EngineState& engine, std::int64_t tsNs);
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs);
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency);
 void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, std::uint64_t cancelLatencyUs);
