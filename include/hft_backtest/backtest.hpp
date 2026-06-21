@@ -63,6 +63,7 @@ struct BacktestRunRequest {
   std::vector<BacktestFeeSchedule> feeSchedules{};
   std::vector<BacktestLatencySchedule> latencySchedules{};
   bool writeArtifacts{true};
+  bool captureStrategySpread{false};
 };
 
 struct BacktestProgress {

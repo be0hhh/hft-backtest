@@ -112,6 +112,7 @@ struct InstrumentMetadata {
   std::int64_t tickSizeE8{1};
   std::int64_t lotSizeE8{1};
   std::int64_t contractBaseQtyE8{0};
+  std::int64_t priceBasisQtyE8{0};
 };
 
 struct SessionLoadPlan {

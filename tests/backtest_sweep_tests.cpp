@@ -126,6 +126,8 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
          expect(manifest.find("\"mode\": \"whole_session_exploration\"") != std::string::npos, "manifest labels exploration mode") &&
          expect(manifest.find("\"search_seed\": 99") != std::string::npos, "manifest declares search seed") &&
          expect(manifest.find("\"curves\"") != std::string::npos, "manifest declares compact curve artifact") &&
+         expect(manifest.find("\"legs\"") != std::string::npos, "manifest declares leg container") &&
+         expect(manifest.find("\"session_path\"") != std::string::npos, "manifest declares leg session path") &&
          expect(rows.find("\"distance_bps\"") != std::string::npos, "rows include distance_bps") &&
          expect(rows.find("\"trigger_bps\"") != std::string::npos, "rows include trigger_bps") &&
          expect(rows.find("\"legs\"") != std::string::npos, "rows include per-leg pnl container") &&
@@ -198,6 +200,44 @@ bool testSweepCanRunTwiceInOneProcess() {
          expect(first.pointsEvaluated == 2u && second.pointsEvaluated == 2u, "both sweep runs evaluate requested budget");
 }
 
+bool testSweepManifestDeclaresTwoLegSessionPaths() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_sweep_manifest_legs_" + std::to_string(std::rand()));
+  std::filesystem::create_directories(dir);
+
+  hft_backtest::BacktestSweepRequest request{};
+  request.baseRun.sessionPath = dir / "leg-a";
+  request.baseRun.configPath = dir / "config.ini";
+  request.baseRun.strategy = "stat_arb_band_ladder";
+  request.baseRun.sessions.push_back(hft_backtest::BacktestSessionRequest{dir / "leg-b", "kucoin_futures", "B-USDT"});
+  request.runBudget = 1u;
+
+  hft_backtest::BacktestSweepResult result{};
+  result.sweepId = "sweep-legs";
+  result.manifestPath = dir / "manifest.json";
+
+  hft_backtest::detail::BacktestSweepPointResult point{};
+  point.run.legs.push_back(hft_backtest::BacktestLegSummary{});
+  point.run.legs.back().sessionPath = dir / "leg-a";
+  point.run.legs.back().exchange = "aster";
+  point.run.legs.back().market = "futures";
+  point.run.legs.back().symbol = "A-USDT";
+  point.run.legs.push_back(hft_backtest::BacktestLegSummary{});
+  point.run.legs.back().sessionPath = dir / "leg-b";
+  point.run.legs.back().exchange = "kucoin";
+  point.run.legs.back().market = "futures";
+  point.run.legs.back().symbol = "B-USDT";
+
+  const hft_backtest::Status status = hft_backtest::detail::writeSweepManifest(request, result, {point});
+  const std::string manifest = readText(result.manifestPath);
+
+  return expect(status == hft_backtest::Status::Ok, "two-leg sweep manifest write succeeds") &&
+         expect(manifest.find("\"legs\"") != std::string::npos, "two-leg manifest includes legs") &&
+         expect(manifest.find((dir / "leg-a").generic_string()) != std::string::npos, "two-leg manifest includes primary session") &&
+         expect(manifest.find((dir / "leg-b").generic_string()) != std::string::npos, "two-leg manifest includes extra session") &&
+         expect(manifest.find("\"leg_index\": 1") != std::string::npos, "two-leg manifest declares second leg index");
+}
+
 }  // namespace
 
 int main() {
@@ -206,5 +246,6 @@ int main() {
   ok = testSearchPlanSamplesGridParamsDeterministically() && ok;
   ok = testSweepRunsSummaryOnlyAndWritesCompactArtifacts() && ok;
   ok = testSweepCanRunTwiceInOneProcess() && ok;
+  ok = testSweepManifestDeclaresTwoLegSessionPaths() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

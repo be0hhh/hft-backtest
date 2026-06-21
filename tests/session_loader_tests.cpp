@@ -44,6 +44,34 @@ void writeManifest(const std::filesystem::path& dir) {
             "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
 }
 
+bool testLoadSessionParsesInstrumentPriceBasis() {
+  const std::filesystem::path dir = makeSessionDir("price_basis_metadata");
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"finam\", \"market\": \"futures\", \"symbols\": [\"SRM6@RTSX\"]},\n"
+            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
+            "}\n");
+  writeText(dir / "instrument_metadata.json",
+            "{\"tick_size_e8\":1000000,\"lot_size_e8\":100000000,\"contract_base_qty_e8\":100000000,"
+            "\"price_basis_qty_e8\":10000000000}\n");
+
+  hft_backtest::detail::SessionData data{};
+  hft_backtest::detail::SessionLoadPlan plan{};
+  plan.loadTrades = false;
+  plan.loadBookTickers = false;
+  plan.loadPriceLimits = false;
+  plan.loadDepths = false;
+  std::string error{};
+
+  const hft_backtest::Status status = hft_backtest::detail::loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::Ok, "session with price basis metadata loads") &&
+         expect(data.instrument.tickSizeE8 == 1000000, "tick size metadata parsed") &&
+         expect(data.instrument.lotSizeE8 == 100000000, "lot size metadata parsed") &&
+         expect(data.instrument.contractBaseQtyE8 == 100000000, "contract base metadata parsed") &&
+         expect(data.instrument.priceBasisQtyE8 == 10000000000ll, "price basis metadata parsed");
+}
+
 bool testLoadSessionReadsOptionalReferenceStreams() {
   const std::filesystem::path dir = makeSessionDir("reference_streams");
   writeText(dir / "manifest.json",
@@ -308,6 +336,7 @@ bool testLoadSessionParsesStringDetailedCandles2Rows() {
 
 int main() {
   bool ok = true;
+  ok = testLoadSessionParsesInstrumentPriceBasis() && ok;
   ok = testLoadSessionReadsOptionalReferenceStreams() && ok;
   ok = testLoadSessionParsesCrLfAndFinalLineWithoutNewline() && ok;
   ok = testLoadSessionRejectsI64Overflow() && ok;

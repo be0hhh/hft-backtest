@@ -4,12 +4,14 @@
 
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace hft_backtest {
@@ -19,11 +21,23 @@ namespace {
 #define HFT_BACKTEST_TRADER_SOURCE_DIR "../hft-trader"
 #endif
 
+struct ParamTemplateMetadata {
+  std::string key{};
+  std::uint8_t exclusiveGroup{0u};
+  bool defaultActive{true};
+};
+
 struct IniTemplate {
   std::string fileName{};
   std::string strategyType{};
+  std::string displayNameRu{};
+  std::uint8_t minSessionCount{0u};
+  std::uint8_t maxSessionCount{0u};
+  std::vector<std::pair<std::string, std::string>> indicators{};
+  std::vector<std::pair<std::uint8_t, std::string>> paramGroups{};
+  std::vector<ParamTemplateMetadata> paramMetadata{};
   std::vector<std::pair<std::string, std::string>> strategyParams{};
-  std::size_t recorderLegCount{1u};
+  std::size_t recorderLegCount{0u};
 };
 
 struct MetadataCache {
@@ -78,6 +92,48 @@ bool isUnsignedIntegerText(std::string_view value) noexcept {
   return true;
 }
 
+std::uint8_t parseSessionCount(std::string_view value) noexcept {
+  if (!isUnsignedIntegerText(value)) return 0u;
+  std::uint32_t out = 0u;
+  for (char ch : value) {
+    out = out * 10u + static_cast<std::uint32_t>(ch - '0');
+    if (out > 255u) return 255u;
+  }
+  return static_cast<std::uint8_t>(out);
+}
+
+std::pair<std::string, std::string> parseIndicator(std::string_view value) {
+  std::size_t sep = value.find(':');
+  if (sep == std::string_view::npos) sep = value.find(',');
+  std::string id{};
+  std::string label{};
+  if (sep == std::string_view::npos) {
+    id = trim(value);
+    label = id;
+  } else {
+    id = trim(value.substr(0u, sep));
+    label = trim(value.substr(sep + 1u));
+    if (label.empty()) label = id;
+  }
+  if (id.empty()) return {};
+  return {std::move(id), std::move(label)};
+}
+
+bool parseBool(std::string_view value, bool fallback) noexcept {
+  if (value == "1" || value == "true" || value == "yes" || value == "on") return true;
+  if (value == "0" || value == "false" || value == "no" || value == "off") return false;
+  return fallback;
+}
+
+std::pair<std::uint8_t, std::string> parseParamGroup(std::string_view value) {
+  const std::size_t sep = value.find(':');
+  if (sep == std::string_view::npos) return {};
+  const std::uint8_t id = parseSessionCount(trim(value.substr(0u, sep)));
+  std::string key = trim(value.substr(sep + 1u));
+  if (id == 0u || key.empty()) return {};
+  return {id, std::move(key)};
+}
+
 StrategyParamKind inferParamKind(std::string_view key, std::string_view value) noexcept {
   if (key.find("qty") != std::string_view::npos) {
     return key.find("amount") != std::string_view::npos ? StrategyParamKind::DecimalQuoteAmount
@@ -104,9 +160,26 @@ std::size_t commaSeparatedCount(std::string_view text) noexcept {
   return count;
 }
 
-bool parseTemplateFile(const std::filesystem::path& path, IniTemplate& out) {
+ParamTemplateMetadata& paramTemplate(IniTemplate& ini, const std::string& key) {
+  for (ParamTemplateMetadata& metadata : ini.paramMetadata) {
+    if (metadata.key == key) return metadata;
+  }
+  ini.paramMetadata.push_back(ParamTemplateMetadata{});
+  ParamTemplateMetadata& out = ini.paramMetadata.back();
+  out.key = key;
+  return out;
+}
+
+const ParamTemplateMetadata* findParamTemplate(const IniTemplate& ini, const std::string& key) noexcept {
+  for (const ParamTemplateMetadata& metadata : ini.paramMetadata) {
+    if (metadata.key == key) return &metadata;
+  }
+  return nullptr;
+}
+
+bool parseTemplateFile(const std::filesystem::path& path, std::string fileName, IniTemplate& out) {
   out = IniTemplate{};
-  out.fileName = path.filename().string();
+  out.fileName = std::move(fileName);
   std::ifstream in(path);
   if (!in) return false;
 
@@ -132,6 +205,29 @@ bool parseTemplateFile(const std::filesystem::path& path, IniTemplate& out) {
       } else if (isIniIdentifier(key) && isStrategyParamKey(key)) {
         out.strategyParams.push_back({key, value});
       }
+    } else if (!isTemplateComment && section == "metadata") {
+      if (key == "display_name_ru" || key == "display_name") {
+        out.displayNameRu = value;
+      } else if (key == "min_sessions") {
+        out.minSessionCount = parseSessionCount(value);
+      } else if (key == "max_sessions") {
+        out.maxSessionCount = parseSessionCount(value);
+      } else if (key == "indicator") {
+        auto indicator = parseIndicator(value);
+        if (!indicator.first.empty()) out.indicators.push_back(std::move(indicator));
+      } else if (key == "param_group") {
+        auto group = parseParamGroup(value);
+        if (group.first != 0u) out.paramGroups.push_back(std::move(group));
+      }
+    } else if (!isTemplateComment && section.rfind("parameter.", 0u) == 0u) {
+      const std::string paramKey = section.substr(std::string_view{"parameter."}.size());
+      if (!isIniIdentifier(paramKey)) continue;
+      ParamTemplateMetadata& param = paramTemplate(out, paramKey);
+      if (key == "exclusive_group") {
+        param.exclusiveGroup = parseSessionCount(value);
+      } else if (key == "default_active") {
+        param.defaultActive = parseBool(lower(value), param.defaultActive);
+      }
     } else if (!isTemplateComment && section == "portfolio.recorder" && key == "legs") {
       const std::size_t legCount = commaSeparatedCount(value);
       if (legCount > out.recorderLegCount) out.recorderLegCount = legCount;
@@ -143,19 +239,24 @@ bool parseTemplateFile(const std::filesystem::path& path, IniTemplate& out) {
 std::vector<IniTemplate> loadTemplates() {
   std::vector<IniTemplate> out{};
   const std::filesystem::path root{HFT_BACKTEST_TRADER_SOURCE_DIR};
-  std::error_code ec{};
-  std::filesystem::directory_iterator it(root, ec);
-  if (ec) return out;
-  for (const std::filesystem::directory_entry& entry : it) {
-    if (!entry.is_regular_file(ec) || ec) {
-      ec.clear();
-      continue;
+  const auto appendDirectory = [&out](const std::filesystem::path& dir, const std::string& prefix) {
+    std::error_code ec{};
+    std::filesystem::directory_iterator it(dir, ec);
+    if (ec) return;
+    for (const std::filesystem::directory_entry& entry : it) {
+      if (!entry.is_regular_file(ec) || ec) {
+        ec.clear();
+        continue;
+      }
+      const std::filesystem::path path = entry.path();
+      if (path.extension() != ".ini") continue;
+      IniTemplate parsed{};
+      const std::string fileName = prefix.empty() ? path.filename().string() : prefix + "/" + path.filename().string();
+      if (parseTemplateFile(path, fileName, parsed)) out.push_back(std::move(parsed));
     }
-    const std::filesystem::path path = entry.path();
-    if (path.extension() != ".ini") continue;
-    IniTemplate parsed{};
-    if (parseTemplateFile(path, parsed)) out.push_back(std::move(parsed));
-  }
+  };
+  appendDirectory(root / "strategy_profiles", "strategy_profiles");
+  appendDirectory(root, "");
   return out;
 }
 
@@ -173,6 +274,7 @@ const char* keepString(MetadataCache& cache, std::string value) {
 
 void appendParam(MetadataCache& cache,
                  StrategyMetadata& metadata,
+                 const IniTemplate& ini,
                  const std::string& key,
                  const std::string& value) {
   if (metadata.paramCount >= kStrategyMetadataMaxParams) return;
@@ -185,45 +287,42 @@ void appendParam(MetadataCache& cache,
   param.descriptionRu = "";
   param.defaultValue = keepString(cache, value);
   param.kind = inferParamKind(key, value);
-  if (key == "amount_qty" || key == "order_qty") {
-    param.exclusiveGroup = 1u;
-    param.defaultActive = key == "amount_qty";
+  const ParamTemplateMetadata* templateParam = findParamTemplate(ini, key);
+  if (templateParam != nullptr) {
+    param.exclusiveGroup = templateParam->exclusiveGroup;
+    param.defaultActive = templateParam->defaultActive;
   }
 }
 
-void applySizingGroupIfNeeded(StrategyMetadata& metadata) noexcept {
-  bool hasAmount = false;
-  bool hasOrder = false;
-  for (std::size_t i = 0u; i < metadata.paramCount; ++i) {
-    if (metadata.params[i].key == nullptr) continue;
-    if (std::string_view{metadata.params[i].key} == "amount_qty") hasAmount = true;
-    if (std::string_view{metadata.params[i].key} == "order_qty") hasOrder = true;
+void applyTemplateSessionCounts(const IniTemplate& ini, StrategyMetadata& metadata) noexcept {
+  std::uint8_t minCount = ini.minSessionCount;
+  std::uint8_t maxCount = ini.maxSessionCount;
+  if (minCount == 0u && maxCount == 0u) {
+    const std::size_t legCount = ini.recorderLegCount == 0u ? 1u : ini.recorderLegCount;
+    const std::size_t boundedLegCount = legCount > 255u ? 255u : legCount;
+    minCount = static_cast<std::uint8_t>(boundedLegCount);
+    maxCount = minCount;
+  } else {
+    if (minCount == 0u) minCount = maxCount;
+    if (maxCount == 0u) maxCount = minCount;
+    if (maxCount < minCount) maxCount = minCount;
   }
-  if (!hasAmount || !hasOrder || metadata.paramGroupCount >= kStrategyMetadataMaxParamGroups) return;
-  metadata.paramGroups[metadata.paramGroupCount++] = StrategyParamGroupMetadata{1u, "sizing_mode"};
+  metadata.minSessionCount = minCount == 0u ? 1u : minCount;
+  metadata.maxSessionCount = maxCount == 0u ? metadata.minSessionCount : maxCount;
 }
 
-void applyStrategySpecificMetadata(StrategyMetadata& metadata) noexcept {
-  if (metadata.id == nullptr) return;
-  const std::string_view id{metadata.id};
-  if (id == "spread_maker1and2") {
-    metadata.displayNameRu = "Спред-мейкер 1/2";
-  } else if (id == "stat_arb_edge_maker") {
-    metadata.displayNameRu = "Стат-арбитраж reactive maker/taker";
-  } else if (id == "stat_arb_band_ladder") {
-    metadata.displayNameRu = "Стат-арбитраж band ladder";
-  } else if (id == "trend_probe") {
-    metadata.displayNameRu = "Диагностика тренда";
-    metadata.indicatorCount = 1u;
-    metadata.indicators[0] = StrategyIndicatorMetadata{"trend_score", "Trend score"};
-  } else if (id == "toxic_flow_probe") {
-    metadata.displayNameRu = "Диагностика toxic flow";
-    metadata.indicatorCount = 1u;
-    metadata.indicators[0] = StrategyIndicatorMetadata{"toxic_flow", "Toxic flow"};
-  } else if (id == "volatility_probe") {
-    metadata.displayNameRu = "Диагностика волатильности";
-    metadata.indicatorCount = 1u;
-    metadata.indicators[0] = StrategyIndicatorMetadata{"volatility_bps", "Volatility"};
+void appendIndicators(MetadataCache& cache, StrategyMetadata& metadata, const IniTemplate& ini) {
+  for (const auto& [id, label] : ini.indicators) {
+    if (metadata.indicatorCount >= kStrategyMetadataMaxIndicators) return;
+    metadata.indicators[metadata.indicatorCount++] =
+        StrategyIndicatorMetadata{keepString(cache, id), keepString(cache, label)};
+  }
+}
+
+void appendParamGroups(MetadataCache& cache, StrategyMetadata& metadata, const IniTemplate& ini) {
+  for (const auto& [id, key] : ini.paramGroups) {
+    if (metadata.paramGroupCount >= kStrategyMetadataMaxParamGroups) return;
+    metadata.paramGroups[metadata.paramGroupCount++] = StrategyParamGroupMetadata{id, keepString(cache, key)};
   }
 }
 
@@ -245,15 +344,13 @@ MetadataCache buildMetadataCache() {
     const IniTemplate* ini = templateForStrategy(templates, descriptor->name);
     if (ini != nullptr) {
       metadata.configTemplateFile = keepString(cache, ini->fileName);
-      const std::size_t legCount = ini->recorderLegCount == 0u ? 1u : ini->recorderLegCount;
-      const std::size_t boundedLegCount = legCount > 255u ? 255u : legCount;
-      metadata.minSessionCount = static_cast<std::uint8_t>(boundedLegCount);
-      metadata.maxSessionCount = static_cast<std::uint8_t>(boundedLegCount);
-      for (const auto& [key, value] : ini->strategyParams) appendParam(cache, metadata, key, value);
-      applySizingGroupIfNeeded(metadata);
+      if (!ini->displayNameRu.empty()) metadata.displayNameRu = keepString(cache, ini->displayNameRu);
+      applyTemplateSessionCounts(*ini, metadata);
+      appendIndicators(cache, metadata, *ini);
+      for (const auto& [key, value] : ini->strategyParams) appendParam(cache, metadata, *ini, key, value);
+      appendParamGroups(cache, metadata, *ini);
     }
 
-    applyStrategySpecificMetadata(metadata);
     cache.strategies.push_back(metadata);
   }
   return cache;

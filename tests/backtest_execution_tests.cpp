@@ -6,6 +6,7 @@
 #include "hft_trader/runtime/GeneratedStrategyRegistry.hpp"
 
 #include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -678,6 +679,38 @@ bool testTraderRiskStopCancelsOrdersKeepsPositionAndBlocksNewOrders() {
          expect(engine.orders.size() == 1u, "risk-stopped engine ignores later order intents");
 }
 
+bool testTraderRiskStopAfterForceCloseKeepsRiskFieldsAndFlatPosition() {
+  hft_backtest::BacktestRunRequest request{};
+  request.initialBalanceE8 = 5000000000ll;
+
+  EngineState engine{};
+  initializeAccounting(engine, request);
+  engine.takerFeeBpsE8 = 0;
+  setTop(engine, kPx100 - 3000000000ll, kPx100 - 2900000000ll);
+  std::int64_t netRealized = 0;
+  updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0, netRealized);
+  const std::int64_t breachedEquity = equityE8(engine);
+  const std::int64_t thresholdEquity = 3000000000ll;
+
+  const bool closed = forceClosePosition(engine, 2000, 0);
+  stopForTraderRisk(engine, 2000, breachedEquity, thresholdEquity);
+
+  return expect(breachedEquity < thresholdEquity, "test setup breaches trader risk threshold") &&
+         expect(closed, "risk stop force close reports success") &&
+         expect(engine.riskStopped, "engine records trader risk stop after close") &&
+         expect(engine.riskStopEquityE8 == breachedEquity, "risk stop preserves breach equity before close") &&
+         expect(engine.riskStopThresholdEquityE8 == thresholdEquity, "risk stop preserves threshold equity") &&
+         expect(engine.position.valid && engine.position.netQty.raw == 0, "risk stop after force close stores flat position view") &&
+         expect(engine.netQtyRaw == 0, "risk stop after force close flattens accounting position") &&
+         expect(engine.orders.size() == 1u, "risk stop force close writes one close order") &&
+         expect(engine.orders[0].type == kRecordTypeMarket, "risk stop force close uses market order") &&
+         expect(engine.orders[0].side == kRecordSideSell, "long risk stop force close submits sell") &&
+         expect(engine.orders[0].reduceOnly, "risk stop force close order is reduce-only") &&
+         expect(engine.fills.size() == 1u, "risk stop force close writes a fill") &&
+         expect(engine.fills[0].reduceOnly, "risk stop force close fill is reduce-only") &&
+         expect(engine.riskSnapshots.back().reason == kRiskSnapshotReasonTraderRiskStop, "risk stop writes final snapshot reason");
+}
+
 bool testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() {
   EngineState engine{};
   engine.takerFeeBpsE8 = 0;
@@ -1277,6 +1310,32 @@ bool metadataHasIndicator(const hft_backtest::StrategyMetadata& metadata, std::s
   return false;
 }
 
+bool metadataHasParamGroup(const hft_backtest::StrategyMetadata& metadata,
+                           std::uint8_t id,
+                           std::string_view key) noexcept {
+  for (std::size_t i = 0; i < metadata.paramGroupCount; ++i) {
+    if (metadata.paramGroups[i].id == id && metadata.paramGroups[i].key && key == metadata.paramGroups[i].key) return true;
+  }
+  return false;
+}
+
+bool metadataParamGroupIs(const hft_backtest::StrategyMetadata& metadata,
+                          std::string_view key,
+                          std::uint8_t group,
+                          bool defaultActive) noexcept {
+  for (std::size_t i = 0; i < metadata.paramCount; ++i) {
+    const hft_backtest::StrategyParamMetadata& param = metadata.params[i];
+    if (param.key && key == param.key) {
+      return param.exclusiveGroup == group && param.defaultActive == defaultActive;
+    }
+  }
+  return false;
+}
+
+bool metadataDisplayNameIs(const hft_backtest::StrategyMetadata& metadata, std::string_view expected) noexcept {
+  return metadata.displayNameRu != nullptr && expected == metadata.displayNameRu;
+}
+
 bool metadataParamDefaultIs(const hft_backtest::StrategyMetadata& metadata,
                             std::string_view key,
                             std::string_view expected) noexcept {
@@ -1305,12 +1364,18 @@ bool testStrategyMetadataMirrorsTraderRegistry() {
 bool testStrategyMetadataExposesOnlySupportedSpreadMakerParams() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("spread_maker1and2");
   return expect(metadata != nullptr, "spread_maker1and2 metadata is exported") &&
-         expect(metadata->configTemplateFile != nullptr && std::string_view{metadata->configTemplateFile} == "1and2.ini",
-                "spread_maker1and2 metadata discovers 1and2.ini") &&
+         expect(metadata->configTemplateFile != nullptr &&
+                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/1and2.ini",
+                "spread_maker1and2 metadata discovers strategy profile") &&
+         expect(metadataDisplayNameIs(*metadata, "Спред-мейкер 1/2"),
+                "spread_maker1and2 display name comes from ini metadata") &&
          expect(metadataHasParam(*metadata, "distance_bps"), "spread metadata contains distance_bps") &&
          expect(metadataHasParam(*metadata, "trigger_bps"), "spread metadata contains trigger_bps") &&
          expect(metadataHasParam(*metadata, "amount_qty"), "spread metadata contains amount_qty") &&
          expect(metadataHasParam(*metadata, "order_qty"), "spread metadata contains order_qty") &&
+         expect(metadataHasParamGroup(*metadata, 1u, "sizing_mode"), "spread sizing group comes from ini metadata") &&
+         expect(metadataParamGroupIs(*metadata, "amount_qty", 1u, true), "spread amount_qty is active sizing default from ini") &&
+         expect(metadataParamGroupIs(*metadata, "order_qty", 1u, false), "spread order_qty is inactive sizing option from ini") &&
          expect(metadataParamDefaultIs(*metadata, "amount_qty", "25"), "spread amount_qty default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "order_qty", "0.001"), "spread order_qty default comes from commented ini template") &&
          expect(!metadataHasParam(*metadata, "fixed quote distance in basis points. 1 bps"),
@@ -1328,8 +1393,11 @@ bool testStrategyMetadataExposesOnlySupportedSpreadMakerParams() {
 bool testStatArbBandLadderMetadataRequiresTwoSessions() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("stat_arb_band_ladder");
   return expect(metadata != nullptr, "stat_arb_band_ladder metadata is exported") &&
-         expect(metadata->configTemplateFile != nullptr && std::string_view{metadata->configTemplateFile} == "stat_arb_band_ladder.ini",
-                "stat arb band ladder discovers stat_arb_band_ladder.ini") &&
+         expect(metadata->configTemplateFile != nullptr &&
+                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/stat_arb_band_ladder.ini",
+                "stat arb band ladder discovers strategy profile") &&
+         expect(metadataDisplayNameIs(*metadata, "Стат-арбитраж band ladder"),
+                "stat arb band ladder display name comes from ini metadata") &&
          expect(metadata->minSessionCount == 2u, "stat arb band ladder requires at least two sessions") &&
          expect(metadata->maxSessionCount == 2u, "stat arb band ladder allows exactly two sessions") &&
          expect(metadataHasParam(*metadata, "ema_window_ms"), "stat arb band ladder metadata contains ema_window_ms") &&
@@ -1343,14 +1411,32 @@ bool testStatArbBandLadderMetadataRequiresTwoSessions() {
          expect(metadataParamDefaultIs(*metadata, "max_ladder_levels", "3"), "ladder levels default comes from ini") &&
          expect(metadataHasParam(*metadata, "amount_qty"), "stat arb band ladder metadata contains amount_qty") &&
          expect(metadataHasParam(*metadata, "order_qty"), "stat arb band ladder metadata contains order_qty") &&
+         expect(metadataHasParamGroup(*metadata, 1u, "sizing_mode"), "stat arb band ladder sizing group comes from ini metadata") &&
          expect(metadataParamDefaultIs(*metadata, "order_qty", "0.001"), "ladder order_qty default comes from commented ini template");
+}
+
+bool testBasisConvergenceMetadataRequiresTwoSessions() {
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("basis_convergence_probe");
+  return expect(metadata != nullptr, "basis_convergence_probe metadata is exported") &&
+         expect(metadata->configTemplateFile != nullptr &&
+                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/basis_convergence_probe.ini",
+                "basis_convergence_probe metadata discovers strategy profile") &&
+         expect(metadataDisplayNameIs(*metadata, "Диагностика базиса"),
+                "basis convergence display name comes from ini metadata") &&
+         expect(metadata->minSessionCount == 2u, "basis convergence probe requires at least two sessions") &&
+         expect(metadata->maxSessionCount == 2u, "basis convergence probe allows exactly two sessions") &&
+         expect(metadataHasParam(*metadata, "source"), "basis convergence metadata exposes source") &&
+         expect(metadataHasParam(*metadata, "timeframe_sec"), "basis convergence metadata exposes timeframe_sec");
 }
 
 bool testTrendProbeMetadataExposesTrendScoreIndicator() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("trend_probe");
   return expect(metadata != nullptr, "trend_probe metadata is exported") &&
-         expect(metadata->configTemplateFile != nullptr && std::string_view{metadata->configTemplateFile} == "trend_probe.ini",
-                "trend_probe metadata discovers trend_probe.ini") &&
+         expect(metadata->configTemplateFile != nullptr &&
+                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/trend_probe.ini",
+                "trend_probe metadata discovers strategy profile") &&
+         expect(metadataDisplayNameIs(*metadata, "Диагностика тренда"),
+                "trend_probe display name comes from ini metadata") &&
          expect(metadata->minSessionCount == 1u, "trend_probe uses one session") &&
          expect(metadata->maxSessionCount == 1u, "trend_probe allows one session") &&
          expect(metadata->paramCount == 0u, "trend_probe has no strategy params") &&
@@ -1360,8 +1446,11 @@ bool testTrendProbeMetadataExposesTrendScoreIndicator() {
 bool testVolatilityProbeMetadataExposesVolatilityIndicator() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("volatility_probe");
   return expect(metadata != nullptr, "volatility_probe metadata is exported") &&
-         expect(metadata->configTemplateFile != nullptr && std::string_view{metadata->configTemplateFile} == "volatility_probe.ini",
-                "volatility_probe metadata discovers volatility_probe.ini") &&
+         expect(metadata->configTemplateFile != nullptr &&
+                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/volatility_probe.ini",
+                "volatility_probe metadata discovers strategy profile") &&
+         expect(metadataDisplayNameIs(*metadata, "Диагностика волатильности"),
+                "volatility_probe display name comes from ini metadata") &&
          expect(metadata->minSessionCount == 1u, "volatility_probe uses one session") &&
          expect(metadata->maxSessionCount == 1u, "volatility_probe allows one session") &&
          expect(metadata->paramCount == 0u, "volatility_probe has no strategy params") &&
@@ -1371,8 +1460,11 @@ bool testVolatilityProbeMetadataExposesVolatilityIndicator() {
 bool testToxicFlowProbeMetadataRequiresDepthIndicator() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("toxic_flow_probe");
   return expect(metadata != nullptr, "toxic_flow_probe metadata is exported") &&
-         expect(metadata->configTemplateFile != nullptr && std::string_view{metadata->configTemplateFile} == "toxic_flow_probe.ini",
-                "toxic_flow_probe metadata discovers toxic_flow_probe.ini") &&
+         expect(metadata->configTemplateFile != nullptr &&
+                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/toxic_flow_probe.ini",
+                "toxic_flow_probe metadata discovers strategy profile") &&
+         expect(metadataDisplayNameIs(*metadata, "Диагностика toxic flow"),
+                "toxic_flow_probe display name comes from ini metadata") &&
          expect(metadata->minSessionCount == 1u, "toxic_flow_probe uses one session") &&
          expect(metadata->maxSessionCount == 1u, "toxic_flow_probe allows one session") &&
          expect(metadata->paramCount == 0u, "toxic_flow_probe has no strategy params") &&
@@ -1407,6 +1499,7 @@ int main() {
   ok = testRiskSnapshotCadenceLimitsOpenPositionMtmRows() && ok;
   ok = testHardLiquidationClearsStateAndBlocksNewOrders() && ok;
   ok = testTraderRiskStopCancelsOrdersKeepsPositionAndBlocksNewOrders() && ok;
+  ok = testTraderRiskStopAfterForceCloseKeepsRiskFieldsAndFlatPosition() && ok;
   ok = testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() && ok;
   ok = testCancelOpenOrdersAtFinishWritesCancelAcks() && ok;
   ok = testLoadSessionUsesManifestChannelPathsAndMetadata() && ok;
@@ -1425,6 +1518,7 @@ int main() {
   ok = testStrategyMetadataMirrorsTraderRegistry() && ok;
   ok = testStrategyMetadataExposesOnlySupportedSpreadMakerParams() && ok;
   ok = testStatArbBandLadderMetadataRequiresTwoSessions() && ok;
+  ok = testBasisConvergenceMetadataRequiresTwoSessions() && ok;
   ok = testTrendProbeMetadataExposesTrendScoreIndicator() && ok;
   ok = testVolatilityProbeMetadataExposesVolatilityIndicator() && ok;
   ok = testToxicFlowProbeMetadataRequiresDepthIndicator() && ok;

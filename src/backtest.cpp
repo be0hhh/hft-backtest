@@ -498,7 +498,7 @@ bool runCycle(const StrategyDescriptor& descriptor,
   hft_trader::core::StrategyDecisionTrace trace{};
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engine);
   const bool captureRangeTrace = false;
-  const bool captureSpreadTrace = emitsArbSpreadTrace(descriptor);
+  const bool captureSpreadTrace = request.captureStrategySpread && emitsArbSpreadTrace(descriptor);
   if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
@@ -649,7 +649,7 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   hft_trader::core::StrategyDecisionTrace trace{};
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engines[0]);
   const bool captureRangeTrace = false;
-  const bool captureSpreadTrace = emitsArbSpreadTrace(descriptor);
+  const bool captureSpreadTrace = request.captureStrategySpread && emitsArbSpreadTrace(descriptor);
   if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
@@ -751,6 +751,90 @@ hft_trader::core::StrategyAccountState accountStateFromEngine(const detail::Engi
   out.hasBalance = engine.initialBalanceE8 != 0 || engine.walletBalanceE8 != 0;
   out.hasFees = engine.makerFeeBpsE8 != 0 || engine.takerFeeBpsE8 != 0;
   return out;
+}
+
+std::size_t boundedRiskLegCount(std::size_t count) noexcept {
+  return count < hft_trader::core::kStrategyRuntimeMaxLegs
+      ? count
+      : hft_trader::core::kStrategyRuntimeMaxLegs;
+}
+
+void refreshRiskAccountsFromEngines(
+    const std::vector<detail::EngineState>& engines,
+    std::array<hft_trader::core::StrategyAccountState, hft_trader::core::kStrategyRuntimeMaxLegs>& out) noexcept {
+  out.fill(hft_trader::core::StrategyAccountState{});
+  const std::size_t count = boundedRiskLegCount(engines.size());
+  for (std::size_t i = 0u; i < count; ++i) out[i] = accountStateFromEngine(engines[i]);
+}
+
+const hft_trader::runtime::VenueRuntimeConfig* venueByName(
+    const hft_trader::runtime::HftRuntimeConfig& cfg,
+    const std::string& name) noexcept {
+  for (const hft_trader::runtime::VenueRuntimeConfig& candidate : cfg.venues) {
+    if (candidate.name == name) return &candidate;
+  }
+  return nullptr;
+}
+
+bool venueMatchesSession(const hft_trader::runtime::VenueRuntimeConfig& venue,
+                         const detail::SessionData& session) noexcept {
+  if (venue.exchange.raw != detail::exchangeFromText(session.exchange).raw) return false;
+  if (venue.market.raw != detail::marketFromText(session.market).raw) return false;
+  for (const Symbol& symbol : venue.symbols) {
+    if (session.symbol == symbol.data) return true;
+  }
+  return false;
+}
+
+const hft_trader::runtime::VenueRuntimeConfig* venueForSession(
+    const hft_trader::runtime::HftRuntimeConfig& cfg,
+    const detail::SessionData& session) noexcept {
+  for (const hft_trader::runtime::VenueRuntimeConfig& candidate : cfg.venues) {
+    if (venueMatchesSession(candidate, session)) return &candidate;
+  }
+  return nullptr;
+}
+
+void resolveRiskVenuesForSessions(
+    const hft_trader::runtime::HftRuntimeConfig& cfg,
+    const std::vector<detail::SessionData>& sessions,
+    std::array<const hft_trader::runtime::VenueRuntimeConfig*, hft_trader::core::kStrategyRuntimeMaxLegs>& out) noexcept {
+  out.fill(nullptr);
+  const std::size_t count = boundedRiskLegCount(sessions.size());
+  for (const hft_trader::runtime::PortfolioRuntimeConfig& portfolio : cfg.portfolios) {
+    if (portfolio.legs.size() != count) continue;
+    bool matches = true;
+    for (std::size_t i = 0u; i < count; ++i) {
+      const hft_trader::runtime::VenueRuntimeConfig* venue = venueByName(cfg, portfolio.legs[i].venue);
+      if (!venue || !venueMatchesSession(*venue, sessions[i]) || sessions[i].symbol != portfolio.legs[i].symbol.data) {
+        matches = false;
+        break;
+      }
+    }
+    if (!matches) continue;
+    for (std::size_t i = 0u; i < count; ++i) out[i] = venueByName(cfg, portfolio.legs[i].venue);
+    return;
+  }
+  for (std::size_t i = 0u; i < count; ++i) out[i] = venueForSession(cfg, sessions[i]);
+}
+
+void cancelOpenOrdersForTraderRiskClose(detail::EngineState& engine, std::int64_t tsNs) noexcept {
+  engine.pending.clear();
+  for (detail::OpenOrder& order : engine.open) {
+    if (order.state.valid && order.recordIndex < engine.orders.size()) {
+      engine.orders[order.recordIndex].status = detail::kRecordStatusCancelled;
+      engine.orders[order.recordIndex].tsNs = tsNs;
+    }
+    order = detail::OpenOrder{};
+  }
+}
+
+bool forceCloseForTraderRisk(detail::EngineState& engine, std::int64_t tsNs) {
+  cancelOpenOrdersForTraderRiskClose(engine, tsNs);
+  if (engine.netQtyRaw == 0) return true;
+  const std::uint64_t closeLatencyUs =
+      detail::sampleLatencyUs(engine.latency, detail::BacktestLatencyChannel::MarketOrder);
+  return detail::forceClosePosition(engine, tsNs, closeLatencyUs);
 }
 
 BacktestInputCoverage addCoverage(BacktestInputCoverage lhs, const BacktestInputCoverage& rhs) noexcept {
@@ -991,21 +1075,6 @@ std::int64_t portfolioEquityE8(const std::vector<detail::EngineState>& engines,
   for (const detail::EngineState& engine : engines) {
     out += engine.netRealizedPnlE8 + detail::unrealizedPnlE8(engine);
   }
-  return out;
-}
-
-hft_trader::core::StrategyAccountState portfolioAccountStateFromEngines(
-    const std::vector<detail::EngineState>& engines,
-    std::int64_t initialBalanceE8) noexcept {
-  hft_trader::core::StrategyAccountState out{};
-  out.initialBalanceE8 = initialBalanceE8;
-  out.walletBalanceE8 = initialBalanceE8;
-  for (const detail::EngineState& engine : engines) {
-    out.walletBalanceE8 += engine.netRealizedPnlE8;
-  }
-  out.availableBalanceE8 = out.walletBalanceE8;
-  out.equityE8 = portfolioEquityE8(engines, initialBalanceE8);
-  out.hasBalance = initialBalanceE8 != 0 || out.walletBalanceE8 != 0;
   return out;
 }
 
@@ -1657,6 +1726,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   instrument.tickSizeRaw = session.instrument.tickSizeE8;
   instrument.stepSizeRaw = session.instrument.lotSizeE8;
   instrument.contractBaseQtyRaw = session.instrument.contractBaseQtyE8;
+  instrument.priceBasisQtyRaw = session.instrument.priceBasisQtyE8;
   instrument.tickGrid = hft_trader::core::prepareFastStepGrid(instrument.tickSizeRaw);
   instrument.qtyStepGrid = hft_trader::core::prepareFastStepGrid(instrument.stepSizeRaw);
   instrument.contractBaseQtyGrid = hft_trader::core::prepareFastStepGrid(instrument.contractBaseQtyRaw);
@@ -1669,6 +1739,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       legInstruments[leg].tickSizeRaw = sessions[leg].instrument.tickSizeE8;
       legInstruments[leg].stepSizeRaw = sessions[leg].instrument.lotSizeE8;
       legInstruments[leg].contractBaseQtyRaw = sessions[leg].instrument.contractBaseQtyE8;
+      legInstruments[leg].priceBasisQtyRaw = sessions[leg].instrument.priceBasisQtyE8;
       legInstruments[leg].tickGrid = hft_trader::core::prepareFastStepGrid(legInstruments[leg].tickSizeRaw);
       legInstruments[leg].qtyStepGrid = hft_trader::core::prepareFastStepGrid(legInstruments[leg].stepSizeRaw);
       legInstruments[leg].contractBaseQtyGrid = hft_trader::core::prepareFastStepGrid(legInstruments[leg].contractBaseQtyRaw);
@@ -1864,7 +1935,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.events = timeline.size();
   const bool captureIndicatorTrace = !result.indicatorProfile.empty();
   const bool captureRangeTrace = false;
-  const bool captureSpreadTrace = emitsArbSpreadTrace(*descriptor);
+  const bool captureSpreadTrace = request.captureStrategySpread && emitsArbSpreadTrace(*descriptor);
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
       reserveEngineStorage(legEngine, timeline.size(), captureIndicatorTrace, captureRangeTrace, captureSpreadTrace);
@@ -1881,11 +1952,18 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     detail::appendEquityPoint(engine, result.firstTsNs);
     detail::appendRiskSnapshot(engine, result.firstTsNs, detail::kRiskSnapshotReasonStart);
   }
-  hft_trader::core::StrategyAccountState riskAccount = hasExplicitSessions
-      ? portfolioAccountStateFromEngines(legEngines, portfolioInitialBalance)
-      : accountStateFromEngine(engine);
+  std::array<hft_trader::core::StrategyAccountState, hft_trader::core::kStrategyRuntimeMaxLegs> riskAccounts{};
+  std::array<const hft_trader::runtime::VenueRuntimeConfig*, hft_trader::core::kStrategyRuntimeMaxLegs> riskVenues{};
+  const std::size_t riskAccountCount = hasExplicitSessions ? boundedRiskLegCount(legEngines.size()) : 1u;
+  if (hasExplicitSessions) {
+    refreshRiskAccountsFromEngines(legEngines, riskAccounts);
+    resolveRiskVenuesForSessions(cfg, sessions, riskVenues);
+  } else {
+    riskAccounts[0] = accountStateFromEngine(engine);
+    riskVenues[0] = venue;
+  }
   hft_trader::runtime::PortfolioRiskRuntimeState traderRiskState =
-      hft_trader::runtime::makePortfolioRiskRuntimeState(cfg.risk, &riskAccount, 1u);
+      hft_trader::runtime::makePortfolioRiskRuntimeState(cfg.risk, riskAccounts.data(), riskAccountCount, riskVenues.data());
   auto writeCurrentArtifacts = [&]() noexcept -> Status {
     if (hasExplicitSessions) {
       const std::int64_t tsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
@@ -1903,6 +1981,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.fills = engine.fills.size();
     return writeArtifacts(engine);
   };
+  bool traderRiskCloseProblem = false;
   bool legLiquidationProblem = false;
   auto tripHardLiquidation = [&](std::int64_t tsNs) noexcept -> bool {
     if (portfolioInitialBalance <= 0) return false;
@@ -1947,26 +2026,30 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.liquidationEquityE8 = equity;
     return true;
   };
-  auto tripTraderRiskStop = [&](std::int64_t tsNs) noexcept -> bool {
+  auto tripTraderRiskStop = [&](std::int64_t tsNs, bool forceRiskCheck = false) -> bool {
+    const TimeNs riskNow = timeNsFromI64(tsNs);
     if (hasExplicitSessions) {
       for (const detail::EngineState& legEngine : legEngines) {
         if (legEngine.liquidated) return false;
         if (legEngine.riskStopped) return true;
       }
-      riskAccount = portfolioAccountStateFromEngines(legEngines, portfolioInitialBalance);
+      refreshRiskAccountsFromEngines(legEngines, riskAccounts);
     } else {
       if (engine.liquidated) return false;
       if (engine.riskStopped) return true;
-      riskAccount = accountStateFromEngine(engine);
+      riskAccounts[0] = accountStateFromEngine(engine);
     }
+    if (!hft_trader::runtime::acquirePortfolioRiskEvaluationSlot(traderRiskState, riskNow, forceRiskCheck)) return false;
     const hft_trader::runtime::PortfolioRiskEvaluation eval =
-        hft_trader::runtime::evaluatePortfolioRisk(traderRiskState, &riskAccount, 1u, timeNsFromI64(tsNs));
+        hft_trader::runtime::evaluatePortfolioRisk(traderRiskState, riskAccounts.data(), riskAccountCount, riskNow);
     if (!eval.breached) return false;
     if (hasExplicitSessions) {
       for (detail::EngineState& legEngine : legEngines) {
+        if (!forceCloseForTraderRisk(legEngine, tsNs)) traderRiskCloseProblem = true;
         detail::stopForTraderRisk(legEngine, tsNs, eval.equityE8, eval.thresholdEquityE8);
       }
     } else {
+      if (!forceCloseForTraderRisk(engine, tsNs)) traderRiskCloseProblem = true;
       detail::stopForTraderRisk(engine, tsNs, eval.equityE8, eval.thresholdEquityE8);
     }
     hft_trader::runtime::applyPortfolioRiskToControl(traderRiskState, control);
@@ -2147,7 +2230,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
   if (!replayStopped) {
     const std::int64_t stopCheckTsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
-    (void)(tripHardLiquidation(stopCheckTsNs) || tripTraderRiskStop(stopCheckTsNs));
+    (void)(tripHardLiquidation(stopCheckTsNs) || tripTraderRiskStop(stopCheckTsNs, true));
   }
   const std::int64_t finalTsNs = result.lastTsNs > 0 ? result.lastTsNs + 1 : result.lastTsNs;
   if (hasExplicitSessions) {
@@ -2176,6 +2259,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (legLiquidationProblem) {
     result.status = Status::CorruptData;
     if (result.error.empty()) result.error = "leg liquidated";
+    Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
+    if (!isOk(writeStatus)) result.status = writeStatus;
+    return result;
+  }
+  if (traderRiskCloseProblem) {
+    result.status = Status::InvalidArgument;
+    result.error = "trader risk stop could not force-close all open positions";
     Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
     if (!isOk(writeStatus)) result.status = writeStatus;
     return result;

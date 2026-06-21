@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -31,6 +32,7 @@ void writeSweepLegs(std::ofstream& out, const BacktestRunResult& run, bool inclu
     if (i != 0u) out << ',';
     out << '{';
     out << q << "leg_index" << q << ':' << i << ',';
+    out << q << "session_path" << q << ':' << quote(leg.sessionPath.generic_string()) << ',';
     out << q << "exchange" << q << ':' << quote(leg.exchange) << ',';
     out << q << "market" << q << ':' << quote(leg.market) << ',';
     out << q << "symbol" << q << ':' << quote(leg.symbol) << ',';
@@ -48,6 +50,50 @@ void writeSweepLegs(std::ofstream& out, const BacktestRunResult& run, bool inclu
     out << '}';
   }
   out << ']';
+}
+
+void writeSweepManifestLegs(std::ofstream& out,
+                            const BacktestSweepRequest& request,
+                            const std::vector<BacktestSweepPointResult>& points) {
+  const char q = '"';
+  for (const BacktestSweepPointResult& point : points) {
+    if (point.run.legs.empty()) continue;
+    out << "  " << q << "legs" << q << ": [";
+    for (std::size_t i = 0u; i < point.run.legs.size(); ++i) {
+      const BacktestLegSummary& leg = point.run.legs[i];
+      if (i != 0u) out << ", ";
+      out << '{'
+          << q << "leg_index" << q << ": " << i << ", "
+          << q << "session_path" << q << ": " << quote(leg.sessionPath.generic_string()) << ", "
+          << q << "exchange" << q << ": " << quote(leg.exchange) << ", "
+          << q << "market" << q << ": " << quote(leg.market) << ", "
+          << q << "symbol" << q << ": " << quote(leg.symbol)
+          << '}';
+    }
+    out << "],\n";
+    return;
+  }
+
+  out << "  " << q << "legs" << q << ": [";
+  bool wrote = false;
+  auto writeFallbackLeg = [&](std::size_t index, const std::filesystem::path& path, const std::string& symbol) {
+    if (path.empty()) return;
+    if (wrote) out << ", ";
+    out << '{'
+        << q << "leg_index" << q << ": " << index << ", "
+        << q << "session_path" << q << ": " << quote(path.generic_string()) << ", "
+        << q << "exchange" << q << ": " << quote(std::string{}) << ", "
+        << q << "market" << q << ": " << quote(std::string{}) << ", "
+        << q << "symbol" << q << ": " << quote(symbol)
+        << '}';
+    wrote = true;
+  };
+  std::size_t index = 0u;
+  if (!request.baseRun.sessionPath.empty()) writeFallbackLeg(index++, request.baseRun.sessionPath, std::string{});
+  for (const BacktestSessionRequest& session : request.baseRun.sessions) {
+    writeFallbackLeg(index++, session.path, session.symbol);
+  }
+  out << "],\n";
 }
 
 }  // namespace
@@ -126,6 +172,7 @@ Status writeSweepManifest(const BacktestSweepRequest& request,
   out << "  " << q << "session_path" << q << ": " << quote(baseSessionPath(request).generic_string()) << ",\n";
   out << "  " << q << "config_path" << q << ": " << quote(request.baseRun.configPath.generic_string()) << ",\n";
   out << "  " << q << "strategy" << q << ": " << quote(request.baseRun.strategy) << ",\n";
+  writeSweepManifestLegs(out, request, points);
   out << "  " << q << "budget" << q << ": " << request.runBudget << ",\n";
   out << "  " << q << "search_seed" << q << ": " << request.searchSeed << ",\n";
   out << "  " << q << "points_evaluated" << q << ": " << points.size() << ",\n";
