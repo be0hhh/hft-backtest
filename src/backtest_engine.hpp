@@ -175,6 +175,7 @@ struct OpenOrder {
   std::size_t recordIndex{kNoRecordIndex};
   std::int64_t createdTsNs{0};
   std::int64_t activeTsNs{0};
+  std::int64_t filledQtyRaw{0};
   bool active{false};
   bool reduceOnly{false};
   bool postOnly{false};

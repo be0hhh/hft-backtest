@@ -68,10 +68,12 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
                                              const OpenOrder& order,
                                              std::int64_t priceE8,
                                              std::int64_t qtyE8,
+                                             std::int64_t cumulativeQtyE8,
                                              std::int64_t tsNs,
                                              std::int64_t feeE8,
                                              std::int64_t realizedPnlE8,
-                                             bool taker) noexcept {
+                                             bool taker,
+                                             bool finalFill) noexcept {
   cxet::composite::UserDataEvent event{};
   event.exchangeId = engine.exchange;
   event.kind = cxet::composite::UserDataEventKind::Order;
@@ -82,13 +84,13 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
   event.sideSet = 1u;
   event.orderType = order.state.orderType;
   event.orderTypeSet = 1u;
-  event.orderStatus = canon::OrderStatus::Closed;
+  event.orderStatus = finalFill ? canon::OrderStatus::Closed : canon::OrderStatus::PartiallyFilled;
   event.orderStatusSet = 1u;
   event.price.raw = priceE8;
   event.avgPrice.raw = priceE8;
   event.lastPrice.raw = priceE8;
-  event.qty.raw = qtyE8;
-  event.filledQty.raw = qtyE8;
+  event.qty = order.state.qty;
+  event.filledQty.raw = cumulativeQtyE8;
   event.lastFilledQty.raw = qtyE8;
   event.fee.raw = feeE8;
   event.realizedPnl.raw = realizedPnlE8;
@@ -134,17 +136,35 @@ void pushUserEvent(EngineState& engine, cxet::composite::UserDataEvent event, st
   engine.userEventDeliveryTsNs.push_back(userEventDeliveryTs(engine, eventTsNs));
 }
 
-std::int64_t reduceOnlyFillQty(const EngineState& engine, const OpenOrder& order) noexcept {
-  const std::int64_t requested = order.state.qty.raw;
-  if (!order.reduceOnly) return requested;
-  if (requested <= 0 || engine.netQtyRaw == 0) return 0;
+std::int64_t remainingOrderQty(const OpenOrder& order) noexcept {
+  if (order.state.qty.raw <= order.filledQtyRaw) return 0;
+  return order.state.qty.raw - order.filledQtyRaw;
+}
+
+std::int64_t reduceOnlyPositionCloseQty(const EngineState& engine, const OpenOrder& order) noexcept {
+  if (!order.reduceOnly) return std::numeric_limits<std::int64_t>::max();
+  if (engine.netQtyRaw == 0) return 0;
   if (engine.netQtyRaw > 0) {
     if (order.state.side.raw != Side::Sell().raw) return 0;
-    return requested < engine.netQtyRaw ? requested : engine.netQtyRaw;
+    return engine.netQtyRaw;
   }
   const std::int64_t shortQty = -engine.netQtyRaw;
   if (order.state.side.raw != Side::Buy().raw) return 0;
-  return requested < shortQty ? requested : shortQty;
+  return shortQty;
+}
+
+std::int64_t fillableOrderQty(const EngineState& engine,
+                              const OpenOrder& order,
+                              std::int64_t requestedQty) noexcept {
+  if (requestedQty <= 0) return 0;
+  const std::int64_t remaining = remainingOrderQty(order);
+  if (remaining <= 0) return 0;
+  std::int64_t out = requestedQty < remaining ? requestedQty : remaining;
+  if (!order.reduceOnly) return out;
+  const std::int64_t closeQty = reduceOnlyPositionCloseQty(engine, order);
+  if (closeQty <= 0) return 0;
+  if (out > closeQty) out = closeQty;
+  return out;
 }
 
 bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
@@ -297,12 +317,16 @@ std::int64_t delayedTs(std::int64_t tsNs, std::uint64_t latencyUs) noexcept {
 bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std::int64_t tsNs, bool taker) {
   if (engine.liquidated || engine.riskStopped) return false;
   if (!order.state.valid || !order.active || order.state.qty.raw <= 0 || priceE8 <= 0) return false;
-  const std::int64_t fillQty = reduceOnlyFillQty(engine, order);
+  const std::int64_t requestedQty = remainingOrderQty(order);
+  const std::int64_t fillQty = fillableOrderQty(engine, order, requestedQty);
   if (fillQty <= 0) return rejectOrder(engine, order, tsNs);
   const std::int64_t feeBpsE8 = taker ? engine.takerFeeBpsE8 : engine.makerFeeBpsE8;
   const std::int64_t feeE8 = feeForFillE8(priceE8, fillQty, feeBpsE8);
   std::int64_t netRealized = 0;
   updatePosition(engine, order.state.side, priceE8, fillQty, tsNs, feeBpsE8, netRealized);
+  order.filledQtyRaw += fillQty;
+  const bool finalFill = order.filledQtyRaw >= order.state.qty.raw ||
+                         (order.reduceOnly && fillQty >= reduceOnlyPositionCloseQty(engine, order));
   engine.fills.push_back(JsonFill{engine.legIndex,
                                   order.state.clientIntentId.raw,
                                   order.activeTsNs,
@@ -315,9 +339,54 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
   appendEquityPoint(engine, tsNs);
   appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonFill);
   if (order.reduceOnly) ++engine.reduceOnlyFills;
-  pushUserEvent(engine, makeFillEvent(engine, order, priceE8, fillQty, tsNs, feeE8, netRealized, taker), tsNs);
-  if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
-  order = OpenOrder{};
+  pushUserEvent(engine, makeFillEvent(engine, order, priceE8, fillQty, order.filledQtyRaw, tsNs, feeE8, netRealized, taker, finalFill), tsNs);
+  if (finalFill) {
+    if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
+    order = OpenOrder{};
+  } else if (order.recordIndex < engine.orders.size()) {
+    engine.orders[order.recordIndex].status = kRecordStatusActive;
+  }
+  bumpContextRevision(engine);
+  return true;
+}
+
+bool fillOrderQty(EngineState& engine,
+                  OpenOrder& order,
+                  std::int64_t priceE8,
+                  std::int64_t requestedQty,
+                  std::int64_t tsNs,
+                  bool taker) {
+  if (engine.liquidated || engine.riskStopped) return false;
+  if (!order.state.valid || !order.active || order.state.qty.raw <= 0 || priceE8 <= 0) return false;
+  const std::int64_t fillQty = fillableOrderQty(engine, order, requestedQty);
+  if (fillQty <= 0) return rejectOrder(engine, order, tsNs);
+  const std::int64_t feeBpsE8 = taker ? engine.takerFeeBpsE8 : engine.makerFeeBpsE8;
+  const std::int64_t feeE8 = feeForFillE8(priceE8, fillQty, feeBpsE8);
+  std::int64_t netRealized = 0;
+  const std::int64_t closeQtyBefore = reduceOnlyPositionCloseQty(engine, order);
+  updatePosition(engine, order.state.side, priceE8, fillQty, tsNs, feeBpsE8, netRealized);
+  order.filledQtyRaw += fillQty;
+  const bool finalFill = order.filledQtyRaw >= order.state.qty.raw ||
+                         (order.reduceOnly && closeQtyBefore != std::numeric_limits<std::int64_t>::max() && fillQty >= closeQtyBefore);
+  engine.fills.push_back(JsonFill{engine.legIndex,
+                                  order.state.clientIntentId.raw,
+                                  order.activeTsNs,
+                                  tsNs,
+                                  recordSide(order.state.side),
+                                  priceE8,
+                                  fillQty,
+                                  netRealized,
+                                  order.reduceOnly});
+  appendEquityPoint(engine, tsNs);
+  appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonFill);
+  if (order.reduceOnly) ++engine.reduceOnlyFills;
+  pushUserEvent(engine, makeFillEvent(engine, order, priceE8, fillQty, order.filledQtyRaw, tsNs, feeE8, netRealized, taker, finalFill), tsNs);
+  if (finalFill) {
+    if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
+    order = OpenOrder{};
+  } else if (order.recordIndex < engine.orders.size()) {
+    engine.orders[order.recordIndex].status = kRecordStatusActive;
+  }
   bumpContextRevision(engine);
   return true;
 }
@@ -345,9 +414,9 @@ void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& 
   for (OpenOrder& order : engine.open) {
     if (!order.state.valid || !order.active || order.state.orderType == canon::OrderType::Market) continue;
     if (trade.side.raw == Side::Buy().raw && order.state.side.raw == Side::Sell().raw && trade.price.raw >= order.state.price.raw) {
-      (void)fillOrder(engine, order, order.state.price.raw, static_cast<std::int64_t>(trade.ts.raw), false);
+      (void)fillOrderQty(engine, order, order.state.price.raw, trade.qty.raw, static_cast<std::int64_t>(trade.ts.raw), false);
     } else if (trade.side.raw == Side::Sell().raw && order.state.side.raw == Side::Buy().raw && trade.price.raw <= order.state.price.raw) {
-      (void)fillOrder(engine, order, order.state.price.raw, static_cast<std::int64_t>(trade.ts.raw), false);
+      (void)fillOrderQty(engine, order, order.state.price.raw, trade.qty.raw, static_cast<std::int64_t>(trade.ts.raw), false);
     }
   }
 }

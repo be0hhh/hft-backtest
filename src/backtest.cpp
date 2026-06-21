@@ -1727,6 +1727,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   instrument.stepSizeRaw = session.instrument.lotSizeE8;
   instrument.contractBaseQtyRaw = session.instrument.contractBaseQtyE8;
   instrument.priceBasisQtyRaw = session.instrument.priceBasisQtyE8;
+  instrument.expiryUtcNs = static_cast<std::uint64_t>(session.instrument.expiryUtcNs > 0 ? session.instrument.expiryUtcNs : 0);
   instrument.tickGrid = hft_trader::core::prepareFastStepGrid(instrument.tickSizeRaw);
   instrument.qtyStepGrid = hft_trader::core::prepareFastStepGrid(instrument.stepSizeRaw);
   instrument.contractBaseQtyGrid = hft_trader::core::prepareFastStepGrid(instrument.contractBaseQtyRaw);
@@ -1740,6 +1741,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       legInstruments[leg].stepSizeRaw = sessions[leg].instrument.lotSizeE8;
       legInstruments[leg].contractBaseQtyRaw = sessions[leg].instrument.contractBaseQtyE8;
       legInstruments[leg].priceBasisQtyRaw = sessions[leg].instrument.priceBasisQtyE8;
+      legInstruments[leg].expiryUtcNs = static_cast<std::uint64_t>(sessions[leg].instrument.expiryUtcNs > 0 ? sessions[leg].instrument.expiryUtcNs : 0);
       legInstruments[leg].tickGrid = hft_trader::core::prepareFastStepGrid(legInstruments[leg].tickSizeRaw);
       legInstruments[leg].qtyStepGrid = hft_trader::core::prepareFastStepGrid(legInstruments[leg].stepSizeRaw);
       legInstruments[leg].contractBaseQtyGrid = hft_trader::core::prepareFastStepGrid(legInstruments[leg].contractBaseQtyRaw);

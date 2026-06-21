@@ -53,7 +53,7 @@ bool testLoadSessionParsesInstrumentPriceBasis() {
             "}\n");
   writeText(dir / "instrument_metadata.json",
             "{\"tick_size_e8\":1000000,\"lot_size_e8\":100000000,\"contract_base_qty_e8\":100000000,"
-            "\"price_basis_qty_e8\":10000000000}\n");
+            "\"price_basis_qty_e8\":10000000000,\"expiry_utc_ns\":1781913600000000000}\n");
 
   hft_backtest::detail::SessionData data{};
   hft_backtest::detail::SessionLoadPlan plan{};
@@ -69,7 +69,8 @@ bool testLoadSessionParsesInstrumentPriceBasis() {
          expect(data.instrument.tickSizeE8 == 1000000, "tick size metadata parsed") &&
          expect(data.instrument.lotSizeE8 == 100000000, "lot size metadata parsed") &&
          expect(data.instrument.contractBaseQtyE8 == 100000000, "contract base metadata parsed") &&
-         expect(data.instrument.priceBasisQtyE8 == 10000000000ll, "price basis metadata parsed");
+         expect(data.instrument.priceBasisQtyE8 == 10000000000ll, "price basis metadata parsed") &&
+         expect(data.instrument.expiryUtcNs == 1781913600000000000ll, "expiry metadata parsed");
 }
 
 bool testLoadSessionReadsOptionalReferenceStreams() {

@@ -862,6 +862,7 @@ void loadInstrumentMetadata(const std::filesystem::path& path, InstrumentMetadat
   (void)extractPositiveI64Field(text, "\"lot_size_e8\"", out.lotSizeE8);
   (void)extractPositiveI64Field(text, "\"contract_base_qty_e8\"", out.contractBaseQtyE8);
   (void)extractPositiveI64Field(text, "\"price_basis_qty_e8\"", out.priceBasisQtyE8);
+  (void)extractPositiveI64Field(text, "\"expiry_utc_ns\"", out.expiryUtcNs);
 }
 
 void loadTradeHistoryManifestFields(std::string_view manifest, SessionData& out) noexcept {

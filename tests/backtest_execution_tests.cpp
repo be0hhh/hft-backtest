@@ -66,6 +66,12 @@ hft_trader::core::OrderIntent reduceMarketIntent(std::uint64_t orderId, Side sid
   return out;
 }
 
+hft_trader::core::OrderIntent reduceMarketIntentQty(std::uint64_t orderId, Side side, std::int64_t qtyRaw) noexcept {
+  hft_trader::core::OrderIntent out = reduceMarketIntent(orderId, side);
+  out.qty = amount(qtyRaw);
+  return out;
+}
+
 hft_trader::core::OrderIntent marketIntent(std::uint64_t orderId, Side side) noexcept {
   hft_trader::core::OrderIntent out{};
   out.clientIntentId = id(orderId);
@@ -437,6 +443,7 @@ bool testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() {
   trade.ts.raw = 3000;
   trade.side = Side::Sell();
   trade.price.raw = kPx100 - 100000000ll;
+  trade.qty.raw = kQty1;
   tryFillOnTrade(engine, trade);
 
   return expect(policyVisible, "post-only resting order state keeps post-only policy") &&
@@ -445,6 +452,51 @@ bool testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() {
          expect(engine.fills[0].orderId == 42u, "post-only maker fill uses order id") &&
          expect(engine.userEvents.size() == 1u, "post-only maker fill publishes one user event") &&
          expect(engine.userEvents[0].maker == 1u, "post-only trade fill is maker");
+}
+
+bool testTradeQtyPartialFillKeepsMakerOrderLiveUntilCumulativeFilled() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 200000000ll, kPx100 + 200000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(43, Side::Buy(), kPx100 - 100000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 1000, 0, 0);
+
+  cxet::composite::TradeRuntimeV1 first{};
+  first.ts.raw = 2000;
+  first.side = Side::Sell();
+  first.price.raw = kPx100 - 100000000ll;
+  first.qty.raw = 25000000;
+  tryFillOnTrade(engine, first);
+
+  const bool partialVisible = engine.open[0].state.valid && engine.open[0].active;
+  const bool partialOrderActive = engine.orders[0].status == kRecordStatusActive;
+  const bool partialUserEvent = engine.userEvents.size() == 1u &&
+                                engine.userEvents[0].orderStatus == canon::OrderStatus::PartiallyFilled &&
+                                engine.userEvents[0].lastFilledQty.raw == 25000000 &&
+                                engine.userEvents[0].filledQty.raw == 25000000;
+
+  cxet::composite::TradeRuntimeV1 second{};
+  second.ts.raw = 3000;
+  second.side = Side::Sell();
+  second.price.raw = kPx100 - 100000000ll;
+  second.qty.raw = 75000000;
+  tryFillOnTrade(engine, second);
+
+  return expect(partialVisible, "partial maker trade leaves order live") &&
+         expect(partialOrderActive, "partial maker trade keeps order record active") &&
+         expect(partialUserEvent, "partial maker trade publishes partial cumulative user event") &&
+         expect(engine.fills.size() == 2u, "partial maker order writes two fills") &&
+         expect(engine.fills[0].qtyE8 == 25000000, "first maker fill uses trade qty") &&
+         expect(engine.fills[1].qtyE8 == 75000000, "second maker fill uses remaining trade qty") &&
+         expect(engine.userEvents.size() == 2u, "final maker fill publishes second user event") &&
+         expect(engine.userEvents[1].orderStatus == canon::OrderStatus::Closed, "final maker fill closes user order") &&
+         expect(engine.userEvents[1].lastFilledQty.raw == 75000000, "final maker fill carries last delta") &&
+         expect(engine.userEvents[1].filledQty.raw == 100000000, "final maker fill carries cumulative filled qty") &&
+         expect(engine.orders[0].status == kRecordStatusFilled, "final maker fill marks order filled") &&
+         expect(!engine.open[0].state.valid, "final maker fill clears open order") &&
+         expect(engine.netQtyRaw == 100000000, "partial maker fills accumulate position");
 }
 
 bool testGtcCrossingLimitStillTakerFills() {
@@ -497,6 +549,26 @@ bool testReduceOnlyMarketSellClosesLongAtBid() {
          expect(engine.reduceOnlyOrders == 1u, "reduce-only order is counted") &&
          expect(engine.reduceOnlyFills == 1u, "reduce-only fill is counted") &&
          expect(engine.netRealizedPnlE8 == 200000000ll, "reduce-only close realizes bid-entry pnl");
+}
+
+bool testReduceOnlyMarketSellCapsToActualLongPosition() {
+  EngineState engine{};
+  engine.takerFeeBpsE8 = 0;
+  setTop(engine, kPx100 + 200000000ll, kPx100 + 300000000ll);
+  std::int64_t netRealized = 0;
+  updatePosition(engine, Side::Buy(), kPx100, 40000000, 100, 0, netRealized);
+  std::array<hft_trader::core::OrderIntent, 1> orders{reduceMarketIntentQty(50, Side::Sell(), kQty1)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 200, 0, 0);
+  return expect(engine.netQtyRaw == 0, "oversized reduce-only sell does not open short") &&
+         expect(engine.fills.size() == 1u, "oversized reduce-only close writes one capped fill") &&
+         expect(engine.fills[0].qtyE8 == 40000000, "reduce-only fill qty is capped to actual long") &&
+         expect(engine.fills[0].reduceOnly, "capped fill is marked reduce-only") &&
+         expect(engine.orders[0].qtyE8 == kQty1, "order record keeps requested qty") &&
+         expect(engine.userEvents.size() == 1u, "capped reduce-only fill publishes one user event") &&
+         expect(engine.userEvents[0].lastFilledQty.raw == 40000000, "user event reports capped fill qty");
 }
 
 bool testReduceOnlyMarketBuyClosesShortAtAsk() {
@@ -766,7 +838,7 @@ bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
             "  },\n"
             "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
             "}\n");
-  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000}\n");
+  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"expiry_utc_ns\":1781913600000000000}\n");
   writeText(dir / "jsonl" / "trades.jsonl", "[10000000000,100000000,1,1000]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,1001]\n");
   writeText(dir / "jsonl" / "price_limit.jsonl", "[9500000000,10500000000,1,1001]\n");
@@ -796,7 +868,8 @@ bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
          expect(data.depths.size() == 1u, "loader reads depth from channel path") &&
          expect(data.candles.size() == 1u, "loader reads candles from channel path") &&
          expect(data.instrument.tickSizeE8 == 1000000, "loader reads tick size metadata") &&
-         expect(data.instrument.lotSizeE8 == 1000, "loader reads lot size metadata");
+         expect(data.instrument.lotSizeE8 == 1000, "loader reads lot size metadata") &&
+         expect(data.instrument.expiryUtcNs == 1781913600000000000ll, "loader reads expiry metadata");
 }
 
 bool testLoadSessionFailsMissingRequiredDepth() {
@@ -1421,12 +1494,13 @@ bool testBasisConvergenceMetadataRequiresTwoSessions() {
          expect(metadata->configTemplateFile != nullptr &&
                     std::string_view{metadata->configTemplateFile} == "strategy_profiles/basis_convergence_probe.ini",
                 "basis_convergence_probe metadata discovers strategy profile") &&
-         expect(metadataDisplayNameIs(*metadata, "Диагностика базиса"),
+         expect(metadataDisplayNameIs(*metadata, "Базис spot/futures"),
                 "basis convergence display name comes from ini metadata") &&
          expect(metadata->minSessionCount == 2u, "basis convergence probe requires at least two sessions") &&
          expect(metadata->maxSessionCount == 2u, "basis convergence probe allows exactly two sessions") &&
-         expect(metadataHasParam(*metadata, "source"), "basis convergence metadata exposes source") &&
-         expect(metadataHasParam(*metadata, "timeframe_sec"), "basis convergence metadata exposes timeframe_sec");
+         expect(!metadataHasParam(*metadata, "source"), "basis convergence metadata keeps source auto-resolved") &&
+         expect(!metadataHasParam(*metadata, "timeframe_sec"), "basis convergence metadata keeps timeframe defaulted") &&
+         expect(!metadataHasParam(*metadata, "expiry_utc_ns"), "basis convergence metadata keeps expiry auto-resolved");
 }
 
 bool testTrendProbeMetadataExposesTrendScoreIndicator() {
@@ -1489,9 +1563,11 @@ int main() {
   ok = testMarketOrderAtSameTimestampWaitsForVenueTopUpdate() && ok;
   ok = testSellMarketOrderAtSameTimestampWaitsForVenueTopUpdate() && ok;
   ok = testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() && ok;
+  ok = testTradeQtyPartialFillKeepsMakerOrderLiveUntilCumulativeFilled() && ok;
   ok = testGtcCrossingLimitStillTakerFills() && ok;
   ok = testReduceOnlyMarketBuyDoesNotOpenWhenFlat() && ok;
   ok = testReduceOnlyMarketSellClosesLongAtBid() && ok;
+  ok = testReduceOnlyMarketSellCapsToActualLongPosition() && ok;
   ok = testReduceOnlyMarketBuyClosesShortAtAsk() && ok;
   ok = testFeesReduceWalletAndNetPnl() && ok;
   ok = testEquityPointCapturesRealizedOnlyPnl() && ok;

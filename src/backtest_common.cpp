@@ -54,6 +54,7 @@ ExchangeId exchangeFromText(const std::string& value) noexcept {
   if (value == "bitget") return canon::kExchangeIdBitget;
   if (value == "aster") return canon::kExchangeIdAster;
   if (value == "okx") return canon::kExchangeIdOkx;
+  if (value == "finam") return canon::kExchangeIdFinam;
   return canon::kExchangeIdUnknown;
 }
 
