@@ -4,6 +4,7 @@
 
 #include "hft_trader/api/UserDataTools.hpp"
 #include "hft_trader/runtime/GeneratedStrategyRegistry.hpp"
+#include "hft_trader/runtime/runner/StrategyMarketDataRuntime.hpp"
 
 #include <array>
 #include <cstdint>
@@ -1434,6 +1435,33 @@ bool testStrategyMetadataMirrorsTraderRegistry() {
   return expect(hft_backtest::findStrategyMetadata("removed_strategy") == nullptr, "unknown metadata is hidden");
 }
 
+bool testStatArbBandLadderKeepsTradesOptionalForBboOnlyReplay() {
+  const hft_trader::runtime::StrategyDescriptor* descriptor = nullptr;
+  const std::size_t descriptorCount = hft_trader::runtime::strategyDescriptorCount();
+  for (std::size_t i = 0; i < descriptorCount; ++i) {
+    const hft_trader::runtime::StrategyDescriptor* candidate = hft_trader::runtime::strategyDescriptorAt(i);
+    if (candidate != nullptr && candidate->name != nullptr &&
+        std::string_view{candidate->name} == "stat_arb_band_ladder") {
+      descriptor = candidate;
+      break;
+    }
+  }
+  if (!expect(descriptor != nullptr, "stat arb band ladder descriptor is exported")) return false;
+
+  return expect(hft_trader::runtime::descriptorStreamCount(*descriptor) == 2u,
+                "stat arb band ladder keeps bookticker plus optional trades") &&
+         expect(hft_trader::runtime::descriptorStreamAt(*descriptor, 0u) ==
+                    cxet::api::market::PublicMarketDataStream::BookTicker,
+                "stat arb band ladder primary descriptor stream is bookticker") &&
+         expect(hft_trader::runtime::descriptorStreamRequired(*descriptor, 0u),
+                "stat arb band ladder requires bookticker") &&
+         expect(hft_trader::runtime::descriptorStreamAt(*descriptor, 1u) ==
+                    cxet::api::market::PublicMarketDataStream::Trades,
+                "stat arb band ladder still accepts trades when present") &&
+         expect(!hft_trader::runtime::descriptorStreamRequired(*descriptor, 1u),
+                "stat arb band ladder does not require trades for BBO-only replay");
+}
+
 bool testStrategyMetadataExposesOnlySupportedSpreadMakerParams() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("spread_maker1and2");
   return expect(metadata != nullptr, "spread_maker1and2 metadata is exported") &&
@@ -1592,6 +1620,7 @@ int main() {
   ok = testVolatilityProbeWritesVolatilityIndicator() && ok;
   ok = testToxicFlowProbeWritesDepthBackedIndicator() && ok;
   ok = testStrategyMetadataMirrorsTraderRegistry() && ok;
+  ok = testStatArbBandLadderKeepsTradesOptionalForBboOnlyReplay() && ok;
   ok = testStrategyMetadataExposesOnlySupportedSpreadMakerParams() && ok;
   ok = testStatArbBandLadderMetadataRequiresTwoSessions() && ok;
   ok = testBasisConvergenceMetadataRequiresTwoSessions() && ok;
