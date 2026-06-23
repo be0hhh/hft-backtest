@@ -464,6 +464,7 @@ bool runCycle(const StrategyDescriptor& descriptor,
   if (!strategySnapshotReady(descriptor, engine.snapshot)) return true;
   std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
+  std::array<hft_trader::core::StrategyCommandIntent, detail::kIntentCapacity> commandBuf{};
   std::array<hft_trader::core::StrategyOrderState, detail::kMaxOrderStates> orderViewStorage{};
   const std::size_t orderViewCount = detail::visibleOrders(engine, orderViewStorage.data(), orderViewStorage.size());
   hft_trader::core::StrategyContext ctx{};
@@ -493,6 +494,7 @@ bool runCycle(const StrategyDescriptor& descriptor,
   ctx.initialOrderSeedAllowed = true;
   ctx.io.orderOut = Span<hft_trader::core::OrderIntent>(orderBuf.data(), orderBuf.size());
   ctx.io.cancelOut = Span<hft_trader::core::CancelIntent>(cancelBuf.data(), cancelBuf.size());
+  ctx.io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commandBuf.data(), commandBuf.size());
   ctx.io.clear();
   recordInputCoverage(engine);
   hft_trader::core::StrategyDecisionTrace trace{};
@@ -506,10 +508,17 @@ bool runCycle(const StrategyDescriptor& descriptor,
   const bool ok = descriptor.runCycle(state, ctx);
   if (!hft_trader::core::canEmitNewOrder(control)) {
     ctx.io.orderCount = 0u;
+    ctx.io.commandCount = 0u;
   }
   if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
-    trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
-    trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
+    std::uint32_t orderedOrderCount = 0u;
+    std::uint32_t orderedCancelCount = 0u;
+    for (std::size_t i = 0u; i < ctx.io.commandCount; ++i) {
+      if (commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::Order) ++orderedOrderCount;
+      else if (commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::Cancel) ++orderedCancelCount;
+    }
+    trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount) + orderedOrderCount;
+    trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount) + orderedCancelCount;
     if (captureIndicatorTrace) appendStrategyIndicator(engine, tsNs, trace);
     if (captureRangeTrace) appendStrategyRange(engine, tsNs, trace);
     if (captureSpreadTrace) appendStrategySpread(engine, tsNs, trace);
@@ -530,6 +539,26 @@ std::size_t backtestRouteLegIndex(std::size_t legCount,
 void applyIntentsToLegs(std::vector<detail::EngineState>& engines,
                         const hft_trader::core::StrategyIo& io,
                         std::int64_t tsNs) {
+  for (std::size_t i = 0; i < io.commandCount; ++i) {
+    const hft_trader::core::StrategyCommandIntent& command = io.commandOut[i];
+    if (command.kind == hft_trader::core::StrategyCommandIntentKind::Cancel) {
+      const std::size_t leg = backtestRouteLegIndex(engines.size(), command.cancel.routeHandle);
+      if (leg >= engines.size()) continue;
+      std::array<hft_trader::core::CancelIntent, 1> cancel{command.cancel};
+      hft_trader::core::StrategyIo one{};
+      one.cancelOut = Span<hft_trader::core::CancelIntent>(cancel.data(), cancel.size());
+      one.cancelCount = 1u;
+      detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
+    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::Order) {
+      const std::size_t leg = backtestRouteLegIndex(engines.size(), command.order.routeHandle);
+      if (leg >= engines.size()) continue;
+      std::array<hft_trader::core::OrderIntent, 1> order{command.order};
+      hft_trader::core::StrategyIo one{};
+      one.orderOut = Span<hft_trader::core::OrderIntent>(order.data(), order.size());
+      one.orderCount = 1u;
+      detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
+    }
+  }
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
     const std::size_t leg = backtestRouteLegIndex(engines.size(), io.cancelOut[i].routeHandle);
     if (leg >= engines.size()) continue;
@@ -551,6 +580,7 @@ void applyIntentsToLegs(std::vector<detail::EngineState>& engines,
 struct MultiLegCycleScratch {
   std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
+  std::array<hft_trader::core::StrategyCommandIntent, detail::kIntentCapacity> commandBuf{};
   std::array<hft_trader::core::StrategyMarketSnapshot, hft_trader::core::kStrategyRuntimeMaxLegs> snapshots{};
   std::array<hft_trader::core::StrategyCandleSnapshot, hft_trader::core::kStrategyRuntimeMaxLegs> candles{};
   std::array<std::array<hft_trader::core::StrategyOrderState, detail::kMaxOrderStates>, hft_trader::core::kStrategyRuntimeMaxLegs> orderStorage{};
@@ -644,6 +674,7 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   ctx.initialOrderSeedAllowed = true;
   ctx.io.orderOut = Span<hft_trader::core::OrderIntent>(scratch.orderBuf.data(), scratch.orderBuf.size());
   ctx.io.cancelOut = Span<hft_trader::core::CancelIntent>(scratch.cancelBuf.data(), scratch.cancelBuf.size());
+  ctx.io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(scratch.commandBuf.data(), scratch.commandBuf.size());
   ctx.io.clear();
   recordInputCoverage(engines[0]);
   hft_trader::core::StrategyDecisionTrace trace{};
@@ -657,10 +688,17 @@ bool runCycleMulti(const StrategyDescriptor& descriptor,
   const bool ok = descriptor.runCycle(state, ctx);
   if (!hft_trader::core::canEmitNewOrder(control)) {
     ctx.io.orderCount = 0u;
+    ctx.io.commandCount = 0u;
   }
   if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
-    trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount);
-    trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount);
+    std::uint32_t orderedOrderCount = 0u;
+    std::uint32_t orderedCancelCount = 0u;
+    for (std::size_t i = 0u; i < ctx.io.commandCount; ++i) {
+      if (scratch.commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::Order) ++orderedOrderCount;
+      else if (scratch.commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::Cancel) ++orderedCancelCount;
+    }
+    trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount) + orderedOrderCount;
+    trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount) + orderedCancelCount;
     if (captureIndicatorTrace) appendStrategyIndicator(engines[0], tsNs, trace);
     if (captureRangeTrace) appendStrategyRange(engines[0], tsNs, trace);
     if (captureSpreadTrace) appendStrategySpread(engines[0], tsNs, trace);
@@ -1806,6 +1844,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   engine.exchange = sessionExchange;
   engine.market = sessionMarket;
   engine.symbol = selectedSymbol;
+  engine.tickSizeE8 = instrument.tickSizeRaw;
+  engine.makerFillMinCrossTicks = effectiveRequest.makerFillMinCrossTicks;
   detail::initializeAccounting(engine, request);
   const BacktestFeeSchedule primaryFee = resolveFeeSchedule(request, session.exchange, session.market);
   engine.makerFeeBpsE8 = primaryFee.makerFeeBpsE8;
@@ -1824,6 +1864,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       legEngine.exchange = detail::exchangeFromText(sessions[leg].exchange);
       legEngine.market = detail::marketFromText(sessions[leg].market);
       legEngine.symbol.copyFrom(sessions[leg].symbol.c_str());
+      legEngine.tickSizeE8 = legInstruments[leg].tickSizeRaw;
+      legEngine.makerFillMinCrossTicks = effectiveRequest.makerFillMinCrossTicks;
       detail::initializeAccounting(legEngine, request);
       const std::int64_t legBalance = legInitialBalanceE8(request, leg);
       legEngine.initialBalanceE8 = legBalance;

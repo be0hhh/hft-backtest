@@ -121,6 +121,51 @@ bool testLoadSessionReadsOptionalReferenceStreams() {
          expect(data.lastTsNs == 2300, "reference stream last timestamp tracked");
 }
 
+bool testLoadSessionReadsCanonicalPriceLimitRows() {
+  const std::filesystem::path dir = makeSessionDir("canonical_price_limit");
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"okx\", \"market\": \"futures\", \"symbols\": [\"H-USDT-SWAP\"]},\n"
+            "  \"channels\": {\n"
+            "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"}\n"
+            "  }\n"
+            "}\n");
+  writeText(dir / "jsonl" / "price_limit.jsonl",
+            "[1781522104825000000,46213000,36009000,1]\n"
+            "[1781522105025000000,46213000,36007000,1,7,17]\n");
+
+  hft_backtest::detail::SessionData data{};
+  hft_backtest::detail::SessionLoadPlan plan{};
+  plan.loadTrades = false;
+  plan.loadBookTickers = false;
+  plan.loadDepths = false;
+  plan.loadCandles = false;
+  plan.loadPriceLimits = true;
+  plan.requirePriceLimits = true;
+  std::string error{};
+
+  const hft_backtest::Status status = hft_backtest::detail::loadSession(dir, plan, data, error);
+  const cxet::composite::PriceLimitRuntimeV1 runtime =
+      data.priceLimits.empty() ? cxet::composite::PriceLimitRuntimeV1{} : hft_backtest::detail::toRuntime(data.priceLimits[0]);
+
+  return expect(status == hft_backtest::Status::Ok, "canonical recorder price_limit rows load") &&
+         expect(data.priceLimits.size() == 2u, "price_limit rows parsed") &&
+         expect(data.priceLimits[0].tsNs == 1781522104825000000ll, "price_limit timestamp parsed first") &&
+         expect(data.priceLimits[0].buyLimitE8 == 46213000, "price_limit buy limit parsed first") &&
+         expect(data.priceLimits[0].sellLimitE8 == 36009000, "price_limit sell limit parsed first") &&
+         expect(data.priceLimits[0].enabled == 1u, "price_limit enabled parsed first") &&
+         expect(data.priceLimits[1].tsNs == 1781522105025000000ll, "price_limit timestamp parsed second") &&
+         expect(data.priceLimits[1].buyLimitE8 == 46213000, "price_limit buy limit parsed second") &&
+         expect(data.priceLimits[1].sellLimitE8 == 36007000, "price_limit sell limit parsed second") &&
+         expect(data.priceLimits[1].ingestSeq == 17, "price_limit ingest seq parsed") &&
+         expect(runtime.ts.raw == 1781522104825000000ull, "price_limit runtime timestamp preserved") &&
+         expect(runtime.buyLimit.raw == 46213000, "price_limit runtime buy limit preserved") &&
+         expect(runtime.sellLimit.raw == 36009000, "price_limit runtime sell limit preserved") &&
+         expect(runtime.enabled == 1u, "price_limit runtime enabled preserved") &&
+         expect(data.firstTsNs == 1781522104825000000ll, "price_limit first timestamp tracked") &&
+         expect(data.lastTsNs == 1781522105025000000ll, "price_limit last timestamp tracked");
+}
+
 bool testLoadSessionParsesCrLfAndFinalLineWithoutNewline() {
   const std::filesystem::path dir = makeSessionDir("crlf");
   writeManifest(dir);
@@ -238,7 +283,7 @@ bool testBuildTimelineIncludesOptionalReferenceStreams() {
   session.depths.push_back(hft_backtest::detail::DepthRow{100, 1, {}});
   session.trades.push_back(hft_backtest::detail::TradeRow{0, 0, 1, 200, 2});
   session.bookTickers.push_back(hft_backtest::detail::BookTickerRow{0, 0, 0, 0, 300, 3});
-  session.priceLimits.push_back(hft_backtest::detail::PriceLimitRow{0, 0, 1u, 400, 4});
+  session.priceLimits.push_back(hft_backtest::detail::PriceLimitRow{400, 0, 0, 1u, 4});
   session.liquidations.push_back(hft_backtest::detail::LiquidationRow{0, 0, 1, 500, 0, 0, 0, 0, 0, 0, 5});
   session.markPrices.push_back(hft_backtest::detail::MarkPriceRow{600, 0, 6});
   session.indexPrices.push_back(hft_backtest::detail::IndexPriceRow{700, 0, 7});
@@ -339,6 +384,7 @@ int main() {
   bool ok = true;
   ok = testLoadSessionParsesInstrumentPriceBasis() && ok;
   ok = testLoadSessionReadsOptionalReferenceStreams() && ok;
+  ok = testLoadSessionReadsCanonicalPriceLimitRows() && ok;
   ok = testLoadSessionParsesCrLfAndFinalLineWithoutNewline() && ok;
   ok = testLoadSessionRejectsI64Overflow() && ok;
   ok = testLoadSessionSortsUnorderedTimelineChannels() && ok;

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -13,7 +14,7 @@
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--strategy-spread] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--cancel-order-latency-us N] [--cancel-order-jitter-us N] [--user-data-latency-us N] [--user-data-jitter-us N] [--order-latency-us N] [--cancel-latency-us N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps] [--latency exchange:market:md_base:md_jitter:mkt_base:mkt_jitter:limit_base:limit_jitter[:cancel_base:cancel_jitter:user_base:user_jitter]]\n";
+  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--strategy-spread] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--cancel-order-latency-us N] [--cancel-order-jitter-us N] [--user-data-latency-us N] [--user-data-jitter-us N] [--order-latency-us N] [--cancel-latency-us N] [--maker-fill-min-cross-ticks N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps] [--latency exchange:market:md_base:md_jitter:mkt_base:mkt_jitter:limit_base:limit_jitter[:cancel_base:cancel_jitter:user_base:user_jitter]]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {
@@ -26,6 +27,14 @@ bool parseU64(const char* text, std::uint64_t& out) noexcept {
   const char* last = text + std::strlen(text);
   const auto parsed = std::from_chars(text, last, out);
   return parsed.ec == std::errc{} && parsed.ptr == last;
+}
+
+bool parseU32(const char* text, std::uint32_t& out) noexcept {
+  std::uint64_t value = 0u;
+  if (!parseU64(text, value)) return false;
+  if (value > std::numeric_limits<std::uint32_t>::max()) return false;
+  out = static_cast<std::uint32_t>(value);
+  return true;
 }
 
 bool parseI64Text(const char* first, const char* last, std::int64_t& out) noexcept {
@@ -253,6 +262,8 @@ int main(int argc, char** argv) {
     } else if (std::strcmp(arg, "--cancel-latency-us") == 0) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.cancelLatencyUs)) return 2;
       request.cancelOrderLatency.baseUs = request.cancelLatencyUs;
+    } else if (std::strcmp(arg, "--maker-fill-min-cross-ticks") == 0) {
+      if (const char* value = needValue(arg); value && !parseU32(value, request.makerFillMinCrossTicks)) return 2;
     } else if (std::strcmp(arg, "--initial-balance-usdt") == 0) {
       if (const char* value = needValue(arg); value && (!parseDecimalE8(value, request.initialBalanceE8) || request.initialBalanceE8 < 0)) return 2;
     } else if (std::strcmp(arg, "--maker-fee-bps") == 0) {

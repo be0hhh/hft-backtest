@@ -56,6 +56,7 @@ struct BacktestRunRequest {
   BacktestLatencyProfile userDataLatency{};
   std::uint64_t orderLatencyUs{1000};
   std::uint64_t cancelLatencyUs{1000};
+  std::uint32_t makerFillMinCrossTicks{0};
   std::int64_t initialBalanceE8{0};
   std::vector<std::int64_t> legInitialBalancesE8{};
   std::int64_t makerFeeBpsE8{0};

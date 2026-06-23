@@ -218,9 +218,9 @@ bool parsePriceLimitLine(std::string_view line, PriceLimitRow& out) noexcept {
   std::size_t pos = 0;
   std::int64_t enabled = 0;
   out = PriceLimitRow{};
-  if (!consume(line, pos, '[') || !parseI64(line, pos, out.buyLimitE8) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.sellLimitE8) || !consume(line, pos, ',') || !parseI64(line, pos, enabled) ||
-      !consume(line, pos, ',') || !parseI64(line, pos, out.tsNs)) {
+  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
+      !parseI64(line, pos, out.buyLimitE8) || !consume(line, pos, ',') || !parseI64(line, pos, out.sellLimitE8) ||
+      !consume(line, pos, ',') || !parseI64(line, pos, enabled)) {
     return false;
   }
   out.enabled = enabled != 0 ? 1u : 0u;

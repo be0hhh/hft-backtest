@@ -57,6 +57,12 @@ hft_trader::core::OrderIntent postOnlyOrderIntent(std::uint64_t orderId, Side si
   return out;
 }
 
+hft_trader::core::OrderIntent strictPostOnlyOrderIntent(std::uint64_t orderId, Side side, std::int64_t px) noexcept {
+  hft_trader::core::OrderIntent out = orderIntent(orderId, side, px);
+  out.limitTimeInForcePolicy = hft_trader::core::LimitTimeInForcePolicy::PostOnlyStrict;
+  return out;
+}
+
 hft_trader::core::OrderIntent reduceMarketIntent(std::uint64_t orderId, Side side) noexcept {
   hft_trader::core::OrderIntent out{};
   out.clientIntentId = id(orderId);
@@ -203,6 +209,39 @@ bool testCancelThenReplacementLimitMaterializesReplace() {
          expect(visibleCount == 1u, "replacement order is visible to strategy") &&
          expect(visible[0].clientIntentId.raw == 2u, "visible order is replacement id") &&
          expect(visible[0].desiredPrice.raw == kPx100 - 200000000ll, "visible order has replacement desired price");
+}
+
+bool testOrderedCommandNewBeforeCancelKeepsReplacementLive() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> initial{postOnlyOrderIntent(1, Side::Buy(), kPx100 - 300000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
+  io.orderCount = initial.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  std::array<hft_trader::core::StrategyCommandIntent, 2> commands{};
+  commands[0].kind = hft_trader::core::StrategyCommandIntentKind::Order;
+  commands[0].order = postOnlyOrderIntent(2, Side::Buy(), kPx100 - 200000000ll);
+  commands[1].kind = hft_trader::core::StrategyCommandIntentKind::Cancel;
+  commands[1].cancel = cancelIntent(3, 1);
+  io.clear();
+  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
+  io.commandCount = commands.size();
+  applyIntents(engine, io, 2000, 0, 0);
+
+  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
+  const std::size_t visibleCount = visibleOrders(engine, visible.data(), visible.size());
+
+  return expect(engine.orders.size() == 3u, "ordered replace writes initial, replacement, cancel records") &&
+         expect(engine.orders[1].action == kRecordActionOrder, "ordered command emits replacement order first") &&
+         expect(engine.orders[1].id == 2u, "ordered replacement uses replacement id") &&
+         expect(engine.orders[1].status == kRecordStatusActive, "ordered replacement remains active") &&
+         expect(engine.orders[2].action == kRecordActionCancel, "ordered command emits cancel second") &&
+         expect(engine.orders[2].targetId == 1u, "ordered cancel targets original order") &&
+         expect(engine.orders[0].status == kRecordStatusCancelled, "ordered cancel removes original order") &&
+         expect(visibleCount == 1u, "only replacement remains visible") &&
+         expect(visible[0].clientIntentId.raw == 2u, "visible order is ordered replacement");
 }
 
 bool testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() {
@@ -403,6 +442,44 @@ bool testPostOnlyCrossingSellRejectsWithoutTakerFill() {
          expect(!engine.open[0].state.valid, "post-only crossing sell leaves no open order");
 }
 
+bool testStrictPostOnlyCrossingBuyRejectsWithoutTakerFill() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{strictPostOnlyOrderIntent(140, Side::Buy(), kPx100 + 100000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+
+  applyIntents(engine, io, 1000, 0, 0);
+
+  return expect(engine.orders.size() == 1u, "strict post-only crossing buy is recorded") &&
+         expect(engine.orders[0].postOnly, "strict post-only crossing buy record keeps post-only flag") &&
+         expect(engine.orders[0].status == kRecordStatusRejected, "strict post-only crossing buy is rejected") &&
+         expect(engine.fills.empty(), "strict post-only crossing buy does not taker-fill") &&
+         expect(!engine.open[0].state.valid, "strict post-only crossing buy leaves no open order") &&
+         expect(engine.userEvents.size() == 1u, "strict post-only crossing buy publishes rejected user event") &&
+         expect(engine.userEvents[0].orderStatus == canon::OrderStatus::Rejected, "strict post-only crossing buy event is rejected");
+}
+
+bool testStrictPostOnlyCrossingSellRejectsWithoutTakerFill() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> orders{strictPostOnlyOrderIntent(141, Side::Sell(), kPx100 - 100000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+
+  applyIntents(engine, io, 1000, 0, 0);
+
+  return expect(engine.orders.size() == 1u, "strict post-only crossing sell is recorded") &&
+         expect(engine.orders[0].postOnly, "strict post-only crossing sell record keeps post-only flag") &&
+         expect(engine.orders[0].status == kRecordStatusRejected, "strict post-only crossing sell is rejected") &&
+         expect(engine.fills.empty(), "strict post-only crossing sell does not taker-fill") &&
+         expect(!engine.open[0].state.valid, "strict post-only crossing sell leaves no open order") &&
+         expect(engine.userEvents.size() == 1u, "strict post-only crossing sell publishes rejected user event") &&
+         expect(engine.userEvents[0].orderStatus == canon::OrderStatus::Rejected, "strict post-only crossing sell event is rejected");
+}
+
 bool testNoFreeOrderSlotPublishesRejectedUserEvent() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
@@ -453,6 +530,40 @@ bool testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() {
          expect(engine.fills[0].orderId == 42u, "post-only maker fill uses order id") &&
          expect(engine.userEvents.size() == 1u, "post-only maker fill publishes one user event") &&
          expect(engine.userEvents[0].maker == 1u, "post-only trade fill is maker");
+}
+
+bool testMakerFillMinCrossTicksRequiresTradeThrough() {
+  EngineState engine{};
+  engine.tickSizeE8 = 100000000ll;
+  engine.makerFillMinCrossTicks = 1u;
+  setTop(engine, kPx100 - 200000000ll, kPx100 + 200000000ll);
+  const std::int64_t orderPrice = kPx100 - 100000000ll;
+  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(44, Side::Buy(), orderPrice)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 1000, 0, 0);
+
+  cxet::composite::TradeRuntimeV1 touch{};
+  touch.ts.raw = 2000;
+  touch.side = Side::Sell();
+  touch.price.raw = orderPrice;
+  touch.qty.raw = kQty1;
+  tryFillOnTrade(engine, touch);
+
+  const bool noTouchFill = engine.fills.empty() && engine.open[0].state.valid;
+
+  cxet::composite::TradeRuntimeV1 through{};
+  through.ts.raw = 3000;
+  through.side = Side::Sell();
+  through.price.raw = orderPrice - engine.tickSizeE8;
+  through.qty.raw = kQty1;
+  tryFillOnTrade(engine, through);
+
+  return expect(noTouchFill, "maker min-cross ignores touch-only trade") &&
+         expect(engine.orders[0].status == kRecordStatusFilled, "maker min-cross fills after trade-through") &&
+         expect(engine.fills.size() == 1u, "maker min-cross writes one fill") &&
+         expect(engine.fills[0].priceE8 == orderPrice, "maker min-cross fills at order price");
 }
 
 bool testTradeQtyPartialFillKeepsMakerOrderLiveUntilCumulativeFilled() {
@@ -842,7 +953,7 @@ bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
   writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"expiry_utc_ns\":1781913600000000000}\n");
   writeText(dir / "jsonl" / "trades.jsonl", "[10000000000,100000000,1,1000]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,1001]\n");
-  writeText(dir / "jsonl" / "price_limit.jsonl", "[9500000000,10500000000,1,1001]\n");
+  writeText(dir / "jsonl" / "price_limit.jsonl", "[1001,9500000000,10500000000,1]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],1002]\n");
   writeText(dir / "jsonl" / "candles.jsonl", "[1,900,10200000000,9800000000,500000000]\n");
 
@@ -1580,6 +1691,7 @@ int main() {
   ok = testStaleCancelDoesNotCancelReusedSlot() && ok;
   ok = testPendingDrainActivatesLateOrder() && ok;
   ok = testCancelThenReplacementLimitMaterializesReplace() && ok;
+  ok = testOrderedCommandNewBeforeCancelKeepsReplacementLive() && ok;
   ok = testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() && ok;
   ok = testLatencyRuntimeSplitsMarketAndLimitOrderActivation() && ok;
   ok = testLatencyRuntimeUsesDedicatedCancelChannel() && ok;
@@ -1587,10 +1699,13 @@ int main() {
   ok = testFillUserEventHasSeparateDeliveryLatency() && ok;
   ok = testPostOnlyCrossingBuyRejectsWithoutTakerFill() && ok;
   ok = testPostOnlyCrossingSellRejectsWithoutTakerFill() && ok;
+  ok = testStrictPostOnlyCrossingBuyRejectsWithoutTakerFill() && ok;
+  ok = testStrictPostOnlyCrossingSellRejectsWithoutTakerFill() && ok;
   ok = testNoFreeOrderSlotPublishesRejectedUserEvent() && ok;
   ok = testMarketOrderAtSameTimestampWaitsForVenueTopUpdate() && ok;
   ok = testSellMarketOrderAtSameTimestampWaitsForVenueTopUpdate() && ok;
   ok = testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() && ok;
+  ok = testMakerFillMinCrossTicksRequiresTradeThrough() && ok;
   ok = testTradeQtyPartialFillKeepsMakerOrderLiveUntilCumulativeFilled() && ok;
   ok = testGtcCrossingLimitStillTakerFills() && ok;
   ok = testReduceOnlyMarketBuyDoesNotOpenWhenFlat() && ok;

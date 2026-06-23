@@ -167,6 +167,32 @@ std::int64_t fillableOrderQty(const EngineState& engine,
   return out;
 }
 
+std::int64_t makerFillMinCrossE8(const EngineState& engine) noexcept {
+  if (engine.makerFillMinCrossTicks == 0u) return 0;
+  if (engine.tickSizeE8 <= 0) return std::numeric_limits<std::int64_t>::max();
+  const auto ticks = static_cast<std::uint64_t>(engine.makerFillMinCrossTicks);
+  const auto tickSize = static_cast<std::uint64_t>(engine.tickSizeE8);
+  const auto maxValue = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  if (tickSize != 0u && ticks > maxValue / tickSize) return std::numeric_limits<std::int64_t>::max();
+  return static_cast<std::int64_t>(ticks * tickSize);
+}
+
+bool makerTradeCrossesOrder(const EngineState& engine,
+                            const OpenOrder& order,
+                            const cxet::composite::TradeRuntimeV1& trade) noexcept {
+  const std::int64_t minCross = makerFillMinCrossE8(engine);
+  if (minCross == std::numeric_limits<std::int64_t>::max()) return false;
+  if (trade.side.raw == Side::Buy().raw && order.state.side.raw == Side::Sell().raw) {
+    if (order.state.price.raw > std::numeric_limits<std::int64_t>::max() - minCross) return false;
+    return trade.price.raw >= order.state.price.raw + minCross;
+  }
+  if (trade.side.raw == Side::Sell().raw && order.state.side.raw == Side::Buy().raw) {
+    if (order.state.price.raw < std::numeric_limits<std::int64_t>::min() + minCross) return false;
+    return trade.price.raw <= order.state.price.raw - minCross;
+  }
+  return false;
+}
+
 bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
   if (!order.state.valid) return false;
   pushUserEvent(engine, makeRejectedOrderEvent(engine, order, tsNs), tsNs);
@@ -413,9 +439,7 @@ void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& 
   if (engine.liquidated || engine.riskStopped) return;
   for (OpenOrder& order : engine.open) {
     if (!order.state.valid || !order.active || order.state.orderType == canon::OrderType::Market) continue;
-    if (trade.side.raw == Side::Buy().raw && order.state.side.raw == Side::Sell().raw && trade.price.raw >= order.state.price.raw) {
-      (void)fillOrderQty(engine, order, order.state.price.raw, trade.qty.raw, static_cast<std::int64_t>(trade.ts.raw), false);
-    } else if (trade.side.raw == Side::Sell().raw && order.state.side.raw == Side::Buy().raw && trade.price.raw <= order.state.price.raw) {
+    if (makerTradeCrossesOrder(engine, order, trade)) {
       (void)fillOrderQty(engine, order, order.state.price.raw, trade.qty.raw, static_cast<std::int64_t>(trade.ts.raw), false);
     }
   }
@@ -543,7 +567,17 @@ void applyIntents(EngineState& engine,
                   std::uint64_t orderLatencyUs,
                   std::uint64_t cancelLatencyUs) {
   if (engine.liquidated || engine.riskStopped) return;
-  const bool hasIntents = io.cancelCount != 0u || io.orderCount != 0u;
+  const bool hasIntents = io.cancelCount != 0u || io.orderCount != 0u || io.commandCount != 0u;
+  for (std::size_t i = 0; i < io.commandCount; ++i) {
+    const auto& command = io.commandOut[i];
+    if (command.kind == hft_trader::core::StrategyCommandIntentKind::Cancel) {
+      const std::int64_t activeTs = delayedTs(tsNs, cancelLatencyUs);
+      (void)submitCancelIntent(engine, command.cancel, tsNs, activeTs);
+    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::Order) {
+      const std::int64_t activeTs = delayedTs(tsNs, orderLatencyUs);
+      submitOrderIntent(engine, command.order, tsNs, activeTs);
+    }
+  }
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
     const auto& intent = io.cancelOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, cancelLatencyUs);
@@ -563,7 +597,20 @@ void applyIntents(EngineState& engine,
                   std::int64_t tsNs,
                   BacktestLatencyRuntime& latency) {
   if (engine.liquidated || engine.riskStopped) return;
-  const bool hasIntents = io.cancelCount != 0u || io.orderCount != 0u;
+  const bool hasIntents = io.cancelCount != 0u || io.orderCount != 0u || io.commandCount != 0u;
+  for (std::size_t i = 0; i < io.commandCount; ++i) {
+    const auto& command = io.commandOut[i];
+    if (command.kind == hft_trader::core::StrategyCommandIntentKind::Cancel) {
+      const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::CancelOrder));
+      (void)submitCancelIntent(engine, command.cancel, tsNs, activeTs);
+    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::Order) {
+      const BacktestLatencyChannel channel = command.order.orderType == canon::OrderType::Market
+          ? BacktestLatencyChannel::MarketOrder
+          : BacktestLatencyChannel::LimitOrder;
+      const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, channel));
+      submitOrderIntent(engine, command.order, tsNs, activeTs);
+    }
+  }
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
     const auto& intent = io.cancelOut[i];
     const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::CancelOrder));

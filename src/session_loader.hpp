@@ -37,10 +37,10 @@ struct BookTickerRow {
 };
 
 struct PriceLimitRow {
+  std::int64_t tsNs{0};
   std::int64_t buyLimitE8{0};
   std::int64_t sellLimitE8{0};
   std::uint8_t enabled{0};
-  std::int64_t tsNs{0};
   std::int64_t ingestSeq{0};
 };
 

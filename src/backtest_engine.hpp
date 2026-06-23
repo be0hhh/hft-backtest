@@ -228,6 +228,8 @@ struct EngineState {
   std::uint64_t timerWakeEvents{0};
   std::uint64_t reduceOnlyOrders{0};
   std::uint64_t reduceOnlyFills{0};
+  std::int64_t tickSizeE8{0};
+  std::uint32_t makerFillMinCrossTicks{0};
   std::int64_t netQtyRaw{0};
   std::int64_t entryPriceE8{0};
   std::int64_t grossRealizedPnlE8{0};
