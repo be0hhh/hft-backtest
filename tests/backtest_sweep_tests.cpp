@@ -82,7 +82,6 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
             "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1, \"history_requested_end_ns\": 2500000000, \"history_rows\": 3}}\n"
             "}\n");
   writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
-  writeText(dir / "snapshot_000.json", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000]\n");
   writeText(dir / "jsonl" / "trades.jsonl",
             "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n"
             "[10020000000,100000000,0,1600000000,2,2,2,10020000000,0,\"BTCUSDT\",\"binance\",\"futures\",2,2]\n"
@@ -90,7 +89,7 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
             "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTCUSDT\",\"binance\",\"futures\",4,4]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
   writeText(dir / "jsonl" / "price_limit.jsonl", "[3000000000,9500000000,10500000000,1]\n");
-  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000,2,2]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000,2,2]\n");
   writeText(dir / "jsonl" / "candles.jsonl",
             "[1,1000000000,10200000000,9800000000,500000000]\n"
             "[2,900000000,10300000000,9700000000,600000000]\n"
@@ -157,7 +156,6 @@ bool testSweepCanRunTwiceInOneProcess() {
             "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1, \"history_requested_end_ns\": 2500000000, \"history_rows\": 3}}\n"
             "}\n");
   writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
-  writeText(dir / "snapshot_000.json", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000]\n");
   writeText(dir / "jsonl" / "trades.jsonl",
             "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n"
             "[10020000000,100000000,0,1600000000,2,2,2,10020000000,0,\"BTCUSDT\",\"binance\",\"futures\",2,2]\n"
@@ -165,7 +163,7 @@ bool testSweepCanRunTwiceInOneProcess() {
             "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTCUSDT\",\"binance\",\"futures\",4,4]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
   writeText(dir / "jsonl" / "price_limit.jsonl", "[3000000000,9500000000,10500000000,1]\n");
-  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2900000000,2,2]\n");
+  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000,2,2]\n");
   writeText(dir / "jsonl" / "candles.jsonl",
             "[1,1000000000,10200000000,9800000000,500000000]\n"
             "[2,900000000,10300000000,9700000000,600000000]\n"

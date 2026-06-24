@@ -37,6 +37,8 @@
 
 namespace hft_backtest::detail {
 
+class ExecutionDepthProvider;
+
 constexpr std::size_t kIntentCapacity = 64;
 constexpr std::size_t kMaxOrderStates = 256;
 constexpr std::size_t kNoRecordIndex = std::numeric_limits<std::size_t>::max();
@@ -75,6 +77,14 @@ constexpr std::uint8_t kRecordStatusFilled = 3u;
 constexpr std::uint8_t kRecordStatusCancelled = 4u;
 constexpr std::uint8_t kRecordStatusMissing = 5u;
 constexpr std::uint8_t kRecordStatusRejected = 6u;
+constexpr std::uint8_t kRecordStatusPartialUnfilled = 7u;
+constexpr std::uint8_t kFillReasonUnknown = 0u;
+constexpr std::uint8_t kFillReasonTop = 1u;
+constexpr std::uint8_t kFillReasonTrade = 2u;
+constexpr std::uint8_t kFillReasonAggressiveBook = 3u;
+constexpr std::uint8_t kFillReasonPassiveQueue = 4u;
+constexpr std::uint8_t kFillLiquidityMaker = 0u;
+constexpr std::uint8_t kFillLiquidityTaker = 1u;
 
 enum class PendingActionKind : std::uint8_t {
   OrderAck = 0,
@@ -108,6 +118,43 @@ struct JsonFill {
   std::int64_t qtyE8{0};
   std::int64_t realizedPnlE8{0};
   bool reduceOnly{false};
+  std::uint8_t fillReason{kFillReasonUnknown};
+  std::uint8_t liquidity{kFillLiquidityMaker};
+  std::int64_t orderQtyE8{0};
+  std::int64_t cumulativeFilledQtyE8{0};
+  std::int64_t remainingQtyE8{0};
+  std::int64_t avgPriceE8{0};
+  std::int64_t bookLevelQtyE8{0};
+  std::int64_t bookVisibleExecutableQtyE8{0};
+  std::int64_t bookConsumedPctE8{0};
+  std::int64_t queueAheadBeforeE8{0};
+  std::int64_t queueAheadAfterE8{0};
+  std::uint32_t chunkIndex{0};
+  std::uint32_t chunkCount{0};
+  std::int64_t executionQtyE8{0};
+  std::int64_t executionAvgPriceE8{0};
+  std::int64_t referencePriceE8{0};
+  std::int64_t slippageE8{0};
+  std::int64_t slippageBpsE8{0};
+  std::int64_t executionBookConsumedPctE8{0};
+};
+
+struct FillExecutionMetadata {
+  std::uint8_t fillReason{kFillReasonUnknown};
+  std::int64_t avgPriceE8{0};
+  std::int64_t bookLevelQtyE8{0};
+  std::int64_t bookVisibleExecutableQtyE8{0};
+  std::int64_t bookConsumedPctE8{0};
+  std::int64_t queueAheadBeforeE8{0};
+  std::int64_t queueAheadAfterE8{0};
+  std::uint32_t chunkIndex{0};
+  std::uint32_t chunkCount{0};
+  std::int64_t executionQtyE8{0};
+  std::int64_t executionAvgPriceE8{0};
+  std::int64_t referencePriceE8{0};
+  std::int64_t slippageE8{0};
+  std::int64_t slippageBpsE8{0};
+  std::int64_t executionBookConsumedPctE8{0};
 };
 
 struct JsonEquityPoint {
@@ -176,9 +223,12 @@ struct OpenOrder {
   std::int64_t createdTsNs{0};
   std::int64_t activeTsNs{0};
   std::int64_t filledQtyRaw{0};
+  std::int64_t queueAheadQtyRaw{0};
+  std::int64_t lastAggressiveBookTsNs{0};
   bool active{false};
   bool reduceOnly{false};
   bool postOnly{false};
+  bool queueInitialized{false};
 };
 
 struct PendingAction {
@@ -212,6 +262,8 @@ struct EngineState {
   hft_trader::core::StrategyCandleSnapshot venueCandle{};
   hft_trader::core::LocalOrderBookState orderBook{};
   hft_trader::core::LocalOrderBookState venueOrderBook{};
+  ExecutionDepthProvider* executionDepthProvider{nullptr};
+  bool venueOrderBookExecutionEnabled{false};
   hft_trader::core::BboReconstructionState bboReconstruction{};
   hft_trader::core::BboReconstructionState venueBboReconstruction{};
   std::uint64_t contextRevision{1u};
@@ -291,7 +343,6 @@ hft_trader::core::StrategyCandleSnapshot toRuntime(const CandleRow& row) noexcep
 void toRuntime(const DepthRow& row,
                cxet::composite::OrderBookTapeRuntimeV1& tape,
                cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept;
-cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const SnapshotDocument& row) noexcept;
 cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const DepthRow& row) noexcept;
 bool buildTieredCandleHistory(const std::vector<CandleRow>& rows,
                               cxet::composite::TieredCandleHistory& out) noexcept;
@@ -316,6 +367,19 @@ std::size_t visibleOrders(const EngineState& engine,
                           std::size_t capacity) noexcept;
 std::int64_t delayedTs(std::int64_t tsNs, std::uint64_t latencyUs) noexcept;
 bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std::int64_t tsNs, bool taker);
+bool fillOrder(EngineState& engine,
+               OpenOrder& order,
+               std::int64_t priceE8,
+               std::int64_t tsNs,
+               bool taker,
+               const FillExecutionMetadata& metadata);
+bool fillOrderQty(EngineState& engine,
+                  OpenOrder& order,
+                  std::int64_t priceE8,
+                  std::int64_t requestedQty,
+                  std::int64_t tsNs,
+                  bool taker,
+                  const FillExecutionMetadata& metadata);
 void tryFillOnTop(EngineState& engine, std::int64_t tsNs);
 void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& trade);
 void applyDueActions(EngineState& engine, std::int64_t tsNs);

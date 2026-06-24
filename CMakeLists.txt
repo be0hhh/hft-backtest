@@ -69,6 +69,7 @@ set_property(TARGET hft_trader_runtime PROPERTY INTERFACE_LINK_OPTIONS
 )
 
 find_package(Threads REQUIRED)
+find_package(absl CONFIG REQUIRED)
 
 add_library(hft_backtest_core SHARED
   src/backtest_accounting.cpp
@@ -76,6 +77,8 @@ add_library(hft_backtest_core SHARED
   src/backtest_common.cpp
   src/backtest.cpp
   src/backtest_execution.cpp
+  src/backtest_execution_depth.cpp
+  src/backtest_fill_model.cpp
   src/backtest_metrics.cpp
   src/backtest_result_writer.cpp
   src/backtest_sweep.cpp
@@ -88,7 +91,10 @@ add_library(hft_backtest_core SHARED
 add_library(hft_backtest::core ALIAS hft_backtest_core)
 
 target_include_directories(hft_backtest_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(hft_backtest_core PUBLIC hft_trader_runtime cxet_lib Threads::Threads)
+target_link_libraries(hft_backtest_core
+  PUBLIC hft_trader_runtime cxet_lib Threads::Threads
+  PRIVATE absl::flat_hash_map absl::inlined_vector
+)
 target_compile_features(hft_backtest_core PUBLIC cxx_std_23)
 target_compile_definitions(hft_backtest_core PRIVATE
   HFT_BACKTEST_BUILDING_LIBRARY=1

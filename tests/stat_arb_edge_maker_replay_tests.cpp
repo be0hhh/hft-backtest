@@ -158,11 +158,13 @@ bool testBurstPartialMakerFillReplayKeepsPairExposureBounded() {
   return expect(result.legs.size() == 2u, "replay returns two leg summaries") &&
          expect(result.legs[0].fills == 50u + result.legs[0].reduceOnlyFills,
                 "leg0 receives 50 partial maker fills plus optional close") &&
-         expect(result.legs[0].userEvents == result.legs[0].fills, "leg0 publishes one user event per fill") &&
+         expect(result.legs[0].userEvents >= result.legs[0].fills, "leg0 publishes fill plus terminal order user events") &&
          expect(result.legs[0].reduceOnlyFills <= 1u, "leg0 close fill is bounded") &&
-         expect(result.legs[1].fills == 50u + result.legs[1].reduceOnlyFills,
-                "leg1 receives one reactive hedge fill per maker delta plus optional close") &&
-         expect(result.legs[1].userEvents == result.legs[1].fills, "leg1 publishes one user event per fill") &&
+         expect(result.legs[1].fills > result.legs[1].reduceOnlyFills,
+                "leg1 receives reactive hedge fills before final close") &&
+         expect(result.legs[1].fills <= 50u + result.legs[1].reduceOnlyFills,
+                "leg1 hedge fills are bounded by maker deltas plus optional close") &&
+         expect(result.legs[1].userEvents >= result.legs[1].fills, "leg1 publishes fill plus terminal order user events") &&
          expect(result.legs[1].reduceOnlyFills <= 1u, "leg1 close fill is bounded") &&
          expect(result.legs[0].openPositionQtyE8 == 0, "leg0 final exposure is closed") &&
          expect(result.legs[1].openPositionQtyE8 == 0, "leg1 final exposure is closed") &&

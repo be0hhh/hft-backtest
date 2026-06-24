@@ -1,5 +1,6 @@
 #include "backtest_engine.hpp"
 
+#include "backtest_execution_depth.hpp"
 #include "backtest_latency.hpp"
 
 #include "hft_trader/api/UserDataTools.hpp"
@@ -11,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <sstream>
 #include <string_view>
@@ -103,6 +105,26 @@ void setTop(EngineState& engine, std::int64_t bid, std::int64_t ask) noexcept {
   engine.venueSnapshot.lastBookTicker.ask.px.raw = ask;
 }
 
+void seedVenueBook(EngineState& engine,
+                   std::initializer_list<std::pair<std::int64_t, std::int64_t>> bids,
+                   std::initializer_list<std::pair<std::int64_t, std::int64_t>> asks) noexcept {
+  cxet::composite::OrderBookSnapshot snapshot{};
+  snapshot.ts.raw = 1000u;
+  for (const auto& level : bids) {
+    (void)cxet::composite::appendOrderBookLevel(snapshot, price(level.first), amount(level.second), Side::Buy());
+  }
+  for (const auto& level : asks) {
+    (void)cxet::composite::appendOrderBookLevel(snapshot, price(level.first), amount(level.second), Side::Sell());
+  }
+  hft_trader::core::LocalOrderBookConfig config{};
+  config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+  hft_trader::core::applySnapshot(engine.venueOrderBook, snapshot, engine.symbol, config);
+  hft_trader::core::bindOrderBookSnapshot(engine.venueSnapshot, engine.venueOrderBook);
+  engine.venueOrderBookExecutionEnabled = true;
+  if (!bids.size() || !asks.size()) return;
+  setTop(engine, bids.begin()->first, asks.begin()->first);
+}
+
 bool expect(bool value, std::string_view message) {
   if (value) return true;
   std::cerr << "FAIL: " << message << "\n";
@@ -153,10 +175,12 @@ bool testStaleCancelDoesNotCancelReusedSlot() {
   io.orderOut = Span<hft_trader::core::OrderIntent>(&orders[1], 1);
   io.orderCount = 1;
   applyIntents(engine, io, 30, 0, 0);
+  const std::size_t userEventsBeforeStaleCancel = engine.userEvents.size();
   applyDueActions(engine, 200000);
   return expect(engine.open[0].state.valid, "reused slot remains valid after stale cancel") &&
          expect(engine.open[0].state.clientIntentId.raw == 2, "stale cancel does not cancel replacement order") &&
-         expect(engine.orders[0].status == kRecordStatusFilled, "original order remains filled");
+         expect(engine.orders[0].status == kRecordStatusFilled, "original order remains filled") &&
+         expect(engine.userEvents.size() == userEventsBeforeStaleCancel, "stale cancel does not publish user event");
 }
 
 bool testPendingDrainActivatesLateOrder() {
@@ -209,6 +233,48 @@ bool testCancelThenReplacementLimitMaterializesReplace() {
          expect(visibleCount == 1u, "replacement order is visible to strategy") &&
          expect(visible[0].clientIntentId.raw == 2u, "visible order is replacement id") &&
          expect(visible[0].desiredPrice.raw == kPx100 - 200000000ll, "visible order has replacement desired price");
+}
+
+bool testCancelAckPublishesCanceledUserEventWithCumulativeFill() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  BacktestLatencyConfig config{};
+  config.seed = 77u;
+  config.cancelOrder.baseUs = 120u;
+  config.userData.baseUs = 500u;
+  initLatencyRuntime(engine.latency, config);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(61, Side::Buy(), kPx100 - 200000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  FillExecutionMetadata metadata{};
+  metadata.fillReason = kFillReasonPassiveQueue;
+  if (!fillOrderQty(engine, engine.open[0], kPx100, 25000000, 2000, false, metadata)) {
+    return expect(false, "partial fill before cancel succeeds");
+  }
+
+  std::array<hft_trader::core::CancelIntent, 1> cancels{cancelIntent(62, 61)};
+  io.clear();
+  io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancels.size());
+  io.cancelCount = cancels.size();
+  applyIntents(engine, io, 3000, engine.latency);
+  applyDueActions(engine, 123000);
+
+  hft_trader::strategy::RuntimeClientOrderId parsed{};
+  return expect(engine.userEvents.size() == 2u, "partial fill plus cancel publish two user events") &&
+         expect(engine.userEvents[1].kind == cxet::composite::UserDataEventKind::Order, "cancel user event is order kind") &&
+         expect(engine.userEvents[1].orderStatus == canon::OrderStatus::Canceled, "cancel ack publishes canceled status") &&
+         expect(engine.userEvents[1].lastFilledQty.raw == 0, "cancel user event has zero last fill") &&
+         expect(engine.userEvents[1].filledQty.raw == 25000000, "cancel user event carries cumulative filled qty") &&
+         expect(hft_trader::strategy::parseRuntimeClientOrderId(engine.userEvents[1].clientOrderId, parsed),
+                "cancel client order id parses") &&
+         expect(parsed.clientIntentId.raw == 61u, "cancel user event targets original order id") &&
+         expect(engine.userEventDeliveryTsNs.size() == 2u, "cancel user event stores delivery timestamp") &&
+         expect(engine.userEventDeliveryTsNs[1] == 623000, "cancel user event delivery applies user-data latency") &&
+         expect(!engine.open[0].state.valid, "cancel ack clears open order");
 }
 
 bool testOrderedCommandNewBeforeCancelKeepsReplacementLive() {
@@ -337,6 +403,247 @@ bool testSellMarketOrderAtSameTimestampWaitsForVenueTopUpdate() {
   return expect(notFilledBeforeMarketEvent, "sell market order active at market timestamp waits for that market event") &&
          expect(engine.fills.size() == 1u, "sell market order fills after same-timestamp venue update") &&
          expect(engine.fills[0].priceE8 == 114000000ll, "market sell fills at updated same-timestamp bid");
+}
+
+bool testMarketBuyConsumesVisibleAskLevelsWithoutMutatingBook() {
+  EngineState engine{};
+  seedVenueBook(engine,
+                {{9900000000ll, 500000000ll}},
+                {{10100000000ll, 40000000ll}, {10200000000ll, 60000000ll}});
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(72, Side::Buy())};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+  tryFillOnTop(engine, 2000);
+
+  const hft_trader::core::LocalOrderBookView book = hft_trader::core::orderBook(engine.venueOrderBook);
+  const hft_trader::core::LocalOrderBookSideState* asks = book.side(hft_trader::core::BookSide::Ask);
+
+  return expect(engine.fills.size() == 2u, "market buy writes one fill per consumed ask level") &&
+         expect(engine.fills[0].priceE8 == 10100000000ll, "market buy first chunk fills at best ask") &&
+         expect(engine.fills[0].qtyE8 == 40000000ll, "market buy first chunk uses best ask quantity") &&
+         expect(engine.fills[1].priceE8 == 10200000000ll, "market buy second chunk fills at next ask") &&
+         expect(engine.fills[1].qtyE8 == 60000000ll, "market buy second chunk uses remaining order quantity") &&
+         expect(engine.fills[0].fillReason == kFillReasonAggressiveBook, "market buy tags depth-aware taker reason") &&
+         expect(engine.fills[0].avgPriceE8 == 10100000000ll, "first chunk avg price is first level") &&
+         expect(engine.fills[1].avgPriceE8 == 10160000000ll, "second chunk records cumulative average price") &&
+         expect(engine.fills[0].chunkIndex == 1u && engine.fills[0].chunkCount == 2u,
+                "first market chunk records execution chunk index") &&
+         expect(engine.fills[1].chunkIndex == 2u && engine.fills[1].chunkCount == 2u,
+                "second market chunk records execution chunk index") &&
+         expect(engine.fills[0].executionQtyE8 == kQty1, "chunk hover carries total execution qty") &&
+         expect(engine.fills[0].executionAvgPriceE8 == 10160000000ll, "chunk hover carries total execution avg") &&
+         expect(engine.fills[0].referencePriceE8 == 10100000000ll, "chunk hover carries reference ask") &&
+         expect(engine.fills[0].slippageE8 == 60000000ll, "chunk hover carries absolute slippage") &&
+         expect(engine.fills[0].slippageBpsE8 == 5940594059ll, "chunk hover carries bps slippage") &&
+         expect(engine.fills[0].executionBookConsumedPctE8 == 10000000000ll,
+                "chunk hover carries total consumed visible book percent") &&
+         expect(engine.orders[0].status == kRecordStatusFilled, "fully visible market buy is filled") &&
+         expect(!engine.open[0].state.valid, "fully visible market buy clears open order") &&
+         expect(asks != nullptr && asks->levels[0].qty.raw == 40000000ll,
+                "simulated market buy does not mutate recorded ask liquidity");
+}
+
+bool testMarketBuyCapsToVisibleDepthAndTerminatesRemainder() {
+  EngineState engine{};
+  seedVenueBook(engine,
+                {{9900000000ll, 500000000ll}},
+                {{10100000000ll, 30000000ll}});
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(73, Side::Buy())};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+  tryFillOnTop(engine, 2000);
+
+  return expect(engine.fills.size() == 1u, "market buy caps fill to visible ask depth") &&
+         expect(engine.fills[0].qtyE8 == 30000000ll, "market buy fills only visible ask quantity") &&
+         expect(engine.fills[0].remainingQtyE8 == 70000000ll, "market buy records unavailable remainder") &&
+         expect(engine.orders[0].status == kRecordStatusPartialUnfilled, "visible-depth cap terminalizes market remainder") &&
+         expect(!engine.open[0].state.valid, "visible-depth cap clears unfilled market remainder") &&
+         expect(engine.netQtyRaw == 30000000ll, "visible-depth cap opens only filled quantity");
+}
+
+bool testLazyExecutionDepthProviderMarketBuyConsumesLegacyDepth() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_execution_depth_legacy_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
+  writeText(dir / "jsonl" / "depth.jsonl",
+            "[[9900000000,100000000,0],[10100000000,40000000,1],[10200000000,60000000,1],1000]\n");
+
+  EngineState engine{};
+  engine.symbol.copyFrom("BTCUSDT");
+  setTop(engine, 9900000000ll, 10100000000ll);
+  hft_trader::core::LocalOrderBookConfig config{};
+  config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+  ExecutionDepthProvider provider{};
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  engine.executionDepthProvider = &provider;
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(172, Side::Buy())};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  return expect(opened, "lazy execution depth provider opens legacy depth channel") &&
+         expect(provider.rowsRead() == 1u, "lazy execution depth provider reads only needed depth row") &&
+         expect(engine.fills.size() == 2u, "lazy execution depth market buy writes one fill per depth level") &&
+         expect(engine.fills[0].priceE8 == 10100000000ll, "lazy execution depth uses best ask instead of fallback BBO") &&
+         expect(engine.fills[1].priceE8 == 10200000000ll, "lazy execution depth walks second ask level") &&
+         expect(engine.fills[0].chunkCount == 2u, "lazy execution depth carries chunk count") &&
+         expect(engine.fills[0].executionAvgPriceE8 == 10160000000ll, "lazy execution depth carries execution avg");
+}
+
+bool testLazyExecutionDepthProviderMarketBuyConsumesTapeDepth() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_execution_depth_tape_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
+            "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
+  writeText(dir / "jsonl" / "depth_tape.jsonl",
+            "[9223372036854776808,9900000000,100000000,10100000000,40000000,10200000000,60000000]\n"
+            "[9223372036854776809,9900000000,100000000,10300000000,100000000]\n");
+  writeText(dir / "jsonl" / "depth_sidecar.jsonl",
+            "[9223372036854776808,0,1,1,2]\n"
+            "[9223372036854776809,0,1,1,1]\n");
+
+  EngineState engine{};
+  engine.symbol.copyFrom("BTCUSDT");
+  setTop(engine, 9800000000ll, 10400000000ll);
+  hft_trader::core::LocalOrderBookConfig config{};
+  config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+  ExecutionDepthProvider provider{};
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  engine.executionDepthProvider = &provider;
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(174, Side::Buy())};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  return expect(opened, "lazy execution depth provider opens tape sidecar channel") &&
+         expect(provider.rowsRead() == 1u, "lazy tape execution reads only first needed depth row") &&
+         expect(engine.fills.size() == 2u, "lazy tape market buy writes one fill per ask level without standalone snapshot") &&
+         expect(engine.fills[0].priceE8 == 10100000000ll, "lazy tape uses first ask level") &&
+         expect(engine.fills[1].priceE8 == 10200000000ll, "lazy tape walks second ask level") &&
+         expect(engine.fills[0].fillReason == kFillReasonAggressiveBook, "lazy tape uses depth execution instead of BBO fallback") &&
+         expect(engine.fills[0].fillReason != kFillReasonTop, "lazy tape must not fall back to top fill reason") &&
+         expect(engine.fills[0].priceE8 != 10400000000ll, "lazy tape must not use fallback top ask") &&
+         expect(engine.fills[0].chunkCount == 2u, "lazy tape carries chunk count") &&
+         expect(engine.fills[0].executionAvgPriceE8 == 10160000000ll, "lazy tape carries execution avg") &&
+         expect(engine.fills[0].referencePriceE8 == 10100000000ll, "lazy tape carries reference ask") &&
+         expect(engine.fills[0].slippageE8 == 60000000ll, "lazy tape carries absolute slippage") &&
+         expect(engine.fills[0].slippageBpsE8 == 5940594059ll, "lazy tape carries bps slippage");
+}
+
+bool testLazyExecutionDepthProviderDoesNotAdvanceWithoutExecutionCandidate() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_execution_depth_idle_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
+  writeText(dir / "jsonl" / "depth.jsonl",
+            "[[9900000000,100000000,0],[10100000000,100000000,1],1000]\n"
+            "[[9900000000,100000000,0],[10200000000,100000000,1],2000]\n");
+
+  EngineState engine{};
+  engine.symbol.copyFrom("BTCUSDT");
+  setTop(engine, 9900000000ll, 10100000000ll);
+  hft_trader::core::LocalOrderBookConfig config{};
+  config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+  ExecutionDepthProvider provider{};
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  engine.executionDepthProvider = &provider;
+
+  tryFillOnTop(engine, 2000);
+
+  return expect(opened, "lazy execution depth provider opens idle fixture") &&
+         expect(provider.rowsRead() == 0u, "lazy execution depth does not advance without executable orders") &&
+         expect(engine.fills.empty(), "idle lazy execution does not create fills");
+}
+
+bool testLazyExecutionDepthProviderInitializesPassiveQueueAtActivation() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_execution_depth_queue_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
+  writeText(dir / "jsonl" / "depth.jsonl",
+            "[[9900000000,55000000,0],[10100000000,100000000,1],1000]\n");
+
+  EngineState engine{};
+  engine.symbol.copyFrom("BTCUSDT");
+  setTop(engine, 9900000000ll, 10100000000ll);
+  hft_trader::core::LocalOrderBookConfig config{};
+  config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+  ExecutionDepthProvider provider{};
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  engine.executionDepthProvider = &provider;
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(146, Side::Buy(), 9900000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 1000, 0, 0);
+  const bool capturedQueueAhead = engine.open[0].queueAheadQtyRaw == 55000000ll;
+
+  cxet::composite::TradeRuntimeV1 trade{};
+  trade.ts.raw = 2000;
+  trade.side = Side::Sell();
+  trade.price.raw = 9900000000ll;
+  trade.qty.raw = 70000000ll;
+  tryFillOnTrade(engine, trade);
+
+  return expect(opened, "lazy execution depth provider opens passive queue fixture") &&
+         expect(capturedQueueAhead, "lazy execution depth captures queue ahead at activation") &&
+         expect(engine.fills.size() == 1u, "lazy execution depth queue fills after trade volume consumes queue") &&
+         expect(engine.fills[0].qtyE8 == 15000000ll, "lazy execution depth queue subtracts visible queue ahead") &&
+         expect(engine.fills[0].queueAheadBeforeE8 == 55000000ll, "lazy execution depth queue records queue before trade") &&
+         expect(engine.fills[0].queueAheadAfterE8 == 0, "lazy execution depth queue records queue after trade");
+}
+
+bool testInitialSnapshotBookDoesNotReplaceBboFallbackWithoutExecutionDepth() {
+  EngineState engine{};
+  seedVenueBook(engine,
+                {{9900000000ll, 100000000ll}},
+                {{10100000000ll, 100000000ll}});
+  engine.venueOrderBookExecutionEnabled = false;
+  setTop(engine, 9900000000ll, 10500000000ll);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(173, Side::Buy())};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  return expect(engine.fills.size() == 1u, "missing execution depth falls back to BBO") &&
+         expect(engine.fills[0].priceE8 == 10500000000ll, "initial snapshot book does not replace BBO fallback") &&
+         expect(engine.fills[0].fillReason == kFillReasonTop, "BBO fallback keeps top fill reason");
+}
+
+bool testCrossingLimitConsumesVisibleDepthThenRestsRemainder() {
+  EngineState engine{};
+  seedVenueBook(engine,
+                {{9900000000ll, 500000000ll}},
+                {{10100000000ll, 30000000ll}});
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(74, Side::Buy(), 10100000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+  tryFillOnTop(engine, 2000);
+
+  return expect(engine.fills.size() == 1u, "crossing limit consumes visible executable ask depth") &&
+         expect(engine.fills[0].qtyE8 == 30000000ll, "crossing limit fill is capped by visible ask depth") &&
+         expect(engine.fills[0].remainingQtyE8 == 70000000ll, "crossing limit records remaining passive quantity") &&
+         expect(engine.orders[0].status == kRecordStatusActive, "crossing limit remainder stays active") &&
+         expect(engine.open[0].state.valid, "crossing limit remainder remains open") &&
+         expect(engine.open[0].filledQtyRaw == 30000000ll, "crossing limit stores cumulative filled qty");
 }
 
 bool testLatencyRuntimeUsesDedicatedCancelChannel() {
@@ -609,6 +916,42 @@ bool testTradeQtyPartialFillKeepsMakerOrderLiveUntilCumulativeFilled() {
          expect(engine.orders[0].status == kRecordStatusFilled, "final maker fill marks order filled") &&
          expect(!engine.open[0].state.valid, "final maker fill clears open order") &&
          expect(engine.netQtyRaw == 100000000, "partial maker fills accumulate position");
+}
+
+bool testPassiveQueueAdvancesOnlyFromOppositeTradesAtOrderPrice() {
+  EngineState engine{};
+  seedVenueBook(engine,
+                {{9900000000ll, 55000000ll}},
+                {{10100000000ll, 500000000ll}});
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(46, Side::Buy(), 9900000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 1000, 0, 0);
+  const bool capturedQueueAhead = engine.open[0].queueAheadQtyRaw == 55000000ll;
+
+  cxet::composite::TradeRuntimeV1 first{};
+  first.ts.raw = 2000;
+  first.side = Side::Sell();
+  first.price.raw = 9900000000ll;
+  first.qty.raw = 50000000ll;
+  tryFillOnTrade(engine, first);
+  const bool stillWaiting = engine.fills.empty() && engine.open[0].queueAheadQtyRaw == 5000000ll;
+
+  cxet::composite::TradeRuntimeV1 second{};
+  second.ts.raw = 3000;
+  second.side = Side::Sell();
+  second.price.raw = 9900000000ll;
+  second.qty.raw = 70000000ll;
+  tryFillOnTrade(engine, second);
+
+  return expect(capturedQueueAhead, "passive buy captures visible bid queue ahead at activation") &&
+         expect(stillWaiting, "trade volume first consumes queue ahead without filling us") &&
+         expect(engine.fills.size() == 1u, "second trade fills only after queue ahead is consumed") &&
+         expect(engine.fills[0].qtyE8 == 65000000ll, "maker fill uses trade quantity remaining after queue ahead") &&
+         expect(engine.fills[0].queueAheadBeforeE8 == 5000000ll, "maker fill records queue ahead before trade") &&
+         expect(engine.fills[0].queueAheadAfterE8 == 0, "maker fill records consumed queue ahead");
 }
 
 bool testGtcCrossingLimitStillTakerFills() {
@@ -1275,6 +1618,8 @@ bool testWriterCreatesV2RunDirectory() {
          expect(manifest.find("\"cancel_order\": {\"base_us\": 1200") != std::string::npos, "manifest includes cancel latency profile") &&
          expect(manifest.find("\"user_data\": {\"base_us\": 800") != std::string::npos, "manifest includes user-data latency profile") &&
          expect(manifest.find("\"risk_snapshots\": {") != std::string::npos, "manifest declares risk snapshots stream") &&
+         expect(manifest.find("fill_reason,liquidity,order_qty_e8") != std::string::npos, "manifest declares extended fill metadata") &&
+         expect(manifest.find("\"partial_unfilled\"") != std::string::npos, "manifest declares partial-unfilled order status") &&
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
          expect(manifest.find("\"strategy_spread\": {") != std::string::npos, "manifest declares strategy spread stream") &&
          expect(manifest.find("\"warnings\": [{\"message\": \"partial depth replay: dropped 1 unpaired depth_tape rows; exact replay lost\"}]") != std::string::npos,
@@ -1288,7 +1633,8 @@ bool testWriterCreatesV2RunDirectory() {
                 "manifest leg summary carries per-leg market data latency") &&
          expect(orderLifetimes == "[110,150,10000000000,100000000,1,0,0]\n", "order lifetimes stream uses compact arrays") &&
          expect(!std::filesystem::exists(dir / "orders.jsonl"), "writer does not emit raw orders stream") &&
-         expect(fills == "[1,110,150,1,10000000000,100000000,0,0,0]\n", "fills stream uses compact arrays") &&
+         expect(fills == "[1,110,150,1,10000000000,100000000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]\n",
+                "fills stream appends execution metadata after legacy fields") &&
          expect(equity == "[150,0,0,0,0,0,0,0,100000000000,100000000,1]\n", "equity stream uses compact arrays") &&
          expect(risk == "[150,0,0,0,0,0,0,100000000000,100000000,10000000000,9900000000,10100000000,1,2]\n", "risk stream uses compact arrays") &&
          expect(indicator == "[150,42,44,1,7,3,1]\n", "strategy indicator stream uses compact arrays") &&
@@ -1627,7 +1973,7 @@ bool testStatArbBandLadderMetadataRequiresTwoSessions() {
          expect(metadataParamDefaultIs(*metadata, "order_qty", "0.001"), "ladder order_qty default comes from commented ini template");
 }
 
-bool testBasisConvergenceMetadataRequiresTwoSessions() {
+bool testBasisConvergenceMetadataUsesOneSession() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("basis_convergence_probe");
   return expect(metadata != nullptr, "basis_convergence_probe metadata is exported") &&
          expect(metadata->configTemplateFile != nullptr &&
@@ -1635,8 +1981,8 @@ bool testBasisConvergenceMetadataRequiresTwoSessions() {
                 "basis_convergence_probe metadata discovers strategy profile") &&
          expect(metadataDisplayNameIs(*metadata, "Базис spot/futures"),
                 "basis convergence display name comes from ini metadata") &&
-         expect(metadata->minSessionCount == 2u, "basis convergence probe requires at least two sessions") &&
-         expect(metadata->maxSessionCount == 2u, "basis convergence probe allows exactly two sessions") &&
+         expect(metadata->minSessionCount == 1u, "basis convergence probe uses one session") &&
+         expect(metadata->maxSessionCount == 1u, "basis convergence probe allows one session") &&
          expect(!metadataHasParam(*metadata, "source"), "basis convergence metadata keeps source auto-resolved") &&
          expect(!metadataHasParam(*metadata, "timeframe_sec"), "basis convergence metadata keeps timeframe defaulted") &&
          expect(!metadataHasParam(*metadata, "expiry_utc_ns"), "basis convergence metadata keeps expiry auto-resolved");
@@ -1691,6 +2037,7 @@ int main() {
   ok = testStaleCancelDoesNotCancelReusedSlot() && ok;
   ok = testPendingDrainActivatesLateOrder() && ok;
   ok = testCancelThenReplacementLimitMaterializesReplace() && ok;
+  ok = testCancelAckPublishesCanceledUserEventWithCumulativeFill() && ok;
   ok = testOrderedCommandNewBeforeCancelKeepsReplacementLive() && ok;
   ok = testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() && ok;
   ok = testLatencyRuntimeSplitsMarketAndLimitOrderActivation() && ok;
@@ -1704,9 +2051,18 @@ int main() {
   ok = testNoFreeOrderSlotPublishesRejectedUserEvent() && ok;
   ok = testMarketOrderAtSameTimestampWaitsForVenueTopUpdate() && ok;
   ok = testSellMarketOrderAtSameTimestampWaitsForVenueTopUpdate() && ok;
+  ok = testMarketBuyConsumesVisibleAskLevelsWithoutMutatingBook() && ok;
+  ok = testMarketBuyCapsToVisibleDepthAndTerminatesRemainder() && ok;
+  ok = testLazyExecutionDepthProviderMarketBuyConsumesLegacyDepth() && ok;
+  ok = testLazyExecutionDepthProviderMarketBuyConsumesTapeDepth() && ok;
+  ok = testLazyExecutionDepthProviderDoesNotAdvanceWithoutExecutionCandidate() && ok;
+  ok = testLazyExecutionDepthProviderInitializesPassiveQueueAtActivation() && ok;
+  ok = testInitialSnapshotBookDoesNotReplaceBboFallbackWithoutExecutionDepth() && ok;
+  ok = testCrossingLimitConsumesVisibleDepthThenRestsRemainder() && ok;
   ok = testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() && ok;
   ok = testMakerFillMinCrossTicksRequiresTradeThrough() && ok;
   ok = testTradeQtyPartialFillKeepsMakerOrderLiveUntilCumulativeFilled() && ok;
+  ok = testPassiveQueueAdvancesOnlyFromOppositeTradesAtOrderPrice() && ok;
   ok = testGtcCrossingLimitStillTakerFills() && ok;
   ok = testReduceOnlyMarketBuyDoesNotOpenWhenFlat() && ok;
   ok = testReduceOnlyMarketSellClosesLongAtBid() && ok;
@@ -1738,7 +2094,7 @@ int main() {
   ok = testStatArbBandLadderKeepsTradesOptionalForBboOnlyReplay() && ok;
   ok = testStrategyMetadataExposesOnlySupportedSpreadMakerParams() && ok;
   ok = testStatArbBandLadderMetadataRequiresTwoSessions() && ok;
-  ok = testBasisConvergenceMetadataRequiresTwoSessions() && ok;
+  ok = testBasisConvergenceMetadataUsesOneSession() && ok;
   ok = testTrendProbeMetadataExposesTrendScoreIndicator() && ok;
   ok = testVolatilityProbeMetadataExposesVolatilityIndicator() && ok;
   ok = testToxicFlowProbeMetadataRequiresDepthIndicator() && ok;

@@ -3,11 +3,19 @@
 #include <algorithm>
 #include <fstream>
 #include <system_error>
-#include <unordered_map>
 #include <vector>
+
+#include "absl/container/flat_hash_map.h"
 
 namespace hft_backtest::detail {
 namespace {
+
+constexpr const char* kFillsRowSchema =
+    "[order_id,entry_ts_ns,exit_ts_ns,side,price_e8,qty_e8,realized_pnl_e8,reduce_only,leg_index,"
+    "fill_reason,liquidity,order_qty_e8,cumulative_filled_qty_e8,remaining_qty_e8,avg_price_e8,"
+    "book_level_qty_e8,book_visible_executable_qty_e8,book_consumed_pct_e8,queue_ahead_before_e8,queue_ahead_after_e8,"
+    "chunk_index,chunk_count,execution_qty_e8,execution_avg_price_e8,reference_price_e8,slippage_e8,"
+    "slippage_bps_e8,execution_book_consumed_pct_e8]";
 
 const char* resultStatusName(Status status) noexcept {
   switch (status) {
@@ -30,6 +38,25 @@ bool writeFills(const std::filesystem::path& path, const EngineState& engine) no
         << ',' << row.realizedPnlE8
         << ',' << (row.reduceOnly ? 1 : 0)
         << ',' << row.legIndex
+        << ',' << static_cast<unsigned>(row.fillReason)
+        << ',' << static_cast<unsigned>(row.liquidity)
+        << ',' << row.orderQtyE8
+        << ',' << row.cumulativeFilledQtyE8
+        << ',' << row.remainingQtyE8
+        << ',' << row.avgPriceE8
+        << ',' << row.bookLevelQtyE8
+        << ',' << row.bookVisibleExecutableQtyE8
+        << ',' << row.bookConsumedPctE8
+        << ',' << row.queueAheadBeforeE8
+        << ',' << row.queueAheadAfterE8
+        << ',' << row.chunkIndex
+        << ',' << row.chunkCount
+        << ',' << row.executionQtyE8
+        << ',' << row.executionAvgPriceE8
+        << ',' << row.referencePriceE8
+        << ',' << row.slippageE8
+        << ',' << row.slippageBpsE8
+        << ',' << row.executionBookConsumedPctE8
         << "]\n";
   }
   return out.good();
@@ -46,7 +73,10 @@ struct OrderLifetimeRow {
 };
 
 bool isEffectiveOrderStatus(std::uint8_t status) noexcept {
-  return status == kRecordStatusAcked || status == kRecordStatusFilled || status == kRecordStatusCancelled;
+  return status == kRecordStatusAcked ||
+         status == kRecordStatusFilled ||
+         status == kRecordStatusCancelled ||
+         status == kRecordStatusPartialUnfilled;
 }
 
 bool isOpenOrderStatus(std::uint8_t status) noexcept {
@@ -54,20 +84,33 @@ bool isOpenOrderStatus(std::uint8_t status) noexcept {
 }
 
 struct OrderLifetimeIndexes {
-  std::unordered_map<std::uint64_t, const JsonFill*> fillByOrderId{};
-  std::unordered_map<std::uint64_t, std::vector<const JsonOrder*>> commandsByTargetId{};
+  absl::flat_hash_map<std::uint64_t, const JsonFill*> fillByOrderId{};
+  absl::flat_hash_map<std::uint64_t, std::vector<const JsonOrder*>> commandsByTargetId{};
 };
 
 void buildOrderLifetimeIndexes(const EngineState& engine, OrderLifetimeIndexes& out) {
   out.fillByOrderId.clear();
   out.commandsByTargetId.clear();
   out.fillByOrderId.reserve(engine.fills.size());
-  out.commandsByTargetId.reserve(engine.orders.size() / 2u + 1u);
 
   for (const JsonFill& fill : engine.fills) {
     if (fill.exitTsNs <= 0 || fill.priceE8 <= 0) continue;
     auto [it, inserted] = out.fillByOrderId.emplace(fill.orderId, &fill);
     if (!inserted && fill.exitTsNs < it->second->exitTsNs) it->second = &fill;
+  }
+
+  absl::flat_hash_map<std::uint64_t, std::size_t> commandCounts;
+  commandCounts.reserve(engine.orders.size() / 2u + 1u);
+  for (const JsonOrder& order : engine.orders) {
+    if (order.targetId == 0 || order.activeTsNs <= 0) continue;
+    if (order.action != kRecordActionCancel) continue;
+    if (!isEffectiveOrderStatus(order.status)) continue;
+    ++commandCounts[order.targetId];
+  }
+
+  out.commandsByTargetId.reserve(commandCounts.size());
+  for (const auto& row : commandCounts) {
+    out.commandsByTargetId[row.first].reserve(row.second);
   }
 
   for (const JsonOrder& order : engine.orders) {
@@ -466,7 +509,7 @@ bool writeManifest(const std::filesystem::path& path,
       << ", " << q << "row_schema" << q << ": " << q << "[ts_start_ns,ts_end_ns,price_e8,qty_e8,side,open_ended,leg_index]" << q
       << ", " << q << "rows" << q << ": " << orderLifetimeRows << "},\n";
   out << "    " << q << "fills" << q << ": {" << q << "path" << q << ": " << q << "fills.jsonl" << q
-      << ", " << q << "row_schema" << q << ": " << q << "[order_id,entry_ts_ns,exit_ts_ns,side,price_e8,qty_e8,realized_pnl_e8,reduce_only,leg_index]" << q
+      << ", " << q << "row_schema" << q << ": " << q << kFillsRowSchema << q
       << ", " << q << "rows" << q << ": " << engine.fills.size() << "},\n";
   out << "    " << q << "equity" << q << ": {" << q << "path" << q << ": " << q << "equity.jsonl" << q
       << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,gross_realized_pnl_e8,realized_pnl_e8,unrealized_pnl_e8,gross_total_pnl_e8,net_total_pnl_e8,total_pnl_e8,fees_paid_e8,wallet_balance_e8,position_qty_e8,fill_count]" << q
@@ -504,7 +547,9 @@ bool writeManifest(const std::filesystem::path& path,
   out << "    " << q << "side" << q << ": {" << q << "0" << q << ": " << q << "sell" << q << ", " << q << "1" << q << ": " << q << "buy" << q << "},\n";
   out << "    " << q << "action" << q << ": {" << q << "1" << q << ": " << q << "order" << q << ", " << q << "3" << q << ": " << q << "cancel" << q << "},\n";
   out << "    " << q << "type" << q << ": {" << q << "1" << q << ": " << q << "limit" << q << ", " << q << "2" << q << ": " << q << "market" << q << "},\n";
-  out << "    " << q << "status" << q << ": {" << q << "1" << q << ": " << q << "pending" << q << ", " << q << "2" << q << ": " << q << "acked" << q << ", " << q << "3" << q << ": " << q << "filled" << q << ", " << q << "4" << q << ": " << q << "cancelled" << q << ", " << q << "5" << q << ": " << q << "missing" << q << ", " << q << "6" << q << ": " << q << "rejected" << q << "}\n";
+  out << "    " << q << "status" << q << ": {" << q << "1" << q << ": " << q << "pending" << q << ", " << q << "2" << q << ": " << q << "acked" << q << ", " << q << "3" << q << ": " << q << "filled" << q << ", " << q << "4" << q << ": " << q << "cancelled" << q << ", " << q << "5" << q << ": " << q << "missing" << q << ", " << q << "6" << q << ": " << q << "rejected" << q << ", " << q << "7" << q << ": " << q << "partial_unfilled" << q << "},\n";
+  out << "    " << q << "fill_reason" << q << ": {" << q << "0" << q << ": " << q << "unknown" << q << ", " << q << "1" << q << ": " << q << "top" << q << ", " << q << "2" << q << ": " << q << "trade" << q << ", " << q << "3" << q << ": " << q << "aggressive_book" << q << ", " << q << "4" << q << ": " << q << "passive_queue" << q << "},\n";
+  out << "    " << q << "liquidity" << q << ": {" << q << "0" << q << ": " << q << "maker" << q << ", " << q << "1" << q << ": " << q << "taker" << q << "}\n";
   out << "  },\n";
   out << "  " << q << "summary" << q << ": {\n";
   writeSummaryObject(out, result, engine, "    ");

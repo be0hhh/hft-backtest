@@ -183,15 +183,6 @@ void toRuntime(const DepthRow& row,
   }
 }
 
-cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const SnapshotDocument& row) noexcept {
-  cxet::composite::OrderBookSnapshot out{};
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  for (const PriceLevelRow& level : row.levels) {
-    appendSnapshotLevel(out, level);
-  }
-  return out;
-}
-
 cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const DepthRow& row) noexcept {
   cxet::composite::OrderBookSnapshot out{};
   out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);

@@ -103,11 +103,6 @@ struct CandleRow {
   bool hasOhlc{false};
 };
 
-struct SnapshotDocument {
-  std::int64_t tsNs{0};
-  std::vector<PriceLevelRow> levels{};
-};
-
 struct InstrumentMetadata {
   std::int64_t tickSizeE8{1};
   std::int64_t lotSizeE8{1};
@@ -120,7 +115,7 @@ struct SessionLoadPlan {
   bool loadTrades{true};
   bool loadBookTickers{true};
   bool loadPriceLimits{true};
-  bool loadDepths{true};
+  bool loadDepths{false};
   bool loadCandles{false};
   bool loadLiquidations{false};
   bool loadMarkPrices{false};
@@ -155,8 +150,6 @@ struct SessionData {
   std::vector<IndexPriceRow> indexPrices{};
   std::vector<FundingRow> funding{};
   std::vector<OpenInterestRow> openInterest{};
-  SnapshotDocument snapshot{};
-  bool hasSnapshot{false};
   InstrumentMetadata instrument{};
   std::int64_t tradeHistoryWarmupSec{0};
   std::int64_t tradeHistoryRequestedStartNs{0};

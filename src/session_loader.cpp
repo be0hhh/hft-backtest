@@ -891,7 +891,6 @@ void splitTradeWarmup(SessionData& out) {
 void rebuildReplayRange(SessionData& out) noexcept {
   out.firstTsNs = 0;
   out.lastTsNs = 0;
-  if (out.hasSnapshot) updateRange(out, out.snapshot.tsNs);
   for (const TradeRow& row : out.trades) updateRange(out, row.tsNs);
   for (const BookTickerRow& row : out.bookTickers) updateRange(out, row.tsNs);
   for (const PriceLimitRow& row : out.priceLimits) updateRange(out, row.tsNs);
@@ -1018,16 +1017,6 @@ Status loadSession(const std::filesystem::path& sessionPath,
     if (!isOk(status)) return status;
   }
 
-  std::string snapshotText;
-  const std::filesystem::path snapshotPath = sessionPath / "snapshot_000.json";
-  if (readText(snapshotPath, snapshotText)) {
-    out.hasSnapshot = parseBookDocument(snapshotText, out.snapshot.levels, out.snapshot.tsNs);
-    if (!out.hasSnapshot) {
-      error = "failed to parse snapshot_000.json";
-      return Status::CorruptData;
-    }
-    updateRange(out, out.snapshot.tsNs);
-  }
   out.timelineChannelSorted.fill(true);
   out.timelineOrderKnown = true;
   rebuildReplayRange(out);
