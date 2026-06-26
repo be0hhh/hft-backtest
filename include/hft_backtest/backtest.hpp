@@ -8,6 +8,7 @@
 #include "hft_backtest/api.hpp"
 #include "hft_backtest/status.hpp"
 #include "hft_backtest/strategy_metadata.hpp"
+#include "hft_trader/core/rate_limit/RateLimit.hpp"
 
 namespace hft_backtest {
 
@@ -39,6 +40,18 @@ struct BacktestLatencySchedule {
   BacktestLatencyProfile userData{};
 };
 
+struct BacktestRateLimitSchedule {
+  std::string exchange{};
+  std::string market{};
+  std::vector<hft_trader::core::RateLimitBucketConfig> buckets{};
+  std::vector<hft_trader::core::RateLimitActionConfig> actions{};
+};
+
+enum class BacktestExecutionPipeline : std::uint8_t {
+  Inline = 0,
+  TwoPhaseReprice = 1,
+};
+
 struct BacktestRunRequest {
   std::filesystem::path sessionPath{};
   std::vector<BacktestSessionRequest> sessions{};
@@ -63,6 +76,11 @@ struct BacktestRunRequest {
   std::int64_t takerFeeBpsE8{0};
   std::vector<BacktestFeeSchedule> feeSchedules{};
   std::vector<BacktestLatencySchedule> latencySchedules{};
+  std::vector<BacktestRateLimitSchedule> rateLimitSchedules{};
+  BacktestExecutionPipeline executionPipeline{BacktestExecutionPipeline::Inline};
+  bool hasMakerFeeBps{false};
+  bool hasTakerFeeBps{false};
+  bool rateLimitsEnabled{true};
   bool writeArtifacts{true};
   bool captureStrategySpread{false};
 };
@@ -162,6 +180,17 @@ struct BacktestRunResult {
   std::uint64_t timerWakeEvents{0};
   std::uint64_t reduceOnlyOrders{0};
   std::uint64_t reduceOnlyFills{0};
+  std::uint64_t phase2DepthRows{0};
+  std::uint64_t phase2FillsRepriced{0};
+  std::uint64_t phase2FillsMissingDepth{0};
+  std::uint64_t phase2BboRepriced{0};
+  std::uint64_t phase2DepthVwapRepriced{0};
+  std::uint64_t phase2DepthRejectedUnseeded{0};
+  std::uint64_t phase2DepthRejectedCrossed{0};
+  std::uint64_t phase2DepthRejectedStale{0};
+  std::uint64_t phase2MissingBbo{0};
+  bool twoPhaseRepriceApplied{false};
+  bool twoPhaseRepriceFallback{false};
   std::int64_t firstTsNs{0};
   std::int64_t lastTsNs{0};
   std::int64_t realizedPnlE8{0};

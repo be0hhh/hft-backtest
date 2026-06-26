@@ -50,7 +50,7 @@ fi
 
 clear_stale_cmake_cache
 
-cmake -S "$APP_ROOT" -B "$BUILD_DIR" -DCMAKE_CXX_COMPILER="$CLANG_CXX" -DCMAKE_BUILD_TYPE=Release
+cmake -S "$APP_ROOT" -B "$BUILD_DIR" -DCMAKE_CXX_COMPILER="$CLANG_CXX" -DCMAKE_BUILD_TYPE=Release -DCXET_PORTABLE_BUILD=OFF
 cmake --build "$BUILD_DIR" --target hft_backtest_core hft-backtest --parallel "$(nproc)"
 
 echo hft-backtest build OK. CLI: ./build/hft-backtest

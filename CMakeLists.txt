@@ -18,6 +18,8 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING [[]] FORCE)
 endif()
 
+option(CXET_PORTABLE_BUILD "If ON: disable -march=native for hft-backtest Release builds." OFF)
+
 set(HFT_BACKTEST_TRADER_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../hft-trader CACHE PATH [[Path to hft-trader app root]])
 set(HFT_BACKTEST_TRADER_INCLUDE_DIR ${HFT_BACKTEST_TRADER_ROOT}/include CACHE PATH [[Path to hft-trader public headers]])
 set(HFT_BACKTEST_TRADER_GENERATED_INCLUDE_DIR ${HFT_BACKTEST_TRADER_ROOT}/build/generated CACHE PATH [[Path to hft-trader generated headers]])
@@ -72,25 +74,36 @@ find_package(Threads REQUIRED)
 find_package(absl CONFIG REQUIRED)
 
 add_library(hft_backtest_core SHARED
-  src/backtest_accounting.cpp
-  src/backtest_latency.cpp
-  src/backtest_common.cpp
-  src/backtest.cpp
-  src/backtest_execution.cpp
-  src/backtest_execution_depth.cpp
-  src/backtest_fill_model.cpp
-  src/backtest_metrics.cpp
-  src/backtest_result_writer.cpp
-  src/backtest_sweep.cpp
-  src/backtest_sweep_search.cpp
-  src/backtest_sweep_writer.cpp
-  src/session_loader.cpp
-  src/strategy_metadata.cpp
-  src/backtest_timeline.cpp
+  src/accounting/backtest_accounting.cpp
+  src/accounting/backtest_metrics.cpp
+  src/accounting/backtest_result_aggregation.cpp
+  src/config/backtest_run_config.cpp
+  src/config/strategy_metadata.cpp
+  src/engine/backtest_common.cpp
+  src/engine/backtest_engine_setup.cpp
+  src/engine/backtest_prepared.cpp
+  src/engine/backtest_timeline.cpp
+  src/execution/backtest_execution.cpp
+  src/execution/backtest_execution_depth.cpp
+  src/execution/backtest_execution_reprice.cpp
+  src/execution/backtest_fill_model.cpp
+  src/execution/backtest_latency.cpp
+  src/input/session_loader.cpp
+  src/results/backtest_result_writer.cpp
+  src/runner/backtest.cpp
+  src/strategy/backtest_strategy_runtime.cpp
+  src/strategy/backtest_strategy_trace.cpp
+  src/strategy/backtest_strategy_warmup.cpp
+  src/sweep/backtest_sweep.cpp
+  src/sweep/backtest_sweep_search.cpp
+  src/sweep/backtest_sweep_writer.cpp
 )
 add_library(hft_backtest::core ALIAS hft_backtest_core)
 
-target_include_directories(hft_backtest_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(hft_backtest_core
+  PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 target_link_libraries(hft_backtest_core
   PUBLIC hft_trader_runtime cxet_lib Threads::Threads
   PRIVATE absl::flat_hash_map absl::inlined_vector
@@ -126,7 +139,7 @@ set_property(TARGET hft-backtest PROPERTY BUILD_RPATH
   ${HFT_BACKTEST_CXET_ROOT}/lib
 )
 
-add_executable(hft-backtest-execution-tests tests/backtest_execution_tests.cpp)
+add_executable(hft-backtest-execution-tests tests/execution/backtest_execution_tests.cpp)
 target_include_directories(hft-backtest-execution-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(hft-backtest-execution-tests PRIVATE hft_backtest_core)
 target_compile_features(hft-backtest-execution-tests PRIVATE cxx_std_23)
@@ -139,7 +152,7 @@ set_property(TARGET hft-backtest-execution-tests PROPERTY BUILD_RPATH
   ${HFT_BACKTEST_CXET_ROOT}/lib
 )
 
-add_executable(hft-backtest-stat-arb-replay-tests tests/stat_arb_edge_maker_replay_tests.cpp)
+add_executable(hft-backtest-stat-arb-replay-tests tests/replay/stat_arb_edge_maker_replay_tests.cpp)
 target_link_libraries(hft-backtest-stat-arb-replay-tests PRIVATE hft_backtest_core)
 target_compile_features(hft-backtest-stat-arb-replay-tests PRIVATE cxx_std_23)
 set_target_properties(hft-backtest-stat-arb-replay-tests PROPERTIES
@@ -151,7 +164,7 @@ set_property(TARGET hft-backtest-stat-arb-replay-tests PROPERTY BUILD_RPATH
   ${HFT_BACKTEST_CXET_ROOT}/lib
 )
 
-add_executable(hft-backtest-metrics-tests tests/backtest_metrics_tests.cpp)
+add_executable(hft-backtest-metrics-tests tests/metrics/backtest_metrics_tests.cpp)
 target_include_directories(hft-backtest-metrics-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(hft-backtest-metrics-tests PRIVATE hft_backtest_core)
 target_compile_features(hft-backtest-metrics-tests PRIVATE cxx_std_23)
@@ -164,7 +177,7 @@ set_property(TARGET hft-backtest-metrics-tests PROPERTY BUILD_RPATH
   ${HFT_BACKTEST_CXET_ROOT}/lib
 )
 
-add_executable(hft-backtest-session-loader-tests tests/session_loader_tests.cpp)
+add_executable(hft-backtest-session-loader-tests tests/input/session_loader_tests.cpp)
 target_include_directories(hft-backtest-session-loader-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(hft-backtest-session-loader-tests PRIVATE hft_backtest_core)
 target_compile_features(hft-backtest-session-loader-tests PRIVATE cxx_std_23)
@@ -177,7 +190,7 @@ set_property(TARGET hft-backtest-session-loader-tests PROPERTY BUILD_RPATH
   ${HFT_BACKTEST_CXET_ROOT}/lib
 )
 
-add_executable(hft-backtest-sweep-tests tests/backtest_sweep_tests.cpp)
+add_executable(hft-backtest-sweep-tests tests/sweep/backtest_sweep_tests.cpp)
 target_include_directories(hft-backtest-sweep-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(hft-backtest-sweep-tests PRIVATE hft_backtest_core)
 target_compile_features(hft-backtest-sweep-tests PRIVATE cxx_std_23)
