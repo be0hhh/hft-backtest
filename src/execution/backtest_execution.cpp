@@ -47,7 +47,9 @@ std::uint8_t recordSide(Side side) noexcept {
 }
 
 std::uint8_t recordType(canon::OrderType type) noexcept {
-  return type == canon::OrderType::Market ? kRecordTypeMarket : kRecordTypeLimit;
+  if (type == canon::OrderType::Market) return kRecordTypeMarket;
+  if (type == canon::OrderType::Stop) return kRecordTypeStopMarket;
+  return kRecordTypeLimit;
 }
 
 std::uint64_t nextOrderId(const EngineState& engine) noexcept {
@@ -56,6 +58,23 @@ std::uint64_t nextOrderId(const EngineState& engine) noexcept {
     if (order.id >= out) out = order.id + 1u;
   }
   return out;
+}
+
+Side oppositeSide(Side side) noexcept {
+  return side.raw == Side::Buy().raw ? Side::Sell() : Side::Buy();
+}
+
+bool serviceOrder(const OpenOrder& order) noexcept {
+  return order.service || order.warmup || order.serviceAutounwind;
+}
+
+std::int64_t addMs(std::int64_t tsNs, std::uint32_t ms) noexcept {
+  const std::uint64_t deltaRaw = static_cast<std::uint64_t>(ms) * 1000000ull;
+  const std::int64_t delta = deltaRaw > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
+      ? std::numeric_limits<std::int64_t>::max()
+      : static_cast<std::int64_t>(deltaRaw);
+  if (tsNs > std::numeric_limits<std::int64_t>::max() - delta) return std::numeric_limits<std::int64_t>::max();
+  return tsNs + delta;
 }
 
 bool pendingEarlier(const PendingAction& lhs, const PendingAction& rhs) noexcept {
@@ -267,7 +286,9 @@ std::int64_t fillableOrderQty(const EngineState& engine,
 
 bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
   if (!order.state.valid) return false;
-  pushUserEvent(engine, makeRejectedOrderEvent(engine, order, tsNs), tsNs);
+  if (!serviceOrder(order)) pushUserEvent(engine, makeRejectedOrderEvent(engine, order, tsNs), tsNs);
+  if (order.warmup) engine.warmupInFlight = false;
+  if (order.serviceAutounwind) engine.serviceExposureOpen = false;
   if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusRejected;
   order = OpenOrder{};
   bumpContextRevision(engine);
@@ -276,7 +297,9 @@ bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
 
 void terminalizeUnavailableLiquidity(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
   if (!order.state.valid) return;
-  pushUserEvent(engine, makeCanceledOrderEvent(engine, order, tsNs), tsNs);
+  if (!serviceOrder(order)) pushUserEvent(engine, makeCanceledOrderEvent(engine, order, tsNs), tsNs);
+  if (order.warmup) engine.warmupInFlight = false;
+  if (order.serviceAutounwind) engine.serviceExposureOpen = false;
   if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusPartialUnfilled;
   order = OpenOrder{};
   bumpContextRevision(engine);
@@ -296,6 +319,63 @@ bool postOnlyCrossesTop(const EngineState& engine, const OpenOrder& order) noexc
   if (order.state.side.raw == Side::Buy().raw) return order.state.price.raw >= ask;
   if (order.state.side.raw == Side::Sell().raw) return order.state.price.raw <= bid;
   return false;
+}
+
+bool stopMarketCrossed(const OpenOrder& order, std::int64_t sourcePrice) noexcept {
+  if (!order.state.valid || order.state.orderType != canon::OrderType::Stop ||
+      order.state.triggerPrice.raw <= 0 || sourcePrice <= 0) return false;
+  if (order.state.side.raw == Side::Buy().raw) return sourcePrice >= order.state.triggerPrice.raw;
+  if (order.state.side.raw == Side::Sell().raw) return sourcePrice <= order.state.triggerPrice.raw;
+  return false;
+}
+
+bool knownStopMarketTriggerSource(canon::OrderTriggerSource source) noexcept {
+  return source == canon::OrderTriggerSource::Last ||
+         source == canon::OrderTriggerSource::Mark ||
+         source == canon::OrderTriggerSource::Index;
+}
+
+bool badStopMarketIntent(const hft_trader::core::OrderIntent& intent) noexcept {
+  return intent.orderType == canon::OrderType::Stop &&
+         (intent.triggerPrice.raw <= 0 || !knownStopMarketTriggerSource(intent.triggerSource));
+}
+
+bool stopMarketSourcePrice(const EngineState& engine,
+                           const OpenOrder& order,
+                           std::int64_t& outPrice) noexcept {
+  outPrice = 0;
+  const canon::OrderTriggerSource source = order.state.triggerSource;
+  if (source == canon::OrderTriggerSource::Last) {
+    const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+    if (order.state.side.raw == Side::Buy().raw) {
+      outPrice = top.ask.px.raw;
+    } else if (order.state.side.raw == Side::Sell().raw) {
+      outPrice = top.bid.px.raw;
+    }
+    return outPrice > 0;
+  }
+  if (source == canon::OrderTriggerSource::Mark) {
+    if (engine.venueSnapshot.hasMarkPrice.raw != hft_trader::core::kAlgoFlagTrue.raw) return false;
+    outPrice = engine.venueSnapshot.lastMarkPrice.markPrice.raw;
+    return outPrice > 0;
+  }
+  if (source == canon::OrderTriggerSource::Index) {
+    if (engine.venueSnapshot.hasIndexPrice.raw != hft_trader::core::kAlgoFlagTrue.raw) return false;
+    outPrice = engine.venueSnapshot.lastIndexPrice.indexPrice.raw;
+    return outPrice > 0;
+  }
+  return false;
+}
+
+bool stopMarketCrossesAtActivation(const EngineState& engine, const OpenOrder& order) noexcept {
+  std::int64_t sourcePrice = 0;
+  if (!stopMarketSourcePrice(engine, order, sourcePrice)) return false;
+  return stopMarketCrossed(order, sourcePrice);
+}
+
+bool marketExecutionOrder(const OpenOrder& order) noexcept {
+  return order.state.orderType == canon::OrderType::Market ||
+         (order.state.orderType == canon::OrderType::Stop && order.stopTriggered);
 }
 
 const hft_trader::core::LocalOrderBookState* executionDepthBook(EngineState& engine,
@@ -319,6 +399,7 @@ bool venueOrderBookExecutionConfigured(const EngineState& engine) noexcept {
 bool needsTopExecutionBook(const OpenOrder& order, std::int64_t bid, std::int64_t ask) noexcept {
   if (!order.state.valid || !order.active) return false;
   if (order.state.orderType == canon::OrderType::Market) return true;
+  if (order.state.orderType == canon::OrderType::Stop) return order.stopTriggered;
   if (order.state.orderType != canon::OrderType::Limit) return false;
   if (order.postOnly || order.lastAggressiveBookTsNs != 0) return false;
   if (bid <= 0 || ask <= 0) return true;
@@ -389,7 +470,7 @@ bool marketDepthPlanUsable(const OpenOrder& order,
                            const AggressiveFillPlan& plan,
                            const hft_trader::core::LocalOrderBookState& book,
                            const cxet::composite::BookTickerRuntimeV1& top) noexcept {
-  if (order.state.orderType != canon::OrderType::Market) return true;
+  if (!marketExecutionOrder(order)) return true;
   if (!marketDepthFreshEnough(book, top)) return false;
   if (plan.count == 0u || plan.visibleDepthCapped || plan.remainingQtyE8 != 0) return false;
   return plan.filledQtyE8 == openOrderRemainingQty(order);
@@ -399,11 +480,20 @@ void activateOrder(EngineState& engine, OpenOrder& order, std::int64_t activeTsN
   order.active = true;
   order.activeTsNs = activeTsNs;
   order.state.state = hft_trader::core::StrategyOrderLocalState::LiveLocal;
+  if (order.warmup) {
+    engine.lastOrderPathHotMono = timeNsFromI64Local(activeTsNs);
+    engine.warmupInFlight = false;
+    engine.lastWarmupSkipReason = 0u;
+  }
   if (order.recordIndex < engine.orders.size()) {
     engine.orders[order.recordIndex].activeTsNs = activeTsNs;
     engine.orders[order.recordIndex].status = kRecordStatusActive;
   }
   if (postOnlyCrossesTop(engine, order)) {
+    (void)rejectOrder(engine, order, activeTsNs);
+    return;
+  }
+  if (stopMarketCrossesAtActivation(engine, order)) {
     (void)rejectOrder(engine, order, activeTsNs);
     return;
   }
@@ -422,9 +512,15 @@ bool submitCancelIntent(EngineState& engine,
                         const hft_trader::core::CancelIntent& intent,
                         std::int64_t tsNs,
                         std::int64_t activeTs) {
+  const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
   const std::size_t recordIndex = engine.orders.size();
   engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, kRecordActionCancel, kRecordSideNone, kRecordTypeNone, kRecordStatusPending, 0, 0, false});
-  const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
+  if (slotIndex != kNoRecordIndex) {
+    const OpenOrder& target = engine.open[slotIndex];
+    engine.orders.back().service = serviceOrder(target);
+    engine.orders.back().warmup = target.warmup;
+    engine.orders.back().serviceAutounwind = target.serviceAutounwind;
+  }
   if (slotIndex == kNoRecordIndex) {
     engine.orders[recordIndex].status = kRecordStatusMissing;
     return false;
@@ -464,10 +560,47 @@ bool submitCancelIntent(EngineState& engine,
 void submitOrderIntent(EngineState& engine,
                        const hft_trader::core::OrderIntent& intent,
                        std::int64_t tsNs,
-                       std::int64_t activeTs) {
+                       std::int64_t activeTs,
+                       bool warmup = false,
+                       std::uint32_t warmupCancelTimeoutMs = 0u,
+                       bool warmupCancelAfterAck = false) {
   const bool postOnly = intent.orderType == canon::OrderType::Limit && isPostOnlyPolicy(intent.limitTimeInForcePolicy);
+  const bool service = intent.service || warmup;
   const std::size_t recordIndex = engine.orders.size();
   engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, kRecordActionOrder, recordSide(intent.side), recordType(intent.orderType), kRecordStatusPending, intent.price.raw, intent.qty.raw, intent.reduceOnly, postOnly});
+  engine.orders.back().triggerPriceE8 = intent.triggerPrice.raw;
+  engine.orders.back().triggerSource = static_cast<std::uint8_t>(intent.triggerSource);
+  engine.orders.back().service = service;
+  engine.orders.back().warmup = warmup;
+  if (badStopMarketIntent(intent)) {
+    OpenOrder rejected{};
+    rejected.state.valid = true;
+    rejected.state.clientIntentId = intent.clientIntentId;
+    rejected.state.desiredClientIntentId = intent.clientIntentId;
+    rejected.state.quoteSlotId = intent.quoteSlotId;
+    rejected.state.side = intent.side;
+    rejected.state.orderType = intent.orderType;
+    rejected.state.limitTimeInForcePolicy = intent.limitTimeInForcePolicy;
+    rejected.state.price = intent.price;
+    rejected.state.triggerPrice = intent.triggerPrice;
+    rejected.state.triggerSource = intent.triggerSource;
+    rejected.state.qty = intent.qty;
+    rejected.state.desiredPrice = intent.price;
+    rejected.state.desiredTriggerPrice = intent.triggerPrice;
+    rejected.state.desiredTriggerSource = intent.triggerSource;
+    rejected.state.desiredQty = intent.qty;
+    rejected.routeHandle = intent.routeHandle;
+    rejected.recordIndex = recordIndex;
+    rejected.createdTsNs = tsNs;
+    rejected.activeTsNs = activeTs;
+    rejected.reduceOnly = intent.reduceOnly;
+    rejected.postOnly = postOnly;
+    rejected.service = service;
+    rejected.warmup = warmup;
+    if (!serviceOrder(rejected)) pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs), tsNs);
+    engine.orders[recordIndex].status = kRecordStatusRejected;
+    return;
+  }
   const std::size_t slotIndex = findFreeIndex(engine);
   if (slotIndex == kNoRecordIndex) {
     OpenOrder rejected{};
@@ -479,15 +612,22 @@ void submitOrderIntent(EngineState& engine,
     rejected.state.orderType = intent.orderType;
     rejected.state.limitTimeInForcePolicy = intent.limitTimeInForcePolicy;
     rejected.state.price = intent.price;
+    rejected.state.triggerPrice = intent.triggerPrice;
+    rejected.state.triggerSource = intent.triggerSource;
     rejected.state.qty = intent.qty;
     rejected.state.desiredPrice = intent.price;
+    rejected.state.desiredTriggerPrice = intent.triggerPrice;
+    rejected.state.desiredTriggerSource = intent.triggerSource;
     rejected.state.desiredQty = intent.qty;
+    rejected.routeHandle = intent.routeHandle;
     rejected.recordIndex = recordIndex;
     rejected.createdTsNs = tsNs;
     rejected.activeTsNs = activeTs;
     rejected.reduceOnly = intent.reduceOnly;
     rejected.postOnly = postOnly;
-    pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs), tsNs);
+    rejected.service = service;
+    rejected.warmup = warmup;
+    if (!serviceOrder(rejected)) pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs), tsNs);
     engine.orders[recordIndex].status = kRecordStatusRejected;
     return;
   }
@@ -506,15 +646,24 @@ void submitOrderIntent(EngineState& engine,
     rejected.state.orderType = intent.orderType;
     rejected.state.limitTimeInForcePolicy = intent.limitTimeInForcePolicy;
     rejected.state.price = intent.price;
+    rejected.state.triggerPrice = intent.triggerPrice;
+    rejected.state.triggerSource = intent.triggerSource;
     rejected.state.qty = intent.qty;
     rejected.state.desiredPrice = intent.price;
+    rejected.state.desiredTriggerPrice = intent.triggerPrice;
+    rejected.state.desiredTriggerSource = intent.triggerSource;
     rejected.state.desiredQty = intent.qty;
+    rejected.routeHandle = intent.routeHandle;
     rejected.recordIndex = recordIndex;
     rejected.createdTsNs = tsNs;
     rejected.activeTsNs = activeTs;
     rejected.reduceOnly = intent.reduceOnly;
     rejected.postOnly = postOnly;
-    pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs, canon::OrderProblem::RateLimited), tsNs);
+    rejected.service = service;
+    rejected.warmup = warmup;
+    if (!serviceOrder(rejected)) {
+      pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs, canon::OrderProblem::RateLimited), tsNs);
+    }
     if (notify) {
       publishProblem(engine, canon::OrderProblem::RateLimited, 1u, intent.clientIntentId, Id{});
     }
@@ -532,10 +681,15 @@ void submitOrderIntent(EngineState& engine,
   slot.state.orderType = intent.orderType;
   slot.state.limitTimeInForcePolicy = intent.limitTimeInForcePolicy;
   slot.state.price = intent.price;
+  slot.state.triggerPrice = intent.triggerPrice;
+  slot.state.triggerSource = intent.triggerSource;
   slot.state.qty = intent.qty;
   slot.state.desiredPrice = intent.price;
+  slot.state.desiredTriggerPrice = intent.triggerPrice;
+  slot.state.desiredTriggerSource = intent.triggerSource;
   slot.state.desiredQty = intent.qty;
   slot.state.state = hft_trader::core::StrategyOrderLocalState::PendingNew;
+  slot.routeHandle = intent.routeHandle;
   slot.recordIndex = recordIndex;
   slot.createdTsNs = tsNs;
   slot.activeTsNs = activeTs;
@@ -546,6 +700,23 @@ void submitOrderIntent(EngineState& engine,
   slot.reduceOnly = intent.reduceOnly;
   slot.postOnly = postOnly;
   slot.queueInitialized = false;
+  slot.stopTriggered = intent.orderType != canon::OrderType::Stop;
+  slot.service = service;
+  slot.warmup = warmup;
+  slot.serviceAutounwind = false;
+  slot.warmupCancelAfterAck = warmup && warmupCancelAfterAck;
+  slot.warmupCancelRequested = false;
+  slot.warmupCancelTimeoutTsNs = warmup && warmupCancelTimeoutMs != 0u ? addMs(activeTs, warmupCancelTimeoutMs) : 0;
+  if (warmup) {
+    engine.lastOrderPathHotMono = TimeNs{};
+    engine.lastWarmupSkipReason = 0u;
+    engine.warmupInFlight = true;
+  } else if (!service) {
+    engine.lastOrderPathHotMono = timeNsFromI64Local(tsNs);
+    engine.lastWarmupSkipReason = 0u;
+  }
+  slot.triggerSourcePriceRaw = 0;
+  slot.triggerTsNs = 0;
   PendingAction action{};
   action.kind = PendingActionKind::OrderAck;
   action.slotIndex = slotIndex;
@@ -599,6 +770,7 @@ std::size_t visibleOrders(const EngineState& engine,
   std::size_t count = 0u;
   for (const OpenOrder& order : engine.open) {
     if (!order.state.valid) continue;
+    if (serviceOrder(order)) continue;
     if (count >= capacity) break;
     out[count++] = order.state;
   }
@@ -664,8 +836,54 @@ bool fillOrderQty(EngineState& engine,
   appendEquityPoint(engine, tsNs);
   appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonFill);
   if (order.reduceOnly) ++engine.reduceOnlyFills;
-  pushUserEvent(engine, makeFillEvent(engine, order, priceE8, fillQty, order.filledQtyRaw, tsNs, feeE8, netRealized, taker, finalFill), tsNs);
+  const bool serviceFill = serviceOrder(order);
+  if (!serviceFill) {
+    pushUserEvent(engine, makeFillEvent(engine, order, priceE8, fillQty, order.filledQtyRaw, tsNs, feeE8, netRealized, taker, finalFill), tsNs);
+  } else if (order.warmup) {
+    engine.serviceExposureOpen = true;
+    const Side unwindSide = oppositeSide(order.state.side);
+    std::int64_t unwindRealized = 0;
+    updatePosition(engine, unwindSide, priceE8, fillQty, tsNs, engine.takerFeeBpsE8, unwindRealized);
+    JsonOrder unwindOrder{};
+    unwindOrder.legIndex = engine.legIndex;
+    unwindOrder.id = nextOrderId(engine);
+    unwindOrder.submitTsNs = tsNs;
+    unwindOrder.activeTsNs = tsNs;
+    unwindOrder.tsNs = tsNs;
+    unwindOrder.action = kRecordActionOrder;
+    unwindOrder.side = recordSide(unwindSide);
+    unwindOrder.type = kRecordTypeMarket;
+    unwindOrder.status = kRecordStatusFilled;
+    unwindOrder.priceE8 = priceE8;
+    unwindOrder.qtyE8 = fillQty;
+    unwindOrder.reduceOnly = true;
+    unwindOrder.service = true;
+    unwindOrder.serviceAutounwind = true;
+    engine.orders.push_back(unwindOrder);
+    JsonFill unwindFill{};
+    unwindFill.legIndex = engine.legIndex;
+    unwindFill.orderId = unwindOrder.id;
+    unwindFill.entryTsNs = tsNs;
+    unwindFill.exitTsNs = tsNs;
+    unwindFill.side = recordSide(unwindSide);
+    unwindFill.priceE8 = priceE8;
+    unwindFill.qtyE8 = fillQty;
+    unwindFill.realizedPnlE8 = unwindRealized;
+    unwindFill.reduceOnly = true;
+    unwindFill.fillReason = kFillReasonTop;
+    unwindFill.liquidity = kFillLiquidityTaker;
+    unwindFill.orderQtyE8 = fillQty;
+    unwindFill.cumulativeFilledQtyE8 = fillQty;
+    unwindFill.avgPriceE8 = priceE8;
+    engine.fills.push_back(unwindFill);
+    appendEquityPoint(engine, tsNs);
+    appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonFill);
+    ++engine.reduceOnlyFills;
+    engine.serviceExposureOpen = false;
+  }
   if (finalFill) {
+    if (order.warmup) engine.warmupInFlight = false;
+    if (order.serviceAutounwind) engine.serviceExposureOpen = false;
     if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
     order = OpenOrder{};
   } else if (order.recordIndex < engine.orders.size()) {
@@ -690,11 +908,62 @@ bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std:
   return fillOrder(engine, order, priceE8, tsNs, taker, metadata);
 }
 
+void markStopMarketTriggered(OpenOrder& order, std::int64_t sourcePrice, std::int64_t tsNs) noexcept {
+  order.stopTriggered = true;
+  order.triggerSourcePriceRaw = sourcePrice;
+  order.triggerTsNs = tsNs;
+}
+
+void updateTriggeredStopMarketRecord(EngineState& engine,
+                                     const OpenOrder& order,
+                                     std::int64_t sourcePrice,
+                                     std::int64_t tsNs) noexcept {
+  if (order.recordIndex >= engine.orders.size()) return;
+  JsonOrder& record = engine.orders[order.recordIndex];
+  record.triggerSourcePriceE8 = sourcePrice;
+  record.triggerTsNs = tsNs;
+  record.status = kRecordStatusActive;
+}
+
+void triggerStopMarketsOnLastBbo(EngineState& engine,
+                                 std::int64_t bid,
+                                 std::int64_t ask,
+                                 std::int64_t tsNs) {
+  if (bid <= 0 || ask <= 0) return;
+  for (OpenOrder& order : engine.open) {
+    if (!order.state.valid || !order.active || order.stopTriggered) continue;
+    if (order.state.orderType != canon::OrderType::Stop ||
+        order.state.triggerSource != canon::OrderTriggerSource::Last) continue;
+    const std::int64_t sourcePrice = order.state.side.raw == Side::Buy().raw ? ask : bid;
+    if (!stopMarketCrossed(order, sourcePrice)) continue;
+    markStopMarketTriggered(order, sourcePrice, tsNs);
+    updateTriggeredStopMarketRecord(engine, order, sourcePrice, tsNs);
+  }
+}
+
+void triggerStopMarketsBySource(EngineState& engine,
+                                canon::OrderTriggerSource source,
+                                std::int64_t sourcePrice,
+                                std::int64_t tsNs) {
+  if (sourcePrice <= 0) return;
+  bool triggered = false;
+  for (OpenOrder& order : engine.open) {
+    if (!order.state.valid || !order.active || order.stopTriggered) continue;
+    if (order.state.orderType != canon::OrderType::Stop || order.state.triggerSource != source) continue;
+    if (!stopMarketCrossed(order, sourcePrice)) continue;
+    markStopMarketTriggered(order, sourcePrice, tsNs);
+    updateTriggeredStopMarketRecord(engine, order, sourcePrice, tsNs);
+    triggered = true;
+  }
+  if (triggered) tryFillOnTop(engine, tsNs);
+}
+
 void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
   if (engine.liquidated || engine.riskStopped) return;
   const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
   const std::int64_t bid = top.bid.px.raw;
   const std::int64_t ask = top.ask.px.raw;
+  triggerStopMarketsOnLastBbo(engine, bid, ask, tsNs);
   const bool depthExecutionConfigured = venueOrderBookExecutionConfigured(engine);
   const hft_trader::core::LocalOrderBookState* rawBook =
       depthExecutionConfigured && hasTopExecutionCandidate(engine, bid, ask)
@@ -702,14 +971,15 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
           : nullptr;
   const hft_trader::core::LocalOrderBookState* fillBook = rawBook;
   if (rawBook != nullptr && bboOverlayCandidate(top)) {
-      hft_trader::core::LocalOrderBookState& overlayBook = topExecutionOverlayScratch(engine);
-      fillBook = &overlayedTakerExecutionBook(engine.venueSnapshot, top, *rawBook, overlayBook);
-    }
-    for (OpenOrder& order : engine.open) {
-      if (!order.state.valid || !order.active) continue;
+    hft_trader::core::LocalOrderBookState& overlayBook = topExecutionOverlayScratch(engine);
+    fillBook = &overlayedTakerExecutionBook(engine.venueSnapshot, top, *rawBook, overlayBook);
+  }
+  for (OpenOrder& order : engine.open) {
+    if (!order.state.valid || !order.active) continue;
+    if (order.state.orderType == canon::OrderType::Stop && !order.stopTriggered) continue;
     AggressiveFillPlan* plan = fillBook != nullptr ? &topExecutionFillPlanScratch(engine) : nullptr;
     if (plan != nullptr && buildAggressiveBookFillPlan(engine, order, *fillBook, *plan)) {
-      const bool marketOrder = order.state.orderType == canon::OrderType::Market;
+      const bool marketOrder = marketExecutionOrder(order);
       if (!marketOrder || marketDepthPlanUsable(order, *plan, *rawBook, top)) {
         for (std::size_t i = 0u; i < plan->count && order.state.valid; ++i) {
           const AggressiveFillChunk& chunk = plan->chunks[i];
@@ -750,7 +1020,7 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
     if (bid <= 0 || ask <= 0) continue;
     FillExecutionMetadata metadata{};
     metadata.fillReason = kFillReasonTop;
-    if (order.state.orderType == canon::OrderType::Market) {
+    if (marketExecutionOrder(order)) {
       (void)fillOrder(engine, order, order.state.side.raw == Side::Buy().raw ? ask : bid, tsNs, true, metadata);
     } else if (!order.postOnly && order.state.side.raw == Side::Buy().raw && order.state.price.raw >= ask) {
       (void)fillOrder(engine, order, ask, tsNs, true, metadata);
@@ -763,7 +1033,8 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
 void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& trade) {
   if (engine.liquidated || engine.riskStopped) return;
   for (OpenOrder& order : engine.open) {
-    if (!order.state.valid || !order.active || order.state.orderType == canon::OrderType::Market) continue;
+    if (!order.state.valid || !order.active || order.state.orderType == canon::OrderType::Market ||
+        order.state.orderType == canon::OrderType::Stop) continue;
     const PassiveQueueTradeFill fill = consumePassiveQueueForTrade(engine, order, trade);
     if (fill.requestedQtyE8 <= 0) continue;
     FillExecutionMetadata metadata{};
@@ -772,6 +1043,20 @@ void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& 
     metadata.queueAheadAfterE8 = fill.queueAheadAfterE8;
     (void)fillOrderQty(engine, order, order.state.price.raw, fill.requestedQtyE8, static_cast<std::int64_t>(trade.ts.raw), false, metadata);
   }
+}
+
+void tryTriggerStopMarketsOnMark(EngineState& engine, const cxet::composite::MarkPriceRuntimeV1& markPrice) {
+  triggerStopMarketsBySource(engine,
+                             canon::OrderTriggerSource::Mark,
+                             markPrice.markPrice.raw,
+                             static_cast<std::int64_t>(markPrice.ts.raw));
+}
+
+void tryTriggerStopMarketsOnIndex(EngineState& engine, const cxet::composite::IndexPriceRuntimeV1& indexPrice) {
+  triggerStopMarketsBySource(engine,
+                             canon::OrderTriggerSource::Index,
+                             indexPrice.indexPrice.raw,
+                             static_cast<std::int64_t>(indexPrice.ts.raw));
 }
 
 void applyDueActions(EngineState& engine, std::int64_t tsNs) {
@@ -795,8 +1080,25 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
     }
     if (action.kind == PendingActionKind::OrderAck) {
       activateOrder(engine, order, action.activeTsNs);
+      if (order.state.valid && order.warmup && !order.warmupCancelRequested) {
+        const bool ackDue = order.warmupCancelAfterAck;
+        const bool timeoutDue = order.warmupCancelTimeoutTsNs != 0 &&
+            action.activeTsNs >= order.warmupCancelTimeoutTsNs;
+        if (ackDue || timeoutDue) {
+          hft_trader::core::CancelIntent cancel{};
+          cancel.clientIntentId.raw = nextOrderId(engine);
+          cancel.targetClientIntentId = order.state.clientIntentId;
+          cancel.targetOrderType = order.state.orderType;
+          cancel.routeHandle = order.routeHandle;
+          const std::int64_t cancelTs = ackDue ? action.activeTsNs : order.warmupCancelTimeoutTsNs;
+          order.warmupCancelRequested = true;
+          (void)submitCancelIntent(engine, cancel, action.activeTsNs, cancelTs);
+        }
+      }
     } else if (action.kind == PendingActionKind::CancelAck) {
-      pushUserEvent(engine, makeCanceledOrderEvent(engine, order, action.activeTsNs), action.activeTsNs);
+      if (!serviceOrder(order)) pushUserEvent(engine, makeCanceledOrderEvent(engine, order, action.activeTsNs), action.activeTsNs);
+      if (order.warmup) engine.warmupInFlight = false;
+      if (order.serviceAutounwind) engine.serviceExposureOpen = false;
       if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusCancelled;
       order = OpenOrder{};
     }
@@ -906,6 +1208,15 @@ void applyIntents(EngineState& engine,
     } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::Order) {
       const std::int64_t activeTs = delayedTs(tsNs, orderLatencyUs);
       submitOrderIntent(engine, command.order, tsNs, activeTs);
+    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::WarmupOrder) {
+      const std::int64_t activeTs = delayedTs(tsNs, orderLatencyUs);
+      submitOrderIntent(engine,
+                        command.warmup.order,
+                        tsNs,
+                        activeTs,
+                        true,
+                        command.warmup.cancelTimeoutMs,
+                        command.warmup.cancelAfterAck);
     }
   }
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
@@ -934,11 +1245,21 @@ void applyIntents(EngineState& engine,
       const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::CancelOrder));
       (void)submitCancelIntent(engine, command.cancel, tsNs, activeTs);
     } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::Order) {
-      const BacktestLatencyChannel channel = command.order.orderType == canon::OrderType::Market
+      const BacktestLatencyChannel channel =
+          (command.order.orderType == canon::OrderType::Market || command.order.orderType == canon::OrderType::Stop)
           ? BacktestLatencyChannel::MarketOrder
           : BacktestLatencyChannel::LimitOrder;
       const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, channel));
       submitOrderIntent(engine, command.order, tsNs, activeTs);
+    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::WarmupOrder) {
+      const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
+      submitOrderIntent(engine,
+                        command.warmup.order,
+                        tsNs,
+                        activeTs,
+                        true,
+                        command.warmup.cancelTimeoutMs,
+                        command.warmup.cancelAfterAck);
     }
   }
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
@@ -948,7 +1269,8 @@ void applyIntents(EngineState& engine,
   }
   for (std::size_t i = 0; i < io.orderCount; ++i) {
     const auto& intent = io.orderOut[i];
-    const BacktestLatencyChannel channel = intent.orderType == canon::OrderType::Market
+    const BacktestLatencyChannel channel =
+        (intent.orderType == canon::OrderType::Market || intent.orderType == canon::OrderType::Stop)
         ? BacktestLatencyChannel::MarketOrder
         : BacktestLatencyChannel::LimitOrder;
     const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, channel));

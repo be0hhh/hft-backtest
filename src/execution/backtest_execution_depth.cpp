@@ -340,8 +340,9 @@ template<typename Levels>
   return side == 0 ? Side::Buy() : Side::Sell();
 }
 
-[[nodiscard]] cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const CursorDepthRow& row) noexcept {
-  cxet::composite::OrderBookSnapshot out{};
+void toRuntimeSnapshot(const CursorDepthRow& row,
+                       cxet::composite::OrderBookSnapshot& out) noexcept {
+  cxet::composite::resetOrderBookSnapshotHeader(out);
   out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
   for (const PriceLevelRow& level : row.levels) {
     Price price{};
@@ -350,7 +351,6 @@ template<typename Levels>
     qty.raw = level.qtyE8;
     (void)cxet::composite::appendOrderBookLevel(out, price, qty, orderBookSideFromDepthRow(level.side));
   }
-  return out;
 }
 
 void toRuntime(const CursorDepthRow& row,
@@ -389,6 +389,9 @@ struct ExecutionDepthProviderImpl {
   std::size_t sidecarPos{0u};
   CursorDepthRow pending{};
   CursorDepthRow scratch{};
+  cxet::composite::OrderBookSnapshot snapshotScratch{};
+  cxet::composite::OrderBookTapeRuntimeV1 tapeScratch{};
+  cxet::composite::OrderBookTapeSidesRuntimeV1 sideScratch{};
   bool pendingValid{false};
   bool eof{false};
   DepthSource source{DepthSource::None};
@@ -501,20 +504,23 @@ bool applyDepthRow(DepthSource source,
                    hft_trader::core::LocalOrderBookState& book,
                    const Symbol& symbol,
                    const hft_trader::core::LocalOrderBookConfig& config,
-                   const CursorDepthRow& row) noexcept {
+                   const CursorDepthRow& row,
+                   cxet::composite::OrderBookSnapshot& snapshotScratch,
+                   cxet::composite::OrderBookTapeRuntimeV1& tapeScratch,
+                   cxet::composite::OrderBookTapeSidesRuntimeV1& sideScratch) noexcept {
   if (source == DepthSource::LegacySnapshot) {
-    hft_trader::core::applySnapshot(book, toRuntimeSnapshot(row), symbol, config);
+    toRuntimeSnapshot(row, snapshotScratch);
+    hft_trader::core::applySnapshot(book, snapshotScratch, symbol, config);
     return true;
   }
   if (source == DepthSource::TapeSidecar) {
     if (!hft_trader::core::orderBook(book).initialized()) {
-      hft_trader::core::applySnapshot(book, toRuntimeSnapshot(row), symbol, config);
+      toRuntimeSnapshot(row, snapshotScratch);
+      hft_trader::core::applySnapshot(book, snapshotScratch, symbol, config);
       return true;
     }
-    cxet::composite::OrderBookTapeRuntimeV1 tape{};
-    cxet::composite::OrderBookTapeSidesRuntimeV1 sides{};
-    toRuntime(row, tape, sides);
-    return hft_trader::core::applyTapeDelta(book, tape, sides);
+    toRuntime(row, tapeScratch, sideScratch);
+    return hft_trader::core::applyTapeDelta(book, tapeScratch, sideScratch);
   }
   return false;
 }
@@ -525,7 +531,14 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
   while (!impl_->eof) {
     if (impl_->pendingValid) {
       if (impl_->pending.tsNs > tsNs) break;
-      if (!applyDepthRow(impl_->source, book_, symbol_, config_, impl_->pending)) {
+      if (!applyDepthRow(impl_->source,
+                         book_,
+                         symbol_,
+                         config_,
+                         impl_->pending,
+                         impl_->snapshotScratch,
+                         impl_->tapeScratch,
+                         impl_->sideScratch)) {
         available_ = false;
         return false;
       }
@@ -549,7 +562,14 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
       impl_->pendingValid = true;
       break;
     }
-    if (!applyDepthRow(impl_->source, book_, symbol_, config_, impl_->scratch)) {
+    if (!applyDepthRow(impl_->source,
+                       book_,
+                       symbol_,
+                       config_,
+                       impl_->scratch,
+                       impl_->snapshotScratch,
+                       impl_->tapeScratch,
+                       impl_->sideScratch)) {
       available_ = false;
       return false;
     }

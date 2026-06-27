@@ -12,6 +12,7 @@ namespace {
 
 constexpr std::int64_t kQty1 = 100000000ll;
 constexpr std::int64_t kPartialQty = 2000000ll;
+constexpr std::int64_t kLeg0PassiveBidFillPx = 9989000000ll;
 
 bool expect(bool value, std::string_view message) {
   if (value) return true;
@@ -74,7 +75,7 @@ void writeLeg0Session(const std::filesystem::path& dir) {
   trades += tradeRow(10005000000ll, kQty1, 1, 1000000ll, 11, "BTCUSDT", "binance");
   for (std::int64_t i = 0; i < 50; ++i) {
     const std::int64_t ts = 600000000ll + i * 1000000ll;
-    trades += tradeRow(10000000000ll, kPartialQty, 0, ts, 100 + i, "BTCUSDT", "binance");
+    trades += tradeRow(kLeg0PassiveBidFillPx, kPartialQty, 0, ts, 100 + i, "BTCUSDT", "binance");
   }
   writeText(dir / "jsonl" / "bookticker.jsonl", book);
   writeText(dir / "jsonl" / "trades.jsonl", trades);
@@ -121,21 +122,17 @@ void writeConfig(const std::filesystem::path& path) {
             "symbols=BTCUSDT\n");
 }
 
-bool testBurstPartialMakerFillReplayKeepsPairExposureBounded() {
-  const std::filesystem::path root = makeRoot();
-  const std::filesystem::path leg0 = root / "leg0";
-  const std::filesystem::path leg1 = root / "leg1";
-  writeLeg0Session(leg0);
-  writeLeg1Session(leg1);
-  writeConfig(root / "stat_arb_edge_maker.ini");
-
+hft_backtest::BacktestRunRequest makeReplayRequest(const std::filesystem::path& root,
+                                                   const std::filesystem::path& leg0,
+                                                   const std::filesystem::path& leg1,
+                                                   std::string_view runId) {
   hft_backtest::BacktestRunRequest request{};
   request.sessionPath = leg0;
   request.sessions.push_back(hft_backtest::BacktestSessionRequest{leg1, "bybit_futures", "BTCUSDT"});
   request.configPath = root / "stat_arb_edge_maker.ini";
-  request.outputPath = root / "backtests" / "stat-arb-edge-maker-replay";
+  request.outputPath = root / "backtests" / std::string{runId};
   request.strategy = "stat_arb_edge_maker";
-  request.runId = "stat-arb-edge-maker-replay";
+  request.runId = std::string{runId};
   request.initialBalanceE8 = 10000000000ll;
   request.legInitialBalancesE8 = {5000000000ll, 5000000000ll};
   request.marketDataLatency.baseUs = 500000;
@@ -147,6 +144,29 @@ bool testBurstPartialMakerFillReplayKeepsPairExposureBounded() {
   request.cancelLatencyUs = 0;
   request.writeArtifacts = true;
   request.captureStrategySpread = true;
+  return request;
+}
+
+bool hasWarningContaining(const hft_backtest::BacktestRunResult& result,
+                          std::string_view needle) {
+  for (const std::string& warning : result.warnings) {
+    if (warning.find(needle) != std::string::npos) return true;
+  }
+  return false;
+}
+
+bool testBurstPartialMakerFillReplayKeepsPairExposureBounded() {
+  const std::filesystem::path root = makeRoot();
+  const std::filesystem::path leg0 = root / "leg0";
+  const std::filesystem::path leg1 = root / "leg1";
+  writeLeg0Session(leg0);
+  writeLeg1Session(leg1);
+  writeConfig(root / "stat_arb_edge_maker.ini");
+
+  hft_backtest::BacktestRunRequest request = makeReplayRequest(root,
+                                                               leg0,
+                                                               leg1,
+                                                               "stat-arb-edge-maker-replay");
 
   const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
   if (!expect(result.status == hft_backtest::Status::Ok, "stat_arb_edge_maker replay completes")) {
@@ -172,10 +192,41 @@ bool testBurstPartialMakerFillReplayKeepsPairExposureBounded() {
          expect(!result.riskStopped, "replay does not risk stop");
 }
 
+bool testTwoPhaseReplayWarnsWhenPostHocRepriceLeavesExposureOpen() {
+  const std::filesystem::path root = makeRoot();
+  const std::filesystem::path leg0 = root / "leg0";
+  const std::filesystem::path leg1 = root / "leg1";
+  writeLeg0Session(leg0);
+  writeLeg1Session(leg1);
+  writeConfig(root / "stat_arb_edge_maker.ini");
+
+  hft_backtest::BacktestRunRequest request = makeReplayRequest(root,
+                                                               leg0,
+                                                               leg1,
+                                                               "stat-arb-edge-maker-two-phase-replay");
+  request.executionPipeline = hft_backtest::BacktestExecutionPipeline::TwoPhaseReprice;
+
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+  if (!expect(result.status == hft_backtest::Status::Ok, "two-phase stat_arb replay completes")) {
+    std::cerr << "status=" << hft_backtest::statusToString(result.status)
+              << " error=" << result.error << "\n";
+    return false;
+  }
+
+  return expect(result.twoPhaseRepriceApplied, "two-phase replay applies repricing") &&
+         expect(hasWarningContaining(result, "two-phase reprice is diagnostic"),
+                "two-phase result warns that repricing is post-hoc diagnostic") &&
+         expect(!result.strategyClosed, "two-phase conservative repricing can leave exposure open") &&
+         expect(result.openPositionQtyE8 != 0, "two-phase result reports remaining exposure") &&
+         expect(hasWarningContaining(result, "two-phase reprice left open exposure"),
+                "two-phase result warns about post-hoc fill path invalidation");
+}
+
 }  // namespace
 
 int main() {
   bool ok = true;
   ok = testBurstPartialMakerFillReplayKeepsPairExposureBounded() && ok;
+  ok = testTwoPhaseReplayWarnsWhenPostHocRepriceLeavesExposureOpen() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

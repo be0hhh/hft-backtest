@@ -69,6 +69,7 @@ constexpr std::uint8_t kRecordSideBuy = 1u;
 constexpr std::uint8_t kRecordTypeNone = 0u;
 constexpr std::uint8_t kRecordTypeLimit = 1u;
 constexpr std::uint8_t kRecordTypeMarket = 2u;
+constexpr std::uint8_t kRecordTypeStopMarket = 3u;
 constexpr std::uint8_t kRecordStatusNone = 0u;
 constexpr std::uint8_t kRecordStatusPending = 1u;
 constexpr std::uint8_t kRecordStatusAcked = 2u;
@@ -106,6 +107,13 @@ struct JsonOrder {
   std::int64_t qtyE8{0};
   bool reduceOnly{false};
   bool postOnly{false};
+  std::int64_t triggerPriceE8{0};
+  std::uint8_t triggerSource{static_cast<std::uint8_t>(canon::OrderTriggerSource::Last)};
+  std::int64_t triggerSourcePriceE8{0};
+  std::int64_t triggerTsNs{0};
+  bool service{false};
+  bool warmup{false};
+  bool serviceAutounwind{false};
 };
 
 struct JsonFill {
@@ -262,6 +270,7 @@ struct JsonRateLimitUsagePoint {
 
 struct OpenOrder {
   hft_trader::core::StrategyOrderState state{};
+  hft_trader::core::ExecutionRouteHandle routeHandle{hft_trader::core::kDefaultExecutionRouteHandle};
   std::size_t recordIndex{kNoRecordIndex};
   std::int64_t createdTsNs{0};
   std::int64_t activeTsNs{0};
@@ -272,6 +281,15 @@ struct OpenOrder {
   bool reduceOnly{false};
   bool postOnly{false};
   bool queueInitialized{false};
+  bool stopTriggered{false};
+  bool service{false};
+  bool warmup{false};
+  bool serviceAutounwind{false};
+  bool warmupCancelAfterAck{false};
+  bool warmupCancelRequested{false};
+  std::int64_t triggerSourcePriceRaw{0};
+  std::int64_t triggerTsNs{0};
+  std::int64_t warmupCancelTimeoutTsNs{0};
 };
 
 struct PendingAction {
@@ -331,9 +349,14 @@ struct EngineState {
   std::size_t deliveredUserEvents{0};
   std::uint64_t fillSequence{0};
   std::uint64_t timerWakeEvents{0};
+  TimeNs lastOrderPathHotMono{};
+  std::uint64_t nextServiceClientIntentRaw{0x8000000000000000ull};
+  std::uint8_t lastWarmupSkipReason{0u};
   hft_trader::core::StrategyProblemEvent pendingProblem{};
   bool hasPendingProblem{false};
   bool rateLimitSnapshotRequested{false};
+  bool warmupInFlight{false};
+  bool serviceExposureOpen{false};
   std::uint64_t reduceOnlyOrders{0};
   std::uint64_t reduceOnlyFills{0};
   std::int64_t tickSizeE8{0};
@@ -438,6 +461,8 @@ bool fillOrderQty(EngineState& engine,
                   const FillExecutionMetadata& metadata);
 void tryFillOnTop(EngineState& engine, std::int64_t tsNs);
 void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& trade);
+void tryTriggerStopMarketsOnMark(EngineState& engine, const cxet::composite::MarkPriceRuntimeV1& markPrice);
+void tryTriggerStopMarketsOnIndex(EngineState& engine, const cxet::composite::IndexPriceRuntimeV1& indexPrice);
 void applyDueActions(EngineState& engine, std::int64_t tsNs);
 void applyDueActionsBefore(EngineState& engine, std::int64_t tsNs);
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs);

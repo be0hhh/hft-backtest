@@ -3,6 +3,7 @@
 #include "config/backtest_run_config.hpp"
 #include "strategy/backtest_strategy_trace.hpp"
 
+#include "hft_trader/api/OrderPathWarmup.hpp"
 #include "hft_trader/runtime/runner/StrategyMarketDataRuntime.hpp"
 #include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
 
@@ -115,6 +116,138 @@ std::size_t backtestRouteLegIndex(std::size_t legCount,
   return index < legCount ? index : static_cast<std::size_t>(-1);
 }
 
+bool orderPathWarmupCandidate(const hft_trader::core::OrderIntent& intent) noexcept {
+  return !intent.service &&
+         !intent.reduceOnly &&
+         intent.clientIntentId.raw != 0u &&
+         intent.qty.raw > 0 &&
+         (intent.orderType == canon::OrderType::Market ||
+          intent.orderType == canon::OrderType::Limit ||
+          intent.orderType == canon::OrderType::Stop);
+}
+
+bool warmupRouteSeen(const hft_trader::core::ExecutionRouteHandle* routes,
+                     std::size_t count,
+                     hft_trader::core::ExecutionRouteHandle route) noexcept {
+  for (std::size_t i = 0u; i < count; ++i) {
+    if (routes[i].raw == route.raw) return true;
+  }
+  return false;
+}
+
+bool warmupReasonFailOpen(hft_trader::strategy::OrderPathWarmupSkipReason reason) noexcept {
+  return reason == hft_trader::strategy::OrderPathWarmupSkipReason::BadTemplate ||
+         reason == hft_trader::strategy::OrderPathWarmupSkipReason::MissingMarketData ||
+         reason == hft_trader::strategy::OrderPathWarmupSkipReason::MissingInstrument ||
+         reason == hft_trader::strategy::OrderPathWarmupSkipReason::BadQtyGrid ||
+         reason == hft_trader::strategy::OrderPathWarmupSkipReason::QtyTooSmall ||
+         reason == hft_trader::strategy::OrderPathWarmupSkipReason::BadPrice ||
+         reason == hft_trader::strategy::OrderPathWarmupSkipReason::BadClientId;
+}
+
+hft_trader::core::StrategyOrderPathWarmupView backtestWarmupView(const detail::EngineState& engine) noexcept {
+  hft_trader::core::StrategyOrderPathWarmupView view{};
+  view.lastCommandMono = engine.lastOrderPathHotMono;
+  view.lastWarmupMono = engine.lastOrderPathHotMono;
+  view.lastAckMono = engine.lastOrderPathHotMono;
+  view.lastHotMono = engine.lastOrderPathHotMono;
+  view.lastSkipReason = engine.lastWarmupSkipReason;
+  view.sessionHealthy = true;
+  view.warmupInFlight = engine.warmupInFlight;
+  view.serviceExposureOpen = engine.serviceExposureOpen;
+  view.routeHot = view.sessionHealthy &&
+                  !view.warmupInFlight &&
+                  !view.serviceExposureOpen &&
+                  view.lastHotMono.raw != 0u;
+  view.warmupStale = !view.routeHot;
+  return view;
+}
+
+bool backtestOrderPathHot(const detail::EngineState& engine, TimeNs nowMono) noexcept {
+  const hft_trader::core::StrategyOrderPathWarmupView view = backtestWarmupView(engine);
+  return hft_trader::strategy::orderPathWarmupHot(
+      view,
+      nowMono,
+      hft_trader::strategy::kDefaultOrderPathWarmupPolicy.heatTtlNs);
+}
+
+Id allocateBacktestServiceClientIntentId(detail::EngineState& engine) noexcept {
+  if ((engine.nextServiceClientIntentRaw & 0x8000000000000000ull) == 0u ||
+      engine.nextServiceClientIntentRaw == 0u) {
+    engine.nextServiceClientIntentRaw = 0x8000000000000000ull;
+  }
+  Id out{};
+  out.raw = engine.nextServiceClientIntentRaw++;
+  if (engine.nextServiceClientIntentRaw == 0u) engine.nextServiceClientIntentRaw = 0x8000000000000000ull;
+  return out;
+}
+
+void markBacktestWarmupSkipped(detail::EngineState& engine,
+                               hft_trader::strategy::OrderPathWarmupSkipReason reason) noexcept {
+  engine.lastWarmupSkipReason = static_cast<std::uint8_t>(reason);
+}
+
+bool applyBacktestWarmupGate(hft_trader::core::StrategyContext& ctx,
+                             detail::EngineState* engines,
+                             std::size_t engineCount) noexcept {
+  if (!engines || engineCount == 0u || ctx.io.commandOut.size() == 0u) return false;
+  hft_trader::core::ExecutionRouteHandle warmupRoutes[hft_trader::core::kStrategyRuntimeMaxLegs]{};
+  hft_trader::core::OrderIntent warmupTemplates[hft_trader::core::kStrategyRuntimeMaxLegs]{};
+  std::size_t warmupRouteCount = 0u;
+  auto addWarmupTemplate = [&](const hft_trader::core::OrderIntent& intent) noexcept {
+    if (!orderPathWarmupCandidate(intent)) return;
+    if (warmupRouteSeen(warmupRoutes, warmupRouteCount, intent.routeHandle)) return;
+    const std::size_t leg = backtestRouteLegIndex(engineCount, intent.routeHandle);
+    if (leg >= engineCount) return;
+    if (backtestOrderPathHot(engines[leg], ctx.nowMono)) return;
+    if (warmupRouteCount >= hft_trader::core::kStrategyRuntimeMaxLegs) return;
+    warmupRoutes[warmupRouteCount] = intent.routeHandle;
+    warmupTemplates[warmupRouteCount] = intent;
+    ++warmupRouteCount;
+  };
+  for (std::size_t i = 0u; i < ctx.io.orderCount; ++i) addWarmupTemplate(ctx.io.orderOut[i]);
+  for (std::size_t i = 0u; i < ctx.io.commandCount; ++i) {
+    const hft_trader::core::StrategyCommandIntent& command = ctx.io.commandOut[i];
+    if (command.kind == hft_trader::core::StrategyCommandIntentKind::Order) addWarmupTemplate(command.order);
+  }
+  if (warmupRouteCount == 0u) return false;
+
+  hft_trader::core::StrategyCommandIntent warmupCommands[hft_trader::core::kStrategyRuntimeMaxLegs]{};
+  std::size_t warmupCommandCount = 0u;
+  bool failOpen = false;
+  bool holdWithoutNewWarmup = false;
+  for (std::size_t i = 0u; i < warmupRouteCount; ++i) {
+    const std::size_t leg = backtestRouteLegIndex(engineCount, warmupRoutes[i]);
+    if (leg >= engineCount) {
+      failOpen = true;
+      break;
+    }
+    const Id serviceId = allocateBacktestServiceClientIntentId(engines[leg]);
+    const hft_trader::strategy::OrderPathWarmupBuildResult build =
+        hft_trader::strategy::buildOrderPathWarmup(ctx, warmupTemplates[i], serviceId);
+    if (build.built) {
+      warmupCommands[warmupCommandCount] = hft_trader::core::StrategyCommandIntent{};
+      warmupCommands[warmupCommandCount].kind = hft_trader::core::StrategyCommandIntentKind::WarmupOrder;
+      warmupCommands[warmupCommandCount].warmup = build.intent;
+      ++warmupCommandCount;
+      continue;
+    }
+    markBacktestWarmupSkipped(engines[leg], build.reason);
+    if (warmupReasonFailOpen(build.reason)) {
+      failOpen = true;
+      break;
+    }
+    holdWithoutNewWarmup = true;
+  }
+  if (failOpen || (warmupCommandCount == 0u && !holdWithoutNewWarmup)) return false;
+  if (warmupCommandCount > ctx.io.commandOut.size()) return false;
+  ctx.io.cancelCount = 0u;
+  ctx.io.orderCount = 0u;
+  ctx.io.commandCount = warmupCommandCount;
+  for (std::size_t i = 0u; i < warmupCommandCount; ++i) ctx.io.commandOut[i] = warmupCommands[i];
+  return true;
+}
+
 void applyIntentsToLegs(std::vector<detail::EngineState>& engines,
                         const hft_trader::core::StrategyIo& io,
                         std::int64_t tsNs) {
@@ -135,6 +268,14 @@ void applyIntentsToLegs(std::vector<detail::EngineState>& engines,
       hft_trader::core::StrategyIo one{};
       one.orderOut = Span<hft_trader::core::OrderIntent>(order.data(), order.size());
       one.orderCount = 1u;
+      detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
+    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::WarmupOrder) {
+      const std::size_t leg = backtestRouteLegIndex(engines.size(), command.warmup.order.routeHandle);
+      if (leg >= engines.size()) continue;
+      std::array<hft_trader::core::StrategyCommandIntent, 1> warmup{command};
+      hft_trader::core::StrategyIo one{};
+      one.commandOut = Span<hft_trader::core::StrategyCommandIntent>(warmup.data(), warmup.size());
+      one.commandCount = 1u;
       detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
     }
   }
@@ -440,10 +581,12 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   } else if (event.kind == detail::kTimelineKindMarkPrice) {
     const auto markPrice = detail::toRuntime(session.markPrices[event.index]);
     hft_trader::core::copyMarkPriceSnapshot(snapshot, markPrice);
+    if (!strategyVisible) detail::tryTriggerStopMarketsOnMark(engine, markPrice);
     changed = true;
   } else if (event.kind == detail::kTimelineKindIndexPrice) {
     const auto indexPrice = detail::toRuntime(session.indexPrices[event.index]);
     hft_trader::core::copyIndexPriceSnapshot(snapshot, indexPrice);
+    if (!strategyVisible) detail::tryTriggerStopMarketsOnIndex(engine, indexPrice);
     changed = true;
   } else if (event.kind == detail::kTimelineKindFunding) {
     const auto funding = detail::toRuntime(session.funding[event.index]);
@@ -517,6 +660,10 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.hasUserEvent = userEvent && userEvent->kind != cxet::composite::UserDataEventKind::Unknown;
   ctx.nowMono.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   ctx.nowUtc = ctx.nowMono;
+  scratch.warmupViews[0] = backtestWarmupView(engine);
+  ctx.orderPathWarmup = scratch.warmupViews[0];
+  ctx.orderPathWarmups.routes = scratch.warmupViews.data();
+  ctx.orderPathWarmups.count = 1u;
   if (userEvent && userEvent->orderProblem != canon::OrderProblem::None) {
     engine.pendingProblem = hft_trader::core::StrategyProblemEvent{};
     engine.pendingProblem.problem = userEvent->orderProblem;
@@ -552,17 +699,23 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
+  const bool canWarmupRollback = descriptor.captureState && descriptor.restoreAfterOrderFailure;
+  hft_trader::runtime::StrategyStateSnapshot before{};
+  if (canWarmupRollback) descriptor.captureState(state, before);
   const bool ok = descriptor.runCycle(state, ctx);
   if (ctx.io.requestRateLimitSnapshot) engine.rateLimitSnapshotRequested = true;
   if (!hft_trader::core::canEmitNewOrder(control)) {
     ctx.io.orderCount = 0u;
     ctx.io.commandCount = 0u;
   }
+  const bool warmupGateHeldRealOrders = canWarmupRollback && applyBacktestWarmupGate(ctx, &engine, 1u);
+  if (warmupGateHeldRealOrders) descriptor.restoreAfterOrderFailure(state, before);
   if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     std::uint32_t orderedOrderCount = 0u;
     std::uint32_t orderedCancelCount = 0u;
     for (std::size_t i = 0u; i < ctx.io.commandCount; ++i) {
-      if (scratch.commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::Order) ++orderedOrderCount;
+      if (scratch.commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::Order ||
+          scratch.commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::WarmupOrder) ++orderedOrderCount;
       else if (scratch.commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::Cancel) ++orderedCancelCount;
     }
     trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount) + orderedOrderCount;
@@ -624,6 +777,12 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.hasEventLeg = eventLegIndex < legCount;
   ctx.nowMono.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   ctx.nowUtc = ctx.nowMono;
+  for (std::size_t i = 0u; i < legCount; ++i) {
+    scratch.warmupViews[i] = backtestWarmupView(engines[i]);
+  }
+  ctx.orderPathWarmup = scratch.warmupViews[0];
+  ctx.orderPathWarmups.routes = scratch.warmupViews.data();
+  ctx.orderPathWarmups.count = legCount;
   if (userEvent && userEvent->orderProblem != canon::OrderProblem::None && eventLegIndex < engines.size()) {
     engines[eventLegIndex].pendingProblem = hft_trader::core::StrategyProblemEvent{};
     engines[eventLegIndex].pendingProblem.problem = userEvent->orderProblem;
@@ -685,6 +844,9 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
+  const bool canWarmupRollback = descriptor.captureState && descriptor.restoreAfterOrderFailure;
+  hft_trader::runtime::StrategyStateSnapshot before{};
+  if (canWarmupRollback) descriptor.captureState(state, before);
   const bool ok = descriptor.runCycle(state, ctx);
   if (ctx.io.requestRateLimitSnapshot) {
     for (detail::EngineState& engine : engines) engine.rateLimitSnapshotRequested = true;
@@ -693,11 +855,14 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
     ctx.io.orderCount = 0u;
     ctx.io.commandCount = 0u;
   }
+  const bool warmupGateHeldRealOrders = canWarmupRollback && applyBacktestWarmupGate(ctx, engines.data(), legCount);
+  if (warmupGateHeldRealOrders) descriptor.restoreAfterOrderFailure(state, before);
   if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     std::uint32_t orderedOrderCount = 0u;
     std::uint32_t orderedCancelCount = 0u;
     for (std::size_t i = 0u; i < ctx.io.commandCount; ++i) {
-      if (scratch.commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::Order) ++orderedOrderCount;
+      if (scratch.commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::Order ||
+          scratch.commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::WarmupOrder) ++orderedOrderCount;
       else if (scratch.commandBuf[i].kind == hft_trader::core::StrategyCommandIntentKind::Cancel) ++orderedCancelCount;
     }
     trace.orderCount = static_cast<std::uint32_t>(ctx.io.orderCount) + orderedOrderCount;

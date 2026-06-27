@@ -73,6 +73,7 @@ struct OrderLifetimeRow {
   std::uint8_t side{kRecordSideNone};
   bool openEnded{false};
   std::uint32_t legIndex{0u};
+  std::uint8_t orderType{kRecordTypeLimit};
 };
 
 bool isEffectiveOrderStatus(std::uint8_t status) noexcept {
@@ -167,9 +168,12 @@ std::vector<OrderLifetimeRow> materializeOrderLifetimes(const EngineState& engin
   buildOrderLifetimeIndexes(engine, indexes);
 
   for (const JsonOrder& order : engine.orders) {
-    if (order.action != kRecordActionOrder || order.type != kRecordTypeLimit) continue;
+    if (order.action != kRecordActionOrder) continue;
+    if (order.type != kRecordTypeLimit && order.type != kRecordTypeStopMarket) continue;
     if (!isEffectiveOrderStatus(order.status)) continue;
-    if (order.activeTsNs <= 0 || order.priceE8 <= 0 || order.qtyE8 <= 0) continue;
+    const std::int64_t displayPriceE8 =
+        order.type == kRecordTypeStopMarket ? order.triggerPriceE8 : order.priceE8;
+    if (order.activeTsNs <= 0 || displayPriceE8 <= 0 || order.qtyE8 <= 0) continue;
     const bool replacedAtStart = hasSameTimestampLifetimeReplaceEnd(indexes, order.id, order.activeTsNs);
     if (replacedAtStart) continue;
 
@@ -190,11 +194,12 @@ std::vector<OrderLifetimeRow> materializeOrderLifetimes(const EngineState& engin
     out.push_back(OrderLifetimeRow{
         order.activeTsNs,
         endTs,
-        order.priceE8,
+        displayPriceE8,
         order.qtyE8,
         order.side,
         openEnded,
         order.legIndex,
+        order.type,
     });
   }
 
@@ -217,6 +222,7 @@ bool writeOrderLifetimes(const std::filesystem::path& path,
         << ',' << static_cast<unsigned>(row.side)
         << ',' << (row.openEnded ? 1 : 0)
         << ',' << row.legIndex
+        << ',' << static_cast<unsigned>(row.orderType)
         << "]\n";
   }
   return out.good();
@@ -544,7 +550,7 @@ bool writeManifest(const std::filesystem::path& path,
   }
   out << "  " << q << "streams" << q << ": {\n";
   out << "    " << q << "order_lifetimes" << q << ": {" << q << "path" << q << ": " << q << "order_lifetimes.jsonl" << q
-      << ", " << q << "row_schema" << q << ": " << q << "[ts_start_ns,ts_end_ns,price_e8,qty_e8,side,open_ended,leg_index]" << q
+      << ", " << q << "row_schema" << q << ": " << q << "[ts_start_ns,ts_end_ns,price_e8,qty_e8,side,open_ended,leg_index,order_type]" << q
       << ", " << q << "rows" << q << ": " << orderLifetimeRows << "},\n";
   out << "    " << q << "fills" << q << ": {" << q << "path" << q << ": " << q << "fills.jsonl" << q
       << ", " << q << "row_schema" << q << ": " << q << kFillsRowSchema << q
@@ -591,7 +597,9 @@ bool writeManifest(const std::filesystem::path& path,
   out << "  " << q << "enums" << q << ": {\n";
   out << "    " << q << "side" << q << ": {" << q << "0" << q << ": " << q << "sell" << q << ", " << q << "1" << q << ": " << q << "buy" << q << "},\n";
   out << "    " << q << "action" << q << ": {" << q << "1" << q << ": " << q << "order" << q << ", " << q << "3" << q << ": " << q << "cancel" << q << "},\n";
-  out << "    " << q << "type" << q << ": {" << q << "1" << q << ": " << q << "limit" << q << ", " << q << "2" << q << ": " << q << "market" << q << "},\n";
+  out << "    " << q << "type" << q << ": {" << q << "1" << q << ": " << q << "limit" << q << ", "
+      << q << "2" << q << ": " << q << "market" << q << ", "
+      << q << "3" << q << ": " << q << "stop_market" << q << "},\n";
   out << "    " << q << "status" << q << ": {" << q << "1" << q << ": " << q << "pending" << q << ", " << q << "2" << q << ": " << q << "acked" << q << ", " << q << "3" << q << ": " << q << "filled" << q << ", " << q << "4" << q << ": " << q << "cancelled" << q << ", " << q << "5" << q << ": " << q << "missing" << q << ", " << q << "6" << q << ": " << q << "rejected" << q << ", " << q << "7" << q << ": " << q << "partial_unfilled" << q << "},\n";
   out << "    " << q << "fill_reason" << q << ": {" << q << "0" << q << ": " << q << "unknown" << q << ", " << q << "1" << q << ": " << q << "top" << q << ", " << q << "2" << q << ": " << q << "trade" << q << ", " << q << "3" << q << ": " << q << "aggressive_book" << q << ", " << q << "4" << q << ": " << q << "passive_queue" << q << "},\n";
   out << "    " << q << "liquidity" << q << ": {" << q << "0" << q << ": " << q << "maker" << q << ", " << q << "1" << q << ": " << q << "taker" << q << "},\n";

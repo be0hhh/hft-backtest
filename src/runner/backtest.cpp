@@ -135,6 +135,14 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
 
   std::string error;
+  if (hft_trader::runtime::hftRuntimeConfigAbiFingerprint() !=
+      hft_trader::runtime::kHftRuntimeConfigAbiFingerprint) {
+    result.status = Status::ConfigMismatch;
+    result.error = "hft-trader runtime ABI mismatch: rebuild apps/hft-trader and apps/hft-backtest before running backtests";
+    (void)writeEmptyArtifacts();
+    return result;
+  }
+
   hft_trader::runtime::HftRuntimeConfig cfg{};
   if (!hft_trader::runtime::loadRuntimeConfig(request.configPath.string().c_str(), cfg, error)) {
     result.status = Status::InvalidArgument;
@@ -677,6 +685,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)writeCurrentArtifacts();
     return result;
   }
+  const std::size_t replayProgressStep = timeline.size() > 102400u
+      ? std::max<std::size_t>(1024u, timeline.size() / 100u)
+      : 1024u;
   std::size_t deliveryCursor = 0u;
   std::unique_ptr<SingleLegCycleScratch> singleScratchStorage{};
   SingleLegCycleScratch* singleScratch = nullptr;
@@ -812,7 +823,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       replayStopped = true;
       break;
     }
-    if ((i % 1024u) == 0u && !reportReplayProgress(i, timeline.size())) {
+    if ((i % replayProgressStep) == 0u && !reportReplayProgress(i, timeline.size())) {
       result.status = Status::Cancelled;
       result.error = "cancelled";
       (void)writeCurrentArtifacts();
@@ -868,6 +879,28 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)(tripHardLiquidation(stopCheckTsNs) || tripTraderRiskStop(stopCheckTsNs, true));
   }
   if (twoPhaseRepriceActive) {
+    if (hasExplicitSessions) {
+      for (std::size_t leg = 0; leg < legEngines.size() && leg < sessions.size(); ++leg) {
+        detail::Phase2MakerQueueStats makerStats{};
+        const bool makerOk = detail::repriceMakerLimitQueueWithBboTrades(sessions[leg].sessionPath,
+                                                                         legEngines[leg],
+                                                                         result.lastTsNs,
+                                                                         makerStats);
+        if (!makerOk && makerStats.ordersVisited > 0u) {
+          result.warnings.push_back("two-phase maker queue skipped leg " + std::to_string(leg) + ": BBO/trade stream unavailable");
+        }
+      }
+      if (!legEngines.empty()) engine = legEngines[0];
+    } else {
+      detail::Phase2MakerQueueStats makerStats{};
+      const bool makerOk = detail::repriceMakerLimitQueueWithBboTrades(session.sessionPath,
+                                                                       engine,
+                                                                       result.lastTsNs,
+                                                                       makerStats);
+      if (!makerOk && makerStats.ordersVisited > 0u) {
+        result.warnings.push_back("two-phase maker queue skipped: BBO/trade stream unavailable");
+      }
+    }
     std::uint64_t totalFillsForReprice = 0;
     if (hasExplicitSessions) {
       for (const detail::EngineState& legEngine : legEngines) totalFillsForReprice += legEngine.fills.size();
@@ -887,7 +920,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
         const bool ok = detail::repriceFillsWithDepth(sessions[leg].sessionPath,
                                                       legSymbols[leg],
                                                       legInstruments[leg].tickSizeRaw,
-                                                      legEngines[leg].fills,
+                                                      legEngines[leg],
                                                       stats);
         result.phase2DepthRows += stats.depthRowsRead;
         result.phase2FillsRepriced += stats.fillsRepriced;
@@ -916,7 +949,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       const bool ok = detail::repriceFillsWithDepth(session.sessionPath,
                                                     selectedSymbol,
                                                     instrument.tickSizeRaw,
-                                                    engine.fills,
+                                                    engine,
                                                     stats);
       result.phase2DepthRows = stats.depthRowsRead;
       result.phase2FillsRepriced = stats.fillsRepriced;
@@ -936,6 +969,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
         return result;
       }
     }
+    if (!replayStopped) {
+      const std::int64_t postRepriceCheckTsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
+      (void)(tripHardLiquidation(postRepriceCheckTsNs) ||
+             tripTraderRiskStop(postRepriceCheckTsNs, true));
+    }
+    result.warnings.push_back("two-phase reprice is diagnostic: fills are updated post-hoc after phase1 strategy decisions");
     result.twoPhaseRepriceApplied = true;
   }
   const std::int64_t finalTsNs = result.lastTsNs > 0 ? result.lastTsNs + 1 : result.lastTsNs;
@@ -964,10 +1003,27 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.orders = engine.orders.size();
     result.fills = engine.fills.size();
   }
+  if (result.twoPhaseRepriceApplied && !result.strategyClosed) {
+    std::string warning = "two-phase reprice left open exposure after post-hoc fill updates; "
+                          "downstream strategy hedge/close decisions were generated from phase1 fills";
+    warning += " (open_position_qty_e8=";
+    warning += std::to_string(result.openPositionQtyE8);
+    if (!result.legs.empty()) {
+      warning += ", leg_open_position_qty_e8=[";
+      for (std::size_t i = 0u; i < result.legs.size(); ++i) {
+        if (i != 0u) warning += ",";
+        warning += std::to_string(result.legs[i].openPositionQtyE8);
+      }
+      warning += "]";
+    }
+    warning += ")";
+    result.warnings.push_back(std::move(warning));
+  }
   appendRateLimitWarnings(result, engine, hasExplicitSessions ? &legEngines : nullptr);
   if (legLiquidationProblem) {
-    result.status = Status::CorruptData;
-    if (result.error.empty()) result.error = "leg liquidated";
+    result.status = Status::Ok;
+    result.warnings.push_back(result.error.empty() ? std::string{"leg liquidated"} : result.error);
+    result.error.clear();
     Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
     if (!isOk(writeStatus)) result.status = writeStatus;
     return result;

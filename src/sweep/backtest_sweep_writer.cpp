@@ -38,6 +38,10 @@ void writeSweepLegs(std::ofstream& out, const BacktestRunResult& run, bool inclu
     out << q << "symbol" << q << ':' << quote(leg.symbol) << ',';
     out << q << "initial_balance_e8" << q << ':' << leg.initialBalanceE8 << ',';
     out << q << "wallet_balance_e8" << q << ':' << leg.walletBalanceE8 << ',';
+    out << q << "orders" << q << ':' << leg.orders << ',';
+    out << q << "fills" << q << ':' << leg.fills << ',';
+    out << q << "reduce_only_orders" << q << ':' << leg.reduceOnlyOrders << ',';
+    out << q << "reduce_only_fills" << q << ':' << leg.reduceOnlyFills << ',';
     out << q << "total_pnl_e8" << q << ':' << leg.totalPnlE8;
     if (includeCurves) {
       out << ',' << q << "curve_e8" << q << ":[";
@@ -120,6 +124,13 @@ Status writeSweepRows(const BacktestSweepRequest& request,
     out << "},";
     out << q << "status" << q << ':' << quote(std::string{statusToString(point.run.status)}) << ',';
     out << q << "total_pnl_e8" << q << ':' << point.run.totalPnlE8 << ',';
+    out << q << "max_drawdown_e8" << q << ':' << point.run.maxDrawdownE8 << ',';
+    out << q << "mfe_e8" << q << ':' << point.run.mfeE8 << ',';
+    out << q << "mae_e8" << q << ':' << point.run.maeE8 << ',';
+    out << q << "orders" << q << ':' << point.run.orders << ',';
+    out << q << "fills" << q << ':' << point.run.fills << ',';
+    out << q << "risk_stopped" << q << ':' << (point.run.riskStopped ? "true" : "false") << ',';
+    out << q << "liquidated" << q << ':' << (point.run.liquidated ? "true" : "false") << ',';
     writeSweepLegs(out, point.run, false);
     if (!point.run.error.empty()) out << ',' << q << "error" << q << ':' << quote(point.run.error);
     out << "}\n";
@@ -145,6 +156,13 @@ Status writeSweepCurves(const BacktestSweepRequest& request,
     out << q << "status" << q << ':' << quote(std::string{statusToString(point.run.status)}) << ',';
     out << q << "initial_balance_e8" << q << ':' << point.run.initialBalanceE8 << ',';
     out << q << "total_pnl_e8" << q << ':' << point.run.totalPnlE8 << ',';
+    out << q << "max_drawdown_e8" << q << ':' << point.run.maxDrawdownE8 << ',';
+    out << q << "mfe_e8" << q << ':' << point.run.mfeE8 << ',';
+    out << q << "mae_e8" << q << ':' << point.run.maeE8 << ',';
+    out << q << "orders" << q << ':' << point.run.orders << ',';
+    out << q << "fills" << q << ':' << point.run.fills << ',';
+    out << q << "risk_stopped" << q << ':' << (point.run.riskStopped ? "true" : "false") << ',';
+    out << q << "liquidated" << q << ':' << (point.run.liquidated ? "true" : "false") << ',';
     out << q << "curve_e8" << q << ":[";
     for (std::size_t i = 0u; i < point.run.totalPnlCurveE8.size(); ++i) {
       if (i != 0u) out << ',';

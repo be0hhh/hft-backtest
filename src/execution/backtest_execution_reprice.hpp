@@ -21,14 +21,27 @@ struct ExecutionRepriceStats {
   std::uint64_t fillsMissingBbo{0};
 };
 
+struct Phase2MakerQueueStats {
+  std::uint64_t ordersVisited{0};
+  std::uint64_t ordersTopOfBook{0};
+  std::uint64_t makerFillsRemoved{0};
+  std::uint64_t makerFillsCreated{0};
+  std::uint64_t ordersFullyFilled{0};
+};
+
 [[nodiscard]] bool repriceFillFromBook(
     JsonFill& fill,
     const hft_trader::core::LocalOrderBookState& book) noexcept;
 
+[[nodiscard]] bool repriceMakerLimitQueueWithBboTrades(const std::filesystem::path& sessionPath,
+                                                       EngineState& engine,
+                                                       std::int64_t finalTsNs,
+                                                       Phase2MakerQueueStats& stats) noexcept;
+
 [[nodiscard]] bool repriceFillsWithDepth(const std::filesystem::path& sessionPath,
                                          const Symbol& symbol,
                                          std::int64_t tickSizeE8,
-                                         std::vector<JsonFill>& fills,
+                                         EngineState& engine,
                                          ExecutionRepriceStats& stats) noexcept;
 
 void rebuildAccountingFromFills(EngineState& engine,

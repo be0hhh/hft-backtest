@@ -152,6 +152,19 @@ set_property(TARGET hft-backtest-execution-tests PROPERTY BUILD_RPATH
   ${HFT_BACKTEST_CXET_ROOT}/lib
 )
 
+add_executable(hft-backtest-phase2-maker-queue-tests tests/execution/backtest_phase2_maker_queue_tests.cpp)
+target_include_directories(hft-backtest-phase2-maker-queue-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(hft-backtest-phase2-maker-queue-tests PRIVATE hft_backtest_core)
+target_compile_features(hft-backtest-phase2-maker-queue-tests PRIVATE cxx_std_23)
+set_target_properties(hft-backtest-phase2-maker-queue-tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_property(TARGET hft-backtest-phase2-maker-queue-tests PROPERTY BUILD_RPATH
+  $ORIGIN
+  ${HFT_BACKTEST_TRADER_ROOT}/build
+  ${HFT_BACKTEST_CXET_ROOT}/lib
+)
+
 add_executable(hft-backtest-stat-arb-replay-tests tests/replay/stat_arb_edge_maker_replay_tests.cpp)
 target_link_libraries(hft-backtest-stat-arb-replay-tests PRIVATE hft_backtest_core)
 target_compile_features(hft-backtest-stat-arb-replay-tests PRIVATE cxx_std_23)

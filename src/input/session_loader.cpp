@@ -177,6 +177,8 @@ bool parseLevel(std::string_view text, std::size_t& pos, PriceLevelRow& out) noe
          (out.side == 0 || out.side == 1) && consume(text, pos, ']');
 }
 
+bool skipJsonAtom(std::string_view text, std::size_t& pos) noexcept;
+
 bool parseTradeLine(std::string_view line, TradeRow& out) noexcept {
   std::size_t pos = 0;
   out = TradeRow{};
@@ -185,19 +187,21 @@ bool parseTradeLine(std::string_view line, TradeRow& out) noexcept {
   if (!parseI64(line, pos, out.qtyE8) || !consume(line, pos, ',')) return false;
   if (!parseI64(line, pos, out.side) || (out.side != 0 && out.side != 1) || !consume(line, pos, ',')) return false;
   if (!parseI64(line, pos, out.tsNs)) return false;
-  for (int comma = 0; comma < 8 && consume(line, pos, ','); ++comma) {
-    std::int64_t ignored = 0;
-    if (comma == 7) {
-      (void)parseI64(line, pos, out.ingestSeq);
-    } else if (line[pos] == '"') {
-      ++pos;
-      while (pos < line.size() && line[pos] != '"') ++pos;
-      if (pos < line.size()) ++pos;
-    } else {
-      (void)parseI64(line, pos, ignored);
-      if (line.compare(pos, 4, "true") == 0) pos += 4;
-      else if (line.compare(pos, 5, "false") == 0) pos += 5;
-    }
+  skipWs(line, pos);
+  if (pos < line.size() && line[pos] == ']') return true;
+
+  std::int64_t ignored = 0;
+  if (!consume(line, pos, ',') || !parseI64(line, pos, ignored) ||
+      !consume(line, pos, ',') || !parseI64(line, pos, ignored) ||
+      !consume(line, pos, ',') || !parseI64(line, pos, ignored) ||
+      !consume(line, pos, ',') || !parseI64(line, pos, ignored) ||
+      !consume(line, pos, ',') || !skipJsonAtom(line, pos) ||
+      !consume(line, pos, ',') || !skipJsonAtom(line, pos) ||
+      !consume(line, pos, ',') || !skipJsonAtom(line, pos) ||
+      !consume(line, pos, ',') || !skipJsonAtom(line, pos) ||
+      !consume(line, pos, ',') || !parseI64(line, pos, ignored) ||
+      !consume(line, pos, ',') || !parseI64(line, pos, out.ingestSeq)) {
+    return false;
   }
   return true;
 }

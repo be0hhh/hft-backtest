@@ -54,7 +54,8 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
 }
 
 [[nodiscard]] bool levelExecutableByLimit(const OpenOrder& order, std::int64_t levelPriceE8) noexcept {
-  if (order.state.orderType == canon::OrderType::Market) return true;
+  if (order.state.orderType == canon::OrderType::Market ||
+      (order.state.orderType == canon::OrderType::Stop && order.stopTriggered)) return true;
   if (order.state.side.raw == Side::Buy().raw) return levelPriceE8 <= order.state.price.raw;
   return levelPriceE8 >= order.state.price.raw;
 }
@@ -176,7 +177,8 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
   out.remainingQtyE8 = out.requestedQtyE8;
   if (out.requestedQtyE8 <= 0) return false;
 
-  const bool marketOrder = order.state.orderType == canon::OrderType::Market;
+  const bool marketOrder = order.state.orderType == canon::OrderType::Market ||
+      (order.state.orderType == canon::OrderType::Stop && order.stopTriggered);
   const bool limitOrder = order.state.orderType == canon::OrderType::Limit;
   if (!marketOrder && !limitOrder) return false;
   if (limitOrder && order.lastAggressiveBookTsNs != 0) return false;

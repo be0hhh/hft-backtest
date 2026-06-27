@@ -5,6 +5,7 @@
 #include "execution/backtest_execution_reprice.hpp"
 #include "execution/backtest_latency.hpp"
 #include "config/backtest_run_config.hpp"
+#include "strategy/backtest_strategy_runtime.hpp"
 
 #include "hft_trader/api/UserDataTools.hpp"
 #include "hft_trader/core/rate_limit/RateLimit.hpp"
@@ -26,6 +27,7 @@
 
 namespace {
 
+using namespace hft_backtest;
 using namespace hft_backtest::detail;
 
 constexpr std::int64_t kPx100 = 10000000000ll;
@@ -96,6 +98,20 @@ hft_trader::core::OrderIntent marketIntent(std::uint64_t orderId, Side side) noe
   return out;
 }
 
+hft_trader::core::OrderIntent stopMarketIntent(std::uint64_t orderId,
+                                               Side side,
+                                               std::int64_t triggerPx,
+                                               canon::OrderTriggerSource triggerSource = canon::OrderTriggerSource::Last) noexcept {
+  hft_trader::core::OrderIntent out{};
+  out.clientIntentId = id(orderId);
+  out.side = side;
+  out.orderType = canon::OrderType::Stop;
+  out.triggerPrice = price(triggerPx);
+  out.triggerSource = triggerSource;
+  out.qty = amount(kQty1);
+  return out;
+}
+
 hft_trader::core::CancelIntent cancelIntent(std::uint64_t commandId, std::uint64_t targetId) noexcept {
   hft_trader::core::CancelIntent out{};
   out.clientIntentId = id(commandId);
@@ -105,10 +121,11 @@ hft_trader::core::CancelIntent cancelIntent(std::uint64_t commandId, std::uint64
 }
 
 void setTop(EngineState& engine, std::int64_t bid, std::int64_t ask) noexcept {
-  engine.snapshot.lastBookTicker.bid.px.raw = bid;
-  engine.snapshot.lastBookTicker.ask.px.raw = ask;
-  engine.venueSnapshot.lastBookTicker.bid.px.raw = bid;
-  engine.venueSnapshot.lastBookTicker.ask.px.raw = ask;
+  cxet::composite::BookTickerRuntimeV1 top{};
+  top.bid.px.raw = bid;
+  top.ask.px.raw = ask;
+  hft_trader::core::copyBookTickerSnapshot(engine.snapshot, top);
+  hft_trader::core::copyBookTickerSnapshot(engine.venueSnapshot, top);
 }
 
 void setTopWithQty(EngineState& engine,
@@ -189,6 +206,121 @@ bool testBacktestRateLimitScheduleCanDisablePresets() {
   const BacktestRateLimitSchedule schedule = resolveRateLimitSchedule(request, "binance", "futures");
   return expect(schedule.buckets.empty(), "disabled backtest rate limits remove preset buckets") &&
          expect(schedule.actions.empty(), "disabled backtest rate limits remove preset actions");
+}
+
+bool testWarmupOrderIsServiceHiddenAndMarksHot() {
+  EngineState engine{};
+  setTop(engine, kPx100, kPx100 + 100000000ll);
+
+  hft_trader::core::WarmupOrderIntent warmup{};
+  warmup.order = strictPostOnlyOrderIntent(500u, Side::Buy(), kPx100 - 200000000ll);
+  warmup.order.qty = amount(kQty1 / 10);
+  warmup.order.service = true;
+  warmup.cancelTimeoutMs = 250u;
+  warmup.cancelAfterAck = true;
+
+  hft_trader::core::StrategyCommandIntent command{};
+  command.kind = hft_trader::core::StrategyCommandIntentKind::WarmupOrder;
+  command.warmup = warmup;
+  hft_trader::core::StrategyIo io{};
+  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(&command, 1u);
+  io.commandCount = 1u;
+
+  applyIntents(engine, io, 1000ll, 0u, 0u);
+
+  hft_trader::core::StrategyOrderState visible[4]{};
+  const std::size_t visibleCount = visibleOrders(engine, visible, 4u);
+  return expect(visibleCount == 0u, "service warmup order is hidden from strategy order state") &&
+         expect(engine.userEvents.empty(), "service warmup ack/cancel does not publish strategy user events") &&
+         expect(engine.lastOrderPathHotMono.raw == 1000u, "service warmup ack marks order path hot") &&
+         expect(!engine.warmupInFlight, "service warmup is not left in-flight after cancel ack");
+}
+
+struct WarmupGateProbeState {
+  std::uint64_t cycles{0u};
+  std::uint64_t nextClientId{1u};
+};
+
+bool warmupGateProbeRunCycle(void* rawState, hft_trader::core::StrategyContext& ctx) noexcept {
+  auto* state = static_cast<WarmupGateProbeState*>(rawState);
+  if (!state || ctx.io.commandOut.size() == 0u) return false;
+  hft_trader::core::StrategyCommandIntent command{};
+  command.kind = hft_trader::core::StrategyCommandIntentKind::Order;
+  command.order.clientIntentId.raw = state->nextClientId++;
+  command.order.side = Side::Buy();
+  command.order.orderType = canon::OrderType::Market;
+  command.order.qty = amount(kQty1);
+  command.order.routeHandle = hft_trader::core::ExecutionRouteHandle{1u};
+  ctx.io.commandOut[0] = command;
+  ctx.io.commandCount = 1u;
+  ++state->cycles;
+  return true;
+}
+
+void warmupGateProbeCaptureState(const void* rawState, hft_trader::runtime::StrategyStateSnapshot& out) noexcept {
+  const auto* state = static_cast<const WarmupGateProbeState*>(rawState);
+  out = hft_trader::runtime::StrategyStateSnapshot{};
+  if (!state) return;
+  out.cycles = state->cycles;
+  out.nextClientIntentId.raw = state->nextClientId;
+}
+
+void warmupGateProbeRestoreState(void* rawState, const hft_trader::runtime::StrategyStateSnapshot& before) noexcept {
+  auto* state = static_cast<WarmupGateProbeState*>(rawState);
+  if (!state) return;
+  state->cycles = before.cycles;
+  state->nextClientId = before.nextClientIntentId.raw;
+}
+
+bool testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() {
+  hft_trader::runtime::StrategyDescriptor descriptor{};
+  descriptor.name = "warmup_gate_probe";
+  descriptor.streamCount = 0u;
+  descriptor.runCycle = warmupGateProbeRunCycle;
+  descriptor.captureState = warmupGateProbeCaptureState;
+  descriptor.restoreAfterOrderFailure = warmupGateProbeRestoreState;
+
+  std::vector<EngineState> engines(1u);
+  EngineState& engine = engines[0];
+  engine.exchange = canon::kExchangeIdBinance;
+  engine.market = canon::kMarketTypeFutures;
+  setTop(engine, kPx100, kPx100 + 100000000ll);
+  BacktestLatencyConfig latency{};
+  latency.marketOrder = BacktestLatencyProfile{};
+  latency.limitOrder = BacktestLatencyProfile{};
+  latency.cancelOrder = BacktestLatencyProfile{};
+  initLatencyRuntime(engine.latency, latency);
+
+  std::vector<StrategyInstrumentSpec> instruments(1u);
+  instruments[0].tickSizeRaw = 100000000ll;
+  instruments[0].stepSizeRaw = 100000000ll;
+  instruments[0].tickGrid = hft_trader::core::prepareFastStepGrid(instruments[0].tickSizeRaw);
+  instruments[0].qtyStepGrid = hft_trader::core::prepareFastStepGrid(instruments[0].stepSizeRaw);
+
+  MultiLegCycleScratch scratch{};
+  scratch.reset(1u);
+  WarmupGateProbeState state{};
+  hft_trader::core::SymbolShardConfig shard{};
+  hft_trader::core::ShardControlState control{};
+  BacktestRunRequest request{};
+
+  const bool warmupOk = hft_backtest::runCycleMulti(
+      descriptor, &state, engines, instruments, scratch, shard, control, 0u, 1000ll, request, nullptr);
+  const std::size_t ordersAfterWarmup = engine.orders.size();
+  const std::uint64_t hotMonoAfterWarmup = engine.lastOrderPathHotMono.raw;
+
+  const bool realOrderOk = hft_backtest::runCycleMulti(
+      descriptor, &state, engines, instruments, scratch, shard, control, 0u, 1001ll, request, nullptr);
+
+  return expect(warmupOk, "first cycle emits service warmup order") &&
+         expect(ordersAfterWarmup == 2u, "warmup order and cancel are recorded") &&
+         expect(engine.orders[0].warmup && engine.orders[0].service, "first order is service warmup") &&
+         expect(hotMonoAfterWarmup == 1000u, "warmup ack marks route hot") &&
+         expect(realOrderOk, "second cycle runs after warmup") &&
+         expect(engine.fills.size() == 1u, "route-hot second cycle sends real market order and fills it") &&
+         expect(engine.userEvents.size() == 1u, "real fill publishes strategy user event") &&
+         expect(engine.orders.size() == 3u, "no second warmup is inserted once route is hot") &&
+         expect(!engine.orders.back().service && !engine.orders.back().warmup, "final order is real strategy order");
 }
 
 bool testBacktestRateLimitScheduleReplacesMatchingPreset() {
@@ -300,6 +432,62 @@ void writeText(const std::filesystem::path& path, std::string_view text) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream out(path, std::ios::out | std::ios::trunc | std::ios::binary);
   out << text;
+}
+
+Symbol btcUsdtSymbol() {
+  Symbol symbol{};
+  symbol.copyFrom("BTCUSDT");
+  return symbol;
+}
+
+JsonOrder phase2OrderRecord(std::uint64_t id,
+                            std::uint8_t type,
+                            std::uint8_t side,
+                            std::int64_t qtyE8,
+                            std::int64_t activeTsNs,
+                            bool reduceOnly = false,
+                            std::int64_t triggerTsNs = 0) noexcept {
+  JsonOrder order{};
+  order.id = id;
+  order.submitTsNs = activeTsNs;
+  order.activeTsNs = activeTsNs;
+  order.tsNs = triggerTsNs > 0 ? triggerTsNs : activeTsNs;
+  order.action = kRecordActionOrder;
+  order.side = side;
+  order.type = type;
+  order.status = kRecordStatusFilled;
+  order.qtyE8 = qtyE8;
+  order.reduceOnly = reduceOnly;
+  order.triggerTsNs = triggerTsNs;
+  return order;
+}
+
+JsonFill phase2TakerFillRecord(std::uint64_t orderId,
+                               std::uint8_t side,
+                               std::int64_t priceE8,
+                               std::int64_t qtyE8,
+                               std::int64_t orderQtyE8,
+                               std::int64_t entryTsNs,
+                               std::int64_t exitTsNs,
+                               bool reduceOnly = false) noexcept {
+  JsonFill fill{};
+  fill.orderId = orderId;
+  fill.entryTsNs = entryTsNs;
+  fill.exitTsNs = exitTsNs;
+  fill.side = side;
+  fill.priceE8 = priceE8;
+  fill.qtyE8 = qtyE8;
+  fill.reduceOnly = reduceOnly;
+  fill.fillReason = kFillReasonTop;
+  fill.liquidity = kFillLiquidityTaker;
+  fill.orderQtyE8 = orderQtyE8;
+  fill.cumulativeFilledQtyE8 = qtyE8;
+  fill.remainingQtyE8 = orderQtyE8 > qtyE8 ? orderQtyE8 - qtyE8 : 0;
+  fill.avgPriceE8 = priceE8;
+  fill.executionQtyE8 = qtyE8;
+  fill.executionAvgPriceE8 = priceE8;
+  fill.referencePriceE8 = priceE8;
+  return fill;
 }
 
 bool testStaleCancelDoesNotCancelReusedSlot() {
@@ -496,6 +684,104 @@ bool testRepriceRebuildAccountingUsesRepricedFillPrices() {
          expect(engine.walletBalanceE8 == engine.initialBalanceE8 - 100000000ll, "phase2 accounting updates wallet") &&
          expect(engine.fills[1].realizedPnlE8 == -100000000ll, "phase2 accounting rewrites fill realized pnl") &&
          expect(engine.equityPoints.size() == 3u, "phase2 accounting rebuilds start and fill equity points");
+}
+
+bool testPhase2MarketBurstFillsResidualAtLastKnownTradePrice() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_phase2_market_burst_" + std::to_string(std::rand()));
+  writeText(dir / "jsonl" / "bookticker.jsonl",
+            "[9900000000,100000000,10100000000,30000000,1000]\n");
+  writeText(dir / "jsonl" / "trades.jsonl",
+            "[10100000000,30000000,1,1100]\n"
+            "[10300000000,20000000,1,1200]\n"
+            "[10000000000,10000000,0,1300]\n");
+
+  EngineState engine{};
+  engine.symbol = btcUsdtSymbol();
+  engine.orders.push_back(phase2OrderRecord(501, kRecordTypeMarket, kRecordSideBuy, kQty1, 1000));
+  engine.fills.push_back(phase2TakerFillRecord(501,
+                                               kRecordSideBuy,
+                                               10100000000ll,
+                                               kQty1,
+                                               kQty1,
+                                               1000,
+                                               1000));
+
+  ExecutionRepriceStats stats{};
+  const bool ok = repriceFillsWithDepth(dir, engine.symbol, 1000000ll, engine, stats);
+
+  return expect(ok, "phase2 market burst repricer opens BBO/trades") &&
+         expect(engine.fills.size() == 1u, "phase2 market burst replaces original taker fill") &&
+         expect(engine.fills[0].orderId == 501u, "phase2 market burst preserves order id") &&
+         expect(engine.fills[0].priceE8 == 10300000000ll, "phase2 market burst fills residual at last known sweep price") &&
+         expect(engine.fills[0].qtyE8 == kQty1, "phase2 market burst preserves filled quantity") &&
+         expect(engine.fills[0].exitTsNs == 1200, "phase2 market burst exits at same-side burst end before opposite print") &&
+         expect(engine.fills[0].fillReason == kFillReasonAggressiveBook, "phase2 market burst marks aggressive-book fill") &&
+         expect(stats.fillsRepriced == 1u, "phase2 market burst counts replacement fill");
+}
+
+bool testPhase2StopMarketBurstUsesTriggerTimestamp() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_phase2_stop_burst_" + std::to_string(std::rand()));
+  writeText(dir / "jsonl" / "bookticker.jsonl",
+            "[9900000000,100000000,10100000000,20000000,5000]\n");
+  writeText(dir / "jsonl" / "trades.jsonl",
+            "[10400000000,100000000,1,5100]\n"
+            "[10000000000,10000000,0,5200]\n");
+
+  EngineState engine{};
+  engine.symbol = btcUsdtSymbol();
+  engine.orders.push_back(phase2OrderRecord(502, kRecordTypeStopMarket, kRecordSideBuy, 60000000ll, 1000, false, 5000));
+  engine.fills.push_back(phase2TakerFillRecord(502,
+                                               kRecordSideBuy,
+                                               10100000000ll,
+                                               60000000ll,
+                                               60000000ll,
+                                               5000,
+                                               5000));
+
+  ExecutionRepriceStats stats{};
+  const bool ok = repriceFillsWithDepth(dir, engine.symbol, 1000000ll, engine, stats);
+
+  return expect(ok, "phase2 stop-market burst repricer opens BBO/trades") &&
+         expect(engine.fills.size() == 1u, "phase2 stop-market burst replaces original taker fill") &&
+         expect(engine.fills[0].entryTsNs == 5000, "phase2 stop-market burst uses trigger timestamp as queue arrival") &&
+         expect(engine.fills[0].exitTsNs == 5100, "phase2 stop-market burst exits at burst trade timestamp") &&
+         expect(engine.fills[0].priceE8 == 10400000000ll, "phase2 stop-market burst applies trade-through last known price") &&
+         expect(engine.fills[0].executionAvgPriceE8 == 10400000000ll, "phase2 stop-market burst stores execution average");
+}
+
+bool testPhase2ReduceOnlyMarketBurstPreservesPhase1FilledQtyCap() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_phase2_reduce_burst_" + std::to_string(std::rand()));
+  writeText(dir / "jsonl" / "bookticker.jsonl",
+            "[9900000000,100000000,10100000000,10000000,1000]\n");
+  writeText(dir / "jsonl" / "trades.jsonl",
+            "[10500000000,100000000,1,1100]\n"
+            "[10000000000,10000000,0,1200]\n");
+
+  EngineState engine{};
+  engine.symbol = btcUsdtSymbol();
+  engine.orders.push_back(phase2OrderRecord(503, kRecordTypeMarket, kRecordSideBuy, kQty1, 1000, true));
+  engine.fills.push_back(phase2TakerFillRecord(503,
+                                               kRecordSideBuy,
+                                               10100000000ll,
+                                               40000000ll,
+                                               kQty1,
+                                               1000,
+                                               1000,
+                                               true));
+
+  ExecutionRepriceStats stats{};
+  const bool ok = repriceFillsWithDepth(dir, engine.symbol, 1000000ll, engine, stats);
+
+  return expect(ok, "phase2 reduce-only market burst repricer opens BBO/trades") &&
+         expect(engine.fills.size() == 1u, "phase2 reduce-only burst replaces original fill") &&
+         expect(engine.fills[0].qtyE8 == 40000000ll, "phase2 reduce-only burst preserves phase1 capped fill qty") &&
+         expect(engine.fills[0].orderQtyE8 == kQty1, "phase2 reduce-only burst preserves original order quantity") &&
+         expect(engine.fills[0].remainingQtyE8 == 60000000ll, "phase2 reduce-only burst keeps remaining against original order qty") &&
+         expect(engine.fills[0].reduceOnly, "phase2 reduce-only burst preserves reduce-only flag") &&
+         expect(engine.fills[0].priceE8 == 10500000000ll, "phase2 reduce-only burst reprices capped qty at last known sweep price");
 }
 
 bool testRateLimitRejectAddsRunWarningWithoutFailingRun() {
@@ -716,6 +1002,31 @@ bool testLatencyRuntimeSplitsMarketAndLimitOrderActivation() {
          expect(engine.orders[1].activeTsNs == 701000, "limit order uses limit order latency");
 }
 
+bool testLatencyRuntimeTreatsStopMarketAsMarketOrderActivation() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  BacktestLatencyConfig config{};
+  config.seed = 5u;
+  config.marketOrder.baseUs = 100u;
+  config.limitOrder.baseUs = 700u;
+  initLatencyRuntime(engine.latency, config);
+
+  std::array<hft_trader::core::OrderIntent, 2> orders{
+      stopMarketIntent(32, Side::Buy(), kPx100 + 300000000ll),
+      orderIntent(33, Side::Buy(), kPx100 - 200000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, engine.latency);
+
+  return expect(engine.orders.size() == 2u, "stop-market and limit orders are recorded") &&
+         expect(engine.orders[0].type == kRecordTypeStopMarket, "first order is stop-market") &&
+         expect(engine.orders[0].triggerPriceE8 == kPx100 + 300000000ll, "stop-market record keeps trigger price") &&
+         expect(engine.orders[0].triggerSource == static_cast<std::uint8_t>(canon::OrderTriggerSource::Last), "stop-market record defaults trigger source to last") &&
+         expect(engine.orders[0].activeTsNs == 101000, "stop-market order uses market order latency") &&
+         expect(engine.orders[1].activeTsNs == 701000, "limit order still uses limit order latency");
+}
+
 bool testMarketOrderAtSameTimestampWaitsForVenueTopUpdate() {
   EngineState engine{};
   setTop(engine, 120000000ll, 121000000ll);
@@ -724,7 +1035,7 @@ bool testMarketOrderAtSameTimestampWaitsForVenueTopUpdate() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
-  applyIntents(engine, io, 0, 1000, 0);
+  applyIntents(engine, io, 0, 1, 0);
 
   applyDueActionsBefore(engine, 1000);
   const bool notFilledBeforeMarketEvent = engine.fills.empty() && !engine.pending.empty();
@@ -745,7 +1056,7 @@ bool testSellMarketOrderAtSameTimestampWaitsForVenueTopUpdate() {
   hft_trader::core::StrategyIo io{};
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
-  applyIntents(engine, io, 0, 1000, 0);
+  applyIntents(engine, io, 0, 1, 0);
 
   applyDueActionsBefore(engine, 1000);
   const bool notFilledBeforeMarketEvent = engine.fills.empty() && !engine.pending.empty();
@@ -756,6 +1067,154 @@ bool testSellMarketOrderAtSameTimestampWaitsForVenueTopUpdate() {
   return expect(notFilledBeforeMarketEvent, "sell market order active at market timestamp waits for that market event") &&
          expect(engine.fills.size() == 1u, "sell market order fills after same-timestamp venue update") &&
          expect(engine.fills[0].priceE8 == 114000000ll, "market sell fills at updated same-timestamp bid");
+}
+
+bool testStopMarketBuyTriggersOnReconstructedAskForLastSource() {
+  EngineState engine{};
+  setTop(engine, 104000000ll, 105000000ll);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{stopMarketIntent(74, Side::Buy(), 110000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  const bool resting = engine.fills.empty() && engine.open[0].state.valid && engine.open[0].active;
+  cxet::composite::TradeRuntimeV1 trade{};
+  trade.ts.raw = 2000;
+  trade.price.raw = 115000000ll;
+  trade.qty.raw = kQty1;
+  tryFillOnTrade(engine, trade);
+  const bool tradeDidNotTrigger = engine.fills.empty() && engine.open[0].state.valid;
+  setTop(engine, 109000000ll, 110000000ll);
+  tryFillOnTop(engine, 3000);
+
+  return expect(resting, "buy stop-market rests while ask is below trigger") &&
+         expect(tradeDidNotTrigger, "buy stop-market last source ignores trade-last") &&
+         expect(engine.fills.size() == 1u, "buy stop-market fills after reconstructed ask reaches trigger") &&
+         expect(engine.fills[0].priceE8 == 110000000ll, "buy stop-market fills at ask like market") &&
+         expect(engine.orders[0].triggerSource == static_cast<std::uint8_t>(canon::OrderTriggerSource::Last), "buy stop-market records last trigger source") &&
+         expect(engine.orders[0].triggerSourcePriceE8 == 110000000ll, "buy stop-market records trigger source price") &&
+         expect(engine.orders[0].triggerTsNs == 3000, "buy stop-market records trigger timestamp") &&
+         expect(engine.orders[0].status == kRecordStatusFilled, "triggered buy stop-market record is filled") &&
+         expect(!engine.open[0].state.valid, "triggered buy stop-market clears open order");
+}
+
+bool testStopMarketBuyRejectsIfAlreadyTriggeredAtActivation() {
+  EngineState engine{};
+  setTop(engine, 114000000ll, 115000000ll);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{stopMarketIntent(75, Side::Buy(), 110000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  return expect(engine.fills.empty(), "already-triggered buy stop-market does not fill") &&
+         expect(engine.orders[0].status == kRecordStatusRejected, "already-triggered buy stop-market is rejected") &&
+         expect(!engine.open[0].state.valid, "rejected buy stop-market leaves no open order") &&
+         expect(engine.userEvents.size() == 1u, "rejected buy stop-market publishes user event") &&
+         expect(engine.userEvents[0].orderStatus == canon::OrderStatus::Rejected, "stop-market reject event is rejected");
+}
+
+bool testStopMarketRejectsInvalidTriggerConfig() {
+  EngineState badPrice{};
+  setTop(badPrice, 114000000ll, 115000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> zeroPrice{stopMarketIntent(790, Side::Buy(), 0)};
+  hft_trader::core::StrategyIo zeroIo{};
+  zeroIo.orderOut = Span<hft_trader::core::OrderIntent>(zeroPrice.data(), zeroPrice.size());
+  zeroIo.orderCount = zeroPrice.size();
+  applyIntents(badPrice, zeroIo, 1000, 0, 0);
+
+  EngineState badSource{};
+  setTop(badSource, 114000000ll, 115000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> unknownSource{
+      stopMarketIntent(791, Side::Buy(), 110000000ll, canon::OrderTriggerSource::Unknown)};
+  hft_trader::core::StrategyIo sourceIo{};
+  sourceIo.orderOut = Span<hft_trader::core::OrderIntent>(unknownSource.data(), unknownSource.size());
+  sourceIo.orderCount = unknownSource.size();
+  applyIntents(badSource, sourceIo, 1000, 0, 0);
+
+  return expect(badPrice.orders[0].status == kRecordStatusRejected, "zero trigger stop-market is rejected") &&
+         expect(!badPrice.open[0].state.valid, "zero trigger stop-market leaves no open order") &&
+         expect(badSource.orders[0].status == kRecordStatusRejected, "unknown trigger source stop-market is rejected") &&
+         expect(!badSource.open[0].state.valid, "unknown trigger source stop-market leaves no open order");
+}
+
+bool testStopMarketSellTriggersOnReconstructedBidForLastSource() {
+  EngineState engine{};
+  setTop(engine, 115000000ll, 116000000ll);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{stopMarketIntent(76, Side::Sell(), 110000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  const bool resting = engine.fills.empty() && engine.open[0].state.valid && engine.open[0].active;
+  cxet::composite::TradeRuntimeV1 trade{};
+  trade.ts.raw = 2000;
+  trade.price.raw = 109000000ll;
+  trade.qty.raw = kQty1;
+  tryFillOnTrade(engine, trade);
+  const bool tradeDidNotTrigger = engine.fills.empty() && engine.open[0].state.valid;
+  setTop(engine, 110000000ll, 111000000ll);
+  tryFillOnTop(engine, 3000);
+
+  return expect(resting, "sell stop-market rests while bid is above trigger") &&
+         expect(tradeDidNotTrigger, "sell stop-market last source ignores trade-last") &&
+         expect(engine.fills.size() == 1u, "sell stop-market fills after reconstructed bid reaches trigger") &&
+         expect(engine.fills[0].priceE8 == 110000000ll, "sell stop-market fills at bid like market") &&
+         expect(engine.orders[0].triggerSourcePriceE8 == 110000000ll, "sell stop-market records bid trigger price") &&
+         expect(engine.orders[0].triggerTsNs == 3000, "sell stop-market records trigger timestamp") &&
+         expect(engine.orders[0].status == kRecordStatusFilled, "triggered sell stop-market record is filled");
+}
+
+bool testStopMarketBuyTriggersOnMarkPrice() {
+  EngineState engine{};
+  setTop(engine, 104000000ll, 105000000ll);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{
+      stopMarketIntent(77, Side::Buy(), 110000000ll, canon::OrderTriggerSource::Mark)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  setTop(engine, 114000000ll, 115000000ll);
+  cxet::composite::MarkPriceRuntimeV1 mark{};
+  mark.ts.raw = 2500;
+  mark.markPrice.raw = 110000000ll;
+  tryTriggerStopMarketsOnMark(engine, mark);
+
+  return expect(engine.fills.size() == 1u, "mark stop-market fills after mark reaches trigger") &&
+         expect(engine.fills[0].priceE8 == 115000000ll, "mark stop-market buy still executes at ask") &&
+         expect(engine.orders[0].triggerSource == static_cast<std::uint8_t>(canon::OrderTriggerSource::Mark), "mark stop-market records trigger source") &&
+         expect(engine.orders[0].triggerSourcePriceE8 == 110000000ll, "mark stop-market records mark trigger price") &&
+         expect(engine.orders[0].triggerTsNs == 2500, "mark stop-market records trigger timestamp");
+}
+
+bool testStopMarketSellTriggersOnIndexPrice() {
+  EngineState engine{};
+  setTop(engine, 109000000ll, 110000000ll);
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{
+      stopMarketIntent(78, Side::Sell(), 110000000ll, canon::OrderTriggerSource::Index)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+
+  cxet::composite::IndexPriceRuntimeV1 index{};
+  index.ts.raw = 2600;
+  index.indexPrice.raw = 110000000ll;
+  tryTriggerStopMarketsOnIndex(engine, index);
+
+  return expect(engine.fills.size() == 1u, "index stop-market fills after index reaches trigger") &&
+         expect(engine.fills[0].priceE8 == 109000000ll, "index stop-market sell still executes at bid") &&
+         expect(engine.orders[0].triggerSource == static_cast<std::uint8_t>(canon::OrderTriggerSource::Index), "index stop-market records trigger source") &&
+         expect(engine.orders[0].triggerSourcePriceE8 == 110000000ll, "index stop-market records index trigger price") &&
+         expect(engine.orders[0].triggerTsNs == 2600, "index stop-market records trigger timestamp");
 }
 
 bool testMarketBuyConsumesVisibleAskLevelsWithoutMutatingBook() {
@@ -1139,6 +1598,29 @@ bool testLazyExecutionDepthProviderInitializesPassiveQueueAtActivation() {
          expect(engine.fills[0].qtyE8 == 15000000ll, "lazy execution depth queue subtracts visible queue ahead") &&
          expect(engine.fills[0].queueAheadBeforeE8 == 55000000ll, "lazy execution depth queue records queue before trade") &&
          expect(engine.fills[0].queueAheadAfterE8 == 0, "lazy execution depth queue records queue after trade");
+}
+
+bool testPassiveQueueDoesNotFillFromTopQtyShrinkWithoutTrade() {
+  EngineState engine{};
+  seedVenueBook(engine,
+                {{9900000000ll, 55000000ll}},
+                {{10100000000ll, 100000000ll}});
+
+  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(190, Side::Buy(), 9900000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 1000, 0, 0);
+  const bool capturedQueueAhead = engine.open[0].queueAheadQtyRaw == 55000000ll;
+
+  setTopWithQty(engine, 9900000000ll, 5000000ll, 10100000000ll, 100000000ll);
+  tryFillOnTop(engine, 2000);
+
+  return expect(capturedQueueAhead, "passive queue shrink test captures queue ahead at activation") &&
+         expect(engine.fills.empty(), "top quantity shrink without trade does not create maker fill") &&
+         expect(engine.open[0].state.valid, "resting maker order remains open after top shrink") &&
+         expect(engine.open[0].queueAheadQtyRaw == 55000000ll,
+                "top quantity shrink alone does not consume queue ahead");
 }
 
 bool testInitialSnapshotBookDoesNotReplaceBboFallbackWithoutExecutionDepth() {
@@ -1773,6 +2255,41 @@ bool testTraderRiskStopAfterForceCloseKeepsRiskFieldsAndFlatPosition() {
          expect(engine.riskSnapshots.back().reason == kRiskSnapshotReasonTraderRiskStop, "risk stop writes final snapshot reason");
 }
 
+bool testForceCloseOpenLongPositionUsesLazyExecutionDepth() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_force_close_lazy_depth_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
+  writeText(dir / "jsonl" / "depth.jsonl",
+            "[[9900000000,40000000,0],[9800000000,60000000,0],[10100000000,100000000,1],1000]\n");
+
+  EngineState engine{};
+  engine.symbol.copyFrom("BTCUSDT");
+  engine.takerFeeBpsE8 = 0;
+  setTopWithQty(engine, 9900000000ll, 40000000ll, 10100000000ll, 100000000ll);
+  std::int64_t netRealized = 0;
+  updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0, netRealized);
+
+  hft_trader::core::LocalOrderBookConfig config{};
+  config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+  ExecutionDepthProvider provider{};
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  engine.executionDepthProvider = &provider;
+
+  const bool closed = forceClosePosition(engine, 2000, 0);
+
+  return expect(opened, "force-close lazy depth provider opens legacy fixture") &&
+         expect(closed, "lazy depth force close reports success") &&
+         expect(provider.rowsRead() == 1u, "lazy depth force close advances only needed depth row") &&
+         expect(engine.netQtyRaw == 0, "lazy depth force close flattens long") &&
+         expect(engine.fills.size() == 2u, "lazy depth force close writes one fill per bid level") &&
+         expect(engine.fills[0].priceE8 == 9900000000ll, "lazy depth force close uses best depth bid") &&
+         expect(engine.fills[1].priceE8 == 9800000000ll, "lazy depth force close walks second bid") &&
+         expect(engine.fills[0].fillReason == kFillReasonAggressiveBook, "lazy depth force close is depth-aware") &&
+         expect(engine.fills[0].chunkCount == 2u, "lazy depth force close records depth chunk count") &&
+         expect(engine.fills[0].reduceOnly && engine.fills[1].reduceOnly, "lazy depth force close fills are reduce-only");
+}
+
 bool testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() {
   EngineState engine{};
   engine.takerFeeBpsE8 = 0;
@@ -2125,6 +2642,29 @@ bool testWriterCreatesV2RunDirectory() {
 
   EngineState engine{};
   engine.orders.push_back(JsonOrder{0, 1, 0, 100, 110, 100, kRecordActionOrder, kRecordSideBuy, kRecordTypeLimit, kRecordStatusFilled, kPx100, kQty1, false});
+  JsonOrder stopOrder{};
+  stopOrder.legIndex = 0;
+  stopOrder.id = 2;
+  stopOrder.submitTsNs = 100;
+  stopOrder.activeTsNs = 120;
+  stopOrder.tsNs = 100;
+  stopOrder.action = kRecordActionOrder;
+  stopOrder.side = kRecordSideSell;
+  stopOrder.type = kRecordTypeStopMarket;
+  stopOrder.status = kRecordStatusCancelled;
+  stopOrder.qtyE8 = kQty1;
+  stopOrder.triggerPriceE8 = kPx100 - 100000000ll;
+  engine.orders.push_back(stopOrder);
+  JsonOrder stopCancel{};
+  stopCancel.legIndex = 0;
+  stopCancel.id = 3;
+  stopCancel.targetId = 2;
+  stopCancel.submitTsNs = 150;
+  stopCancel.activeTsNs = 160;
+  stopCancel.tsNs = 150;
+  stopCancel.action = kRecordActionCancel;
+  stopCancel.status = kRecordStatusCancelled;
+  engine.orders.push_back(stopCancel);
   engine.fills.push_back(JsonFill{0, 1, 110, 150, kRecordSideBuy, kPx100, kQty1, 0, false});
   engine.equityPoints.push_back(JsonEquityPoint{150, 0, 0, 0, 0, 0, 0, 0, 100000000000ll, kQty1, 1});
   engine.riskSnapshots.push_back(JsonRiskSnapshot{150, 0, 0, 0, 0, 0, 0, 100000000000ll, kQty1, kPx100, kPx100 - 100000000ll, kPx100 + 100000000ll, 1, kRiskSnapshotReasonFill});
@@ -2135,6 +2675,8 @@ bool testWriterCreatesV2RunDirectory() {
   engine.strategyIndicatorUnit = "score";
   engine.strategyIndicator.push_back(JsonStrategyIndicatorPoint{150, 42, 44, 1, 7, 3, 1});
   engine.strategySpread.push_back(JsonStrategySpreadPoint{150, 100000000, 90000000, 10000000, 5000000, 5000000, 1, 3, 0});
+  result.orders = engine.orders.size();
+  result.fills = engine.fills.size();
 
   const hft_backtest::Status status = writeResult(result, engine);
   const std::string manifest = readText(dir / "manifest.json");
@@ -2148,8 +2690,9 @@ bool testWriterCreatesV2RunDirectory() {
   return expect(status == hft_backtest::Status::Ok, "v2 writer reports ok") &&
          expect(std::filesystem::is_directory(dir), "result path is a directory") &&
          expect(manifest.find("\"type\": \"run.result.v2\"") != std::string::npos, "manifest declares v2 result") &&
-         expect(manifest.find("\"orders\": 1") != std::string::npos, "manifest summary includes order count") &&
+         expect(manifest.find("\"orders\": 3") != std::string::npos, "manifest summary includes order count") &&
          expect(manifest.find("\"order_lifetimes\": {") != std::string::npos, "manifest declares order lifetimes stream") &&
+         expect(manifest.find("leg_index,order_type") != std::string::npos, "manifest declares order lifetime type") &&
          expect(manifest.find("\"cancel_order\": {\"base_us\": 1200") != std::string::npos, "manifest includes cancel latency profile") &&
          expect(manifest.find("\"user_data\": {\"base_us\": 800") != std::string::npos, "manifest includes user-data latency profile") &&
          expect(manifest.find("\"risk_snapshots\": {") != std::string::npos, "manifest declares risk snapshots stream") &&
@@ -2166,7 +2709,9 @@ bool testWriterCreatesV2RunDirectory() {
          expect(manifest.find("\"notional_usdt_e8\": 1000000000") != std::string::npos, "manifest carries live probe notional") &&
          expect(manifest.find("\"market_data_latency\": {\"base_us\": 250, \"jitter_us\": 100}") != std::string::npos,
                 "manifest leg summary carries per-leg market data latency") &&
-         expect(orderLifetimes == "[110,150,10000000000,100000000,1,0,0]\n", "order lifetimes stream uses compact arrays") &&
+         expect(orderLifetimes == "[110,150,10000000000,100000000,1,0,0,1]\n"
+                                  "[120,160,9900000000,100000000,0,0,0,3]\n",
+                "order lifetimes stream keeps limit and stop-market arrays") &&
          expect(!std::filesystem::exists(dir / "orders.jsonl"), "writer does not emit raw orders stream") &&
          expect(fills == "[1,110,150,1,10000000000,100000000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]\n",
                 "fills stream appends execution metadata after legacy fields") &&
@@ -2325,7 +2870,7 @@ bool testToxicFlowProbeWritesDepthBackedIndicator() {
     bookticker += "[" + std::to_string(bid) + ",100000000," + std::to_string(ask) +
                   ",100000000," + std::to_string(ts) + ",1,1]\n";
     depth += "[[" + std::to_string(bid) + ",100000000,0],[" + std::to_string(ask) + ",100000000,1]," +
-             std::to_string(ts) + ",1]\n";
+             std::to_string(ts) + "]\n";
   }
   writeText(dir / "jsonl" / "trades.jsonl", trades);
   writeText(dir / "jsonl" / "bookticker.jsonl", bookticker);
@@ -2571,6 +3116,8 @@ int main() {
   ok = testBacktestCanonicalizesAsterSessionExchange() && ok;
   ok = testBacktestRateLimitScheduleUsesExchangePreset() && ok;
   ok = testBacktestRateLimitScheduleCanDisablePresets() && ok;
+  ok = testWarmupOrderIsServiceHiddenAndMarksHot() && ok;
+  ok = testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() && ok;
   ok = testBacktestRateLimitScheduleReplacesMatchingPreset() && ok;
   ok = testBacktestFeeScheduleOverridesExchangePreset() && ok;
   ok = testBacktestGlobalFeeOverrideFillsPresetSides() && ok;
@@ -2580,6 +3127,9 @@ int main() {
   ok = testRepeatedRateLimitRejectsShareCooldownWindow() && ok;
   ok = testRepriceFillFromBookAnnotatesDepthMetadataWithoutChangingCausality() && ok;
   ok = testRepriceRebuildAccountingUsesRepricedFillPrices() && ok;
+  ok = testPhase2MarketBurstFillsResidualAtLastKnownTradePrice() && ok;
+  ok = testPhase2StopMarketBurstUsesTriggerTimestamp() && ok;
+  ok = testPhase2ReduceOnlyMarketBurstPreservesPhase1FilledQtyCap() && ok;
   ok = testRateLimitRejectAddsRunWarningWithoutFailingRun() && ok;
   ok = testPendingDrainActivatesLateOrder() && ok;
   ok = testCancelThenReplacementLimitMaterializesReplace() && ok;
@@ -2587,6 +3137,7 @@ int main() {
   ok = testOrderedCommandNewBeforeCancelKeepsReplacementLive() && ok;
   ok = testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() && ok;
   ok = testLatencyRuntimeSplitsMarketAndLimitOrderActivation() && ok;
+  ok = testLatencyRuntimeTreatsStopMarketAsMarketOrderActivation() && ok;
   ok = testLatencyRuntimeUsesDedicatedCancelChannel() && ok;
   ok = testFillPublishesRuntimeUserEvent() && ok;
   ok = testFillUserEventHasSeparateDeliveryLatency() && ok;
@@ -2597,6 +3148,12 @@ int main() {
   ok = testNoFreeOrderSlotPublishesRejectedUserEvent() && ok;
   ok = testMarketOrderAtSameTimestampWaitsForVenueTopUpdate() && ok;
   ok = testSellMarketOrderAtSameTimestampWaitsForVenueTopUpdate() && ok;
+  ok = testStopMarketBuyTriggersOnReconstructedAskForLastSource() && ok;
+  ok = testStopMarketBuyRejectsIfAlreadyTriggeredAtActivation() && ok;
+  ok = testStopMarketRejectsInvalidTriggerConfig() && ok;
+  ok = testStopMarketSellTriggersOnReconstructedBidForLastSource() && ok;
+  ok = testStopMarketBuyTriggersOnMarkPrice() && ok;
+  ok = testStopMarketSellTriggersOnIndexPrice() && ok;
   ok = testMarketBuyConsumesVisibleAskLevelsWithoutMutatingBook() && ok;
   ok = testMarketBuyFallsBackToBboWhenVisibleDepthCannotFillMarket() && ok;
   ok = testMarketBuyOverlaysBboBeforeWalkingVisibleDepth() && ok;
@@ -2610,6 +3167,7 @@ int main() {
   ok = testStaleLazyExecutionDepthMarketSellFallsBackToBboBid() && ok;
   ok = testLazyExecutionDepthProviderDoesNotAdvanceWithoutExecutionCandidate() && ok;
   ok = testLazyExecutionDepthProviderInitializesPassiveQueueAtActivation() && ok;
+  ok = testPassiveQueueDoesNotFillFromTopQtyShrinkWithoutTrade() && ok;
   ok = testInitialSnapshotBookDoesNotReplaceBboFallbackWithoutExecutionDepth() && ok;
   ok = testCrossingLimitConsumesVisibleDepthThenRestsRemainder() && ok;
   ok = testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() && ok;
@@ -2628,6 +3186,7 @@ int main() {
   ok = testHardLiquidationClearsStateAndBlocksNewOrders() && ok;
   ok = testTraderRiskStopCancelsOrdersKeepsPositionAndBlocksNewOrders() && ok;
   ok = testTraderRiskStopAfterForceCloseKeepsRiskFieldsAndFlatPosition() && ok;
+  ok = testForceCloseOpenLongPositionUsesLazyExecutionDepth() && ok;
   ok = testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() && ok;
   ok = testCancelOpenOrdersAtFinishWritesCancelAcks() && ok;
   ok = testLoadSessionUsesManifestChannelPathsAndMetadata() && ok;

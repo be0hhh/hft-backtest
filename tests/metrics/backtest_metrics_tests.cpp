@@ -42,15 +42,11 @@ bool testExcursionMetricsFallbackToEquityPoints() {
 }
 
 bool testPortfolioExcursionMetricsMergeLegRiskSnapshots() {
-  EngineState first{};
-  first.riskSnapshots.push_back(JsonRiskSnapshot{100, 0, 0, 0, 0, 100000000ll, 0, 100000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonStart});
-  first.riskSnapshots.push_back(JsonRiskSnapshot{300, 0, 0, 0, 0, -200000000ll, 0, 100000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonInterval});
-
-  EngineState second{};
-  second.riskSnapshots.push_back(JsonRiskSnapshot{200, 0, 0, 0, 0, 250000000ll, 0, 100000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonStart});
-  second.riskSnapshots.push_back(JsonRiskSnapshot{400, 0, 0, 0, 0, -50000000ll, 0, 100000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonFinal});
-
-  const std::vector<EngineState> engines{first, second};
+  std::vector<EngineState> engines(2u);
+  engines[0].riskSnapshots.push_back(JsonRiskSnapshot{100, 0, 0, 0, 0, 100000000ll, 0, 100000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonStart});
+  engines[0].riskSnapshots.push_back(JsonRiskSnapshot{300, 0, 0, 0, 0, -200000000ll, 0, 100000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonInterval});
+  engines[1].riskSnapshots.push_back(JsonRiskSnapshot{200, 0, 0, 0, 0, 250000000ll, 0, 100000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonStart});
+  engines[1].riskSnapshots.push_back(JsonRiskSnapshot{400, 0, 0, 0, 0, -50000000ll, 0, 100000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonFinal});
   const BacktestExcursionMetrics metrics = calculatePortfolioExcursionMetrics(engines);
 
   return expect(metrics.mfeE8 == 350000000ll, "portfolio MFE sums latest leg pnl at merged timestamps") &&
@@ -59,15 +55,11 @@ bool testPortfolioExcursionMetricsMergeLegRiskSnapshots() {
 }
 
 bool testPortfolioPnlCurveMergesLegEquityPoints() {
-  EngineState first{};
-  first.equityPoints.push_back(JsonEquityPoint{100, 0, 100000000ll, 0, 0, 100000000ll, 100000000ll, 0, 100000000000ll, 0, 0});
-  first.equityPoints.push_back(JsonEquityPoint{300, 0, -200000000ll, 0, 0, -200000000ll, -200000000ll, 0, 100000000000ll, 0, 0});
-
-  EngineState second{};
-  second.equityPoints.push_back(JsonEquityPoint{200, 0, 250000000ll, 0, 0, 250000000ll, 250000000ll, 0, 100000000000ll, 0, 0});
-  second.equityPoints.push_back(JsonEquityPoint{400, 0, -50000000ll, 0, 0, -50000000ll, -50000000ll, 0, 100000000000ll, 0, 0});
-
-  const std::vector<EngineState> engines{first, second};
+  std::vector<EngineState> engines(2u);
+  engines[0].equityPoints.push_back(JsonEquityPoint{100, 0, 100000000ll, 0, 0, 100000000ll, 100000000ll, 0, 100000000000ll, 0, 0});
+  engines[0].equityPoints.push_back(JsonEquityPoint{300, 0, -200000000ll, 0, 0, -200000000ll, -200000000ll, 0, 100000000000ll, 0, 0});
+  engines[1].equityPoints.push_back(JsonEquityPoint{200, 0, 250000000ll, 0, 0, 250000000ll, 250000000ll, 0, 100000000000ll, 0, 0});
+  engines[1].equityPoints.push_back(JsonEquityPoint{400, 0, -50000000ll, 0, 0, -50000000ll, -50000000ll, 0, 100000000000ll, 0, 0});
   const std::vector<std::int64_t> curve = buildPortfolioTotalPnlCurveE8(engines);
 
   return expect(curve.size() == 4u, "portfolio curve has one point per merged leg timestamp") &&
@@ -78,16 +70,12 @@ bool testPortfolioPnlCurveMergesLegEquityPoints() {
 }
 
 bool testPortfolioExcursionMetricsFallbackToEquityWhenRiskSnapshotsAreMixed() {
-  EngineState first{};
-  first.riskSnapshots.push_back(JsonRiskSnapshot{100, 0, 0, 0, 0, 100000000ll, 0, 100000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonStart});
-  first.equityPoints.push_back(JsonEquityPoint{100, 0, 100000000ll, 0, 0, 100000000ll, 100000000ll, 0, 100000000000ll, 0, 0});
-  first.equityPoints.push_back(JsonEquityPoint{300, 0, -200000000ll, 0, 0, -200000000ll, -200000000ll, 0, 100000000000ll, 0, 0});
-
-  EngineState second{};
-  second.equityPoints.push_back(JsonEquityPoint{200, 0, 250000000ll, 0, 0, 250000000ll, 250000000ll, 0, 100000000000ll, 0, 0});
-  second.equityPoints.push_back(JsonEquityPoint{400, 0, -50000000ll, 0, 0, -50000000ll, -50000000ll, 0, 100000000000ll, 0, 0});
-
-  const std::vector<EngineState> engines{first, second};
+  std::vector<EngineState> engines(2u);
+  engines[0].riskSnapshots.push_back(JsonRiskSnapshot{100, 0, 0, 0, 0, 100000000ll, 0, 100000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonStart});
+  engines[0].equityPoints.push_back(JsonEquityPoint{100, 0, 100000000ll, 0, 0, 100000000ll, 100000000ll, 0, 100000000000ll, 0, 0});
+  engines[0].equityPoints.push_back(JsonEquityPoint{300, 0, -200000000ll, 0, 0, -200000000ll, -200000000ll, 0, 100000000000ll, 0, 0});
+  engines[1].equityPoints.push_back(JsonEquityPoint{200, 0, 250000000ll, 0, 0, 250000000ll, 250000000ll, 0, 100000000000ll, 0, 0});
+  engines[1].equityPoints.push_back(JsonEquityPoint{400, 0, -50000000ll, 0, 0, -50000000ll, -50000000ll, 0, 100000000000ll, 0, 0});
   const BacktestExcursionMetrics metrics = calculatePortfolioExcursionMetrics(engines);
 
   return expect(metrics.mfeE8 == 350000000ll, "mixed risk snapshots fallback keeps both legs in MFE") &&
