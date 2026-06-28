@@ -92,34 +92,47 @@ void writeLeg1Session(const std::filesystem::path& dir) {
   writeText(dir / "jsonl" / "trades.jsonl", trades);
 }
 
+void writeConfigWithEdges(const std::filesystem::path& path,
+                          std::string_view entryEdgeBps,
+                          std::string_view exitEdgeBps) {
+  std::string text =
+      "[strategy]\n"
+      "type=stat_arb_edge_maker\n"
+      "enabled=1\n"
+      "ema_window_ms=1\n"
+      "entry_edge_bps=";
+  text.append(entryEdgeBps);
+  text +=
+      "\n"
+      "exit_edge_bps=";
+  text.append(exitEdgeBps);
+  text +=
+      "\n"
+      "trigger_edge_bps=0\n"
+      "ladder_step_bps=1\n"
+      "max_ladder_levels=3\n"
+      "order_qty=1\n"
+      "\n"
+      "[venue.binance_futures]\n"
+      "api_slot=1\n"
+      "market_enabled=true\n"
+      "user_enabled=true\n"
+      "order_enabled=true\n"
+      "control_enabled=true\n"
+      "symbols=BTCUSDT\n"
+      "\n"
+      "[venue.bybit_futures]\n"
+      "api_slot=1\n"
+      "market_enabled=true\n"
+      "user_enabled=true\n"
+      "order_enabled=true\n"
+      "control_enabled=true\n"
+      "symbols=BTCUSDT\n";
+  writeText(path, text);
+}
+
 void writeConfig(const std::filesystem::path& path) {
-  writeText(path,
-            "[strategy]\n"
-            "type=stat_arb_edge_maker\n"
-            "enabled=1\n"
-            "ema_window_ms=1\n"
-            "entry_edge_bps=0\n"
-            "exit_edge_bps=1000\n"
-            "trigger_edge_bps=0\n"
-            "ladder_step_bps=1\n"
-            "max_ladder_levels=3\n"
-            "order_qty=1\n"
-            "\n"
-            "[venue.binance_futures]\n"
-            "api_slot=1\n"
-            "market_enabled=true\n"
-            "user_enabled=true\n"
-            "order_enabled=true\n"
-            "control_enabled=true\n"
-            "symbols=BTCUSDT\n"
-            "\n"
-            "[venue.bybit_futures]\n"
-            "api_slot=1\n"
-            "market_enabled=true\n"
-            "user_enabled=true\n"
-            "order_enabled=true\n"
-            "control_enabled=true\n"
-            "symbols=BTCUSDT\n");
+  writeConfigWithEdges(path, "0", "1000");
 }
 
 hft_backtest::BacktestRunRequest makeReplayRequest(const std::filesystem::path& root,
@@ -222,11 +235,39 @@ bool testTwoPhaseReplayWarnsWhenPostHocRepriceLeavesExposureOpen() {
                 "two-phase result warns about post-hoc fill path invalidation");
 }
 
+bool testNegativeEntryExitEdgesReplayCompletes() {
+  const std::filesystem::path root = makeRoot();
+  const std::filesystem::path leg0 = root / "leg0";
+  const std::filesystem::path leg1 = root / "leg1";
+  writeLeg0Session(leg0);
+  writeLeg1Session(leg1);
+  writeConfigWithEdges(root / "stat_arb_edge_maker.ini", "-5", "-5");
+
+  hft_backtest::BacktestRunRequest request = makeReplayRequest(root,
+                                                               leg0,
+                                                               leg1,
+                                                               "stat-arb-edge-maker-negative-edges");
+
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+  if (!expect(result.status == hft_backtest::Status::Ok, "negative entry/exit edge replay completes")) {
+    std::cerr << "status=" << hft_backtest::statusToString(result.status)
+              << " error=" << result.error << "\n";
+    return false;
+  }
+
+  return expect(result.legs.size() == 2u, "negative edge replay returns two leg summaries") &&
+         expect(result.legs[0].openPositionQtyE8 == 0, "negative edge leg0 final exposure is closed") &&
+         expect(result.legs[1].openPositionQtyE8 == 0, "negative edge leg1 final exposure is closed") &&
+         expect(!result.liquidated, "negative edge replay does not liquidate") &&
+         expect(!result.riskStopped, "negative edge replay does not risk stop");
+}
+
 }  // namespace
 
 int main() {
   bool ok = true;
   ok = testBurstPartialMakerFillReplayKeepsPairExposureBounded() && ok;
   ok = testTwoPhaseReplayWarnsWhenPostHocRepriceLeavesExposureOpen() && ok;
+  ok = testNegativeEntryExitEdgesReplayCompletes() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

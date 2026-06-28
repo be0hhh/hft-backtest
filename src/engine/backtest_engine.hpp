@@ -86,6 +86,7 @@ constexpr std::uint8_t kFillReasonAggressiveBook = 3u;
 constexpr std::uint8_t kFillReasonPassiveQueue = 4u;
 constexpr std::uint8_t kFillLiquidityMaker = 0u;
 constexpr std::uint8_t kFillLiquidityTaker = 1u;
+constexpr std::size_t kStrategyIndicatorFeatureCapacity = 10u;
 
 enum class PendingActionKind : std::uint8_t {
   OrderAck = 0,
@@ -236,6 +237,7 @@ struct JsonStrategyIndicatorPoint {
   std::uint8_t reasonRaw{0u};
   std::uint8_t decisionKind{0u};
   std::uint8_t sideRaw{0u};
+  std::array<std::int64_t, kStrategyIndicatorFeatureCapacity> featureRaw{};
 };
 
 struct JsonStrategyRangePoint {

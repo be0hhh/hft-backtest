@@ -2699,6 +2699,7 @@ bool testWriterCreatesV2RunDirectory() {
          expect(manifest.find("fill_reason,liquidity,order_qty_e8") != std::string::npos, "manifest declares extended fill metadata") &&
          expect(manifest.find("\"partial_unfilled\"") != std::string::npos, "manifest declares partial-unfilled order status") &&
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
+         expect(manifest.find("trend_fast_score") != std::string::npos, "manifest declares trend indicator components") &&
          expect(manifest.find("\"strategy_spread\": {") != std::string::npos, "manifest declares strategy spread stream") &&
          expect(manifest.find("\"warnings\": [{\"message\": \"partial depth replay: dropped 1 unpaired depth_tape rows; exact replay lost\"}]") != std::string::npos,
                 "manifest saves run warnings separately from errors") &&
@@ -2717,7 +2718,7 @@ bool testWriterCreatesV2RunDirectory() {
                 "fills stream appends execution metadata after legacy fields") &&
          expect(equity == "[150,0,0,0,0,0,0,0,100000000000,100000000,1]\n", "equity stream uses compact arrays") &&
          expect(risk == "[150,0,0,0,0,0,0,100000000000,100000000,10000000000,9900000000,10100000000,1,2]\n", "risk stream uses compact arrays") &&
-         expect(indicator == "[150,42,44,1,7,3,1]\n", "strategy indicator stream uses compact arrays") &&
+         expect(indicator == "[150,42,44,1,7,3,1,0,0,0,0,0,0]\n", "strategy indicator stream uses compact arrays") &&
          expect(spread == "[150,100000000,90000000,10000000,5000000,5000000,1,3,0]\n", "strategy spread stream uses compact arrays") &&
          expect(std::filesystem::exists(dir / "config.ini"), "writer copies run config into result directory") &&
          expect(!std::filesystem::exists(dir.parent_path() / "run-v2.summary.json"), "writer does not create legacy summary json");
@@ -2879,6 +2880,7 @@ bool testTrendProbeWritesTrendScoreIndicator() {
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
          expect(manifest.find("\"profile\": \"trend_score\"") != std::string::npos, "manifest carries trend score profile") &&
          expect(manifest.find("\"aux_label\": \"Raw\"") != std::string::npos, "manifest carries raw trend aux label") &&
+         expect(manifest.find("trend_fast_score") != std::string::npos, "manifest carries fast trend component") &&
          expect(!indicator.empty(), "trend score indicator rows are written") &&
          expect(lineCount(indicator) <= 650u, "trend score indicator is aggregated to one row per second") &&
          expect(lineCount(indicator) < result.inputCoverage.strategyCycles, "trend score indicator no longer mirrors every tick");
@@ -2891,12 +2893,14 @@ bool testVolatilityProbeWritesVolatilityIndicator() {
             "{\n"
             "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
             "  \"channels\": {\n"
-            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"}\n"
+            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
+            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"}\n"
             "  },\n"
             "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
             "}\n");
   writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
   std::string trades;
+  std::string bookticker;
   for (std::uint64_t second = 1u; second <= 700u; ++second) {
     const std::int64_t px = 10000000000ll + static_cast<std::int64_t>(second % 2u == 0u ? 30000000ll : -30000000ll);
     const std::int64_t nextPx = 10000000000ll + static_cast<std::int64_t>(second % 2u == 0u ? -30000000ll : 30000000ll);
@@ -2905,8 +2909,11 @@ bool testVolatilityProbeWritesVolatilityIndicator() {
               std::to_string(px) + ",0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n";
     trades += "[" + std::to_string(nextPx) + ",100000000,1," + std::to_string(ts + 1u) + ",1,1,1," +
               std::to_string(nextPx) + ",0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n";
+    bookticker += "[" + std::to_string(px - 1000000ll) + ",100000000," + std::to_string(px + 1000000ll) +
+                  ",100000000," + std::to_string(ts) + ",1,1]\n";
   }
   writeText(dir / "jsonl" / "trades.jsonl", trades);
+  writeText(dir / "jsonl" / "bookticker.jsonl", bookticker);
   writeText(dir / "volatility_probe.ini",
             "[strategy]\n"
             "type=volatility_probe\n"
@@ -2929,10 +2936,12 @@ bool testVolatilityProbeWritesVolatilityIndicator() {
   return expect(result.status == hft_backtest::Status::Ok, "volatility_probe backtest completes") &&
          expect(result.inputCoverage.strategyCycles > 0u, "volatility_probe was invoked") &&
          expect(result.inputCoverage.cyclesWithTrade > 0u, "volatility_probe sees trades") &&
+         expect(result.inputCoverage.cyclesWithBookTicker > 0u, "volatility_probe sees bookticker") &&
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares volatility indicator stream") &&
          expect(manifest.find("\"profile\": \"volatility_bps\"") != std::string::npos, "manifest carries volatility profile") &&
          expect(manifest.find("\"value_label\": \"EMA\"") != std::string::npos, "manifest carries volatility value label") &&
          expect(manifest.find("\"aux_label\": \"Sample\"") != std::string::npos, "manifest carries volatility aux label") &&
+         expect(manifest.find("volatility_quote_move_bps") != std::string::npos, "manifest carries quote volatility component") &&
          expect(!indicator.empty(), "volatility indicator rows are written") &&
          expect(lineCount(indicator) <= 700u, "volatility indicator is aggregated to one row per second") &&
          expect(lineCount(indicator) < result.inputCoverage.strategyCycles, "volatility indicator no longer mirrors every tick");
@@ -2996,6 +3005,7 @@ bool testToxicFlowProbeWritesDepthBackedIndicator() {
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares toxic flow indicator stream") &&
          expect(manifest.find("\"profile\": \"toxic_flow\"") != std::string::npos, "manifest carries toxic flow profile") &&
          expect(manifest.find("\"aux_label\": \"Raw\"") != std::string::npos, "manifest carries raw toxic aux label") &&
+         expect(manifest.find("toxic_imbalance_score") != std::string::npos, "manifest carries toxic imbalance component") &&
          expect(!indicator.empty(), "toxic flow indicator rows are written") &&
          expect(indicator.find("[") == 0u, "toxic flow indicator uses compact rows") &&
          expect(lineCount(indicator) <= 45u, "toxic flow indicator is aggregated to one row per second");

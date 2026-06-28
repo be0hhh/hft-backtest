@@ -26,8 +26,39 @@ constexpr const char* kFillsRowSchema =
 constexpr const char* kRateLimitUsageRowSchema =
     "[ts_ns,leg_index,min_remaining_pct_e4,remaining,limit,bucket_kind,interval_ns,exhausted]";
 
+constexpr const char* kStrategyIndicatorBaseRowSchema =
+    "[ts_ns,value_raw,aux_raw,event_code,reason_raw,decision_kind,side_raw]";
+constexpr const char* kTrendStrategyIndicatorRowSchema =
+    "[ts_ns,value_raw,aux_raw,event_code,reason_raw,decision_kind,side_raw,"
+    "trend_fast_score,trend_medium_score,trend_slow_score,trend_acceleration_score,"
+    "trend_confidence_pct,trend_normal_move_bps]";
+constexpr const char* kVolatilityStrategyIndicatorRowSchema =
+    "[ts_ns,value_raw,aux_raw,event_code,reason_raw,decision_kind,side_raw,"
+    "volatility_fast_bps,volatility_baseline_bps,volatility_shock_bps,"
+    "volatility_quote_move_bps,volatility_spread_bps,volatility_confidence_pct,"
+    "volatility_quote_confidence_pct]";
+constexpr const char* kToxicFlowStrategyIndicatorRowSchema =
+    "[ts_ns,value_raw,aux_raw,event_code,reason_raw,decision_kind,side_raw,"
+    "toxic_pressure_score,toxic_touch_score,toxic_follow_score,toxic_imbalance_score,"
+    "toxic_depth_drop_score,toxic_bid_depth_drop_score,toxic_ask_depth_drop_score,"
+    "toxic_buy_pressure_score,toxic_sell_pressure_score,toxic_confidence_pct]";
+
 constexpr std::int64_t kBpsE8Scale = 100000000ll;
 constexpr std::size_t kMaxDecisionDiagnostics = 8u;
+
+std::size_t strategyIndicatorFeatureCount(std::string_view profile) noexcept {
+  if (profile == "trend_score") return 6u;
+  if (profile == "volatility_bps") return 7u;
+  if (profile == "toxic_flow") return 10u;
+  return 0u;
+}
+
+const char* strategyIndicatorRowSchema(std::string_view profile) noexcept {
+  if (profile == "trend_score") return kTrendStrategyIndicatorRowSchema;
+  if (profile == "volatility_bps") return kVolatilityStrategyIndicatorRowSchema;
+  if (profile == "toxic_flow") return kToxicFlowStrategyIndicatorRowSchema;
+  return kStrategyIndicatorBaseRowSchema;
+}
 
 const char* resultStatusName(Status status) noexcept {
   switch (status) {
@@ -623,6 +654,7 @@ bool writeStrategyIndicator(const std::filesystem::path& path, const EngineState
   }
   std::ofstream out(path, std::ios::out | std::ios::trunc);
   if (!out.is_open()) return false;
+  const std::size_t featureCount = strategyIndicatorFeatureCount(engine.strategyIndicatorProfile);
   for (const JsonStrategyIndicatorPoint& row : engine.strategyIndicator) {
     out << '[' << row.tsNs
         << ',' << row.valueRaw
@@ -630,8 +662,11 @@ bool writeStrategyIndicator(const std::filesystem::path& path, const EngineState
         << ',' << static_cast<unsigned>(row.eventCode)
         << ',' << static_cast<unsigned>(row.reasonRaw)
         << ',' << static_cast<unsigned>(row.decisionKind)
-        << ',' << static_cast<unsigned>(row.sideRaw)
-        << "]\n";
+        << ',' << static_cast<unsigned>(row.sideRaw);
+    for (std::size_t i = 0u; i < featureCount && i < row.featureRaw.size(); ++i) {
+      out << ',' << row.featureRaw[i];
+    }
+    out << "]\n";
   }
   return out.good();
 }
@@ -913,7 +948,7 @@ bool writeManifest(const std::filesystem::path& path,
         << ", " << q << "value_label" << q << ": " << quote(engine.strategyIndicatorValueLabel)
         << ", " << q << "aux_label" << q << ": " << quote(engine.strategyIndicatorAuxLabel)
         << ", " << q << "unit" << q << ": " << quote(engine.strategyIndicatorUnit)
-        << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,value_raw,aux_raw,event_code,reason_raw,decision_kind,side_raw]" << q
+        << ", " << q << "row_schema" << q << ": " << q << strategyIndicatorRowSchema(engine.strategyIndicatorProfile) << q
         << ", " << q << "rows" << q << ": " << engine.strategyIndicator.size() << "}";
   }
   if (!engine.strategyRange.empty()) {

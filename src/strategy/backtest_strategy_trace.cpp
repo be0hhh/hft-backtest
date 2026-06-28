@@ -109,12 +109,35 @@ void appendStrategyIndicator(detail::EngineState& engine,
   if (engine.strategyIndicatorProfile == "trend_score") {
     row.valueRaw = static_cast<std::int64_t>(trace.trendScoreRaw);
     row.auxRaw = static_cast<std::int64_t>(trace.trendRawScore);
+    row.featureRaw[0] = static_cast<std::int64_t>(trace.trendFastScore);
+    row.featureRaw[1] = static_cast<std::int64_t>(trace.trendMediumScore);
+    row.featureRaw[2] = static_cast<std::int64_t>(trace.trendSlowScore);
+    row.featureRaw[3] = static_cast<std::int64_t>(trace.trendAccelerationScore);
+    row.featureRaw[4] = static_cast<std::int64_t>(trace.trendConfidencePct);
+    row.featureRaw[5] = static_cast<std::int64_t>(trace.trendNormalMoveBps);
   } else if (engine.strategyIndicatorProfile == "toxic_flow") {
     row.valueRaw = static_cast<std::int64_t>(trace.toxicFlowScoreRaw);
     row.auxRaw = static_cast<std::int64_t>(trace.toxicFlowRawScore);
+    row.featureRaw[0] = static_cast<std::int64_t>(trace.toxicFlowPressureScore);
+    row.featureRaw[1] = static_cast<std::int64_t>(trace.toxicFlowTouchScore);
+    row.featureRaw[2] = static_cast<std::int64_t>(trace.toxicFlowFollowScore);
+    row.featureRaw[3] = static_cast<std::int64_t>(trace.toxicFlowImbalanceScore);
+    row.featureRaw[4] = static_cast<std::int64_t>(trace.toxicFlowDepthDropScore);
+    row.featureRaw[5] = static_cast<std::int64_t>(trace.toxicFlowBidDepthDropScore);
+    row.featureRaw[6] = static_cast<std::int64_t>(trace.toxicFlowAskDepthDropScore);
+    row.featureRaw[7] = static_cast<std::int64_t>(trace.toxicFlowBuyPressureScore);
+    row.featureRaw[8] = static_cast<std::int64_t>(trace.toxicFlowSellPressureScore);
+    row.featureRaw[9] = static_cast<std::int64_t>(trace.toxicFlowConfidencePct);
   } else if (engine.strategyIndicatorProfile == "volatility_bps") {
     row.valueRaw = static_cast<std::int64_t>(trace.volatilityBps);
     row.auxRaw = static_cast<std::int64_t>(trace.volatilitySampleBps);
+    row.featureRaw[0] = static_cast<std::int64_t>(trace.volatilityFastBps);
+    row.featureRaw[1] = static_cast<std::int64_t>(trace.volatilityBaselineBps);
+    row.featureRaw[2] = static_cast<std::int64_t>(trace.volatilityShockBps);
+    row.featureRaw[3] = static_cast<std::int64_t>(trace.volatilityQuoteMoveBps);
+    row.featureRaw[4] = static_cast<std::int64_t>(trace.volatilitySpreadBps);
+    row.featureRaw[5] = static_cast<std::int64_t>(trace.volatilityConfidencePct);
+    row.featureRaw[6] = static_cast<std::int64_t>(trace.volatilityQuoteConfidencePct);
   }
   row.eventCode = indicatorEventCode(trace);
   row.reasonRaw = trace.reasonRaw;
