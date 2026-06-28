@@ -26,6 +26,10 @@ void initializeAccounting(EngineState& engine, const BacktestRunRequest& request
   engine.walletBalanceE8 = request.initialBalanceE8;
   engine.makerFeeBpsE8 = request.makerFeeBpsE8;
   engine.takerFeeBpsE8 = request.takerFeeBpsE8;
+  engine.position.netQty.raw = engine.netQtyRaw;
+  engine.position.entryPrice.raw = engine.entryPriceE8;
+  engine.position.unrealizedPnl.raw = 0;
+  engine.position.valid = true;
   bumpContextRevision(engine);
 }
 

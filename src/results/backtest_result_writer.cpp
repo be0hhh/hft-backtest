@@ -1,7 +1,13 @@
 #include "engine/backtest_engine.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
+#include <limits>
+#include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -20,12 +26,350 @@ constexpr const char* kFillsRowSchema =
 constexpr const char* kRateLimitUsageRowSchema =
     "[ts_ns,leg_index,min_remaining_pct_e4,remaining,limit,bucket_kind,interval_ns,exhausted]";
 
+constexpr std::int64_t kBpsE8Scale = 100000000ll;
+constexpr std::size_t kMaxDecisionDiagnostics = 8u;
+
 const char* resultStatusName(Status status) noexcept {
   switch (status) {
     case Status::Ok: return "complete";
     case Status::Cancelled: return "cancelled";
     default: return "error";
   }
+}
+
+std::string_view trim(std::string_view value) noexcept {
+  while (!value.empty() && (value.front() == ' ' || value.front() == '\t' || value.front() == '\r' || value.front() == '\n')) {
+    value.remove_prefix(1u);
+  }
+  while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\r' || value.back() == '\n')) {
+    value.remove_suffix(1u);
+  }
+  return value;
+}
+
+std::string_view stripIniComment(std::string_view value) noexcept {
+  const std::size_t hash = value.find('#');
+  const std::size_t semicolon = value.find(';');
+  std::size_t cut = std::string_view::npos;
+  if (hash != std::string_view::npos) cut = hash;
+  if (semicolon != std::string_view::npos && (cut == std::string_view::npos || semicolon < cut)) cut = semicolon;
+  if (cut != std::string_view::npos) value = value.substr(0u, cut);
+  return trim(value);
+}
+
+bool parseDecimalBpsE8(std::string_view value, std::int64_t& out) noexcept {
+  value = stripIniComment(value);
+  if (value.empty()) return false;
+  bool negative = false;
+  if (value.front() == '+' || value.front() == '-') {
+    negative = value.front() == '-';
+    value.remove_prefix(1u);
+  }
+  if (value.empty()) return false;
+
+  std::int64_t whole = 0;
+  std::int64_t fraction = 0;
+  std::int64_t fractionScale = kBpsE8Scale / 10;
+  bool sawDigit = false;
+  bool fractional = false;
+  for (const char ch : value) {
+    if (ch == '.') {
+      if (fractional) return false;
+      fractional = true;
+      continue;
+    }
+    if (ch < '0' || ch > '9') return false;
+    sawDigit = true;
+    const std::int64_t digit = static_cast<std::int64_t>(ch - '0');
+    if (fractional) {
+      if (fractionScale > 0) {
+        fraction += digit * fractionScale;
+        fractionScale /= 10;
+      }
+    } else {
+      if (whole > (std::numeric_limits<std::int64_t>::max() / 10)) return false;
+      whole = whole * 10 + digit;
+    }
+  }
+  if (!sawDigit || whole > (std::numeric_limits<std::int64_t>::max() / kBpsE8Scale)) return false;
+  out = whole * kBpsE8Scale + fraction;
+  if (negative) out = -out;
+  return true;
+}
+
+bool readConfigBpsE8(const std::filesystem::path& path,
+                     std::string_view key,
+                     std::int64_t& out) noexcept {
+  if (path.empty()) return false;
+  std::ifstream input(path);
+  if (!input.is_open()) return false;
+  std::string line;
+  while (std::getline(input, line)) {
+    std::string_view view = trim(line);
+    if (view.empty() || view.front() == '#' || view.front() == ';' || view.front() == '[') continue;
+    const std::size_t equals = view.find('=');
+    if (equals == std::string_view::npos) continue;
+    const std::string_view lineKey = trim(view.substr(0u, equals));
+    if (lineKey != key) continue;
+    return parseDecimalBpsE8(view.substr(equals + 1u), out);
+  }
+  return false;
+}
+
+struct DecisionCount {
+  std::uint8_t decisionKind{0u};
+  std::uint8_t reasonRaw{0u};
+  std::uint64_t count{0u};
+};
+
+struct SignalDiagnostics {
+  std::uint64_t strategySpreadRows{0u};
+  std::int64_t minEdgeAfterCostBpsE8{0};
+  std::int64_t maxEdgeAfterCostBpsE8{0};
+  std::int64_t maxAbsDeviationBpsE8{0};
+  std::int64_t entryEdgeBpsE8{0};
+  bool hasEntryEdgeBps{false};
+  std::vector<DecisionCount> decisionCounts{};
+};
+
+struct ExecutionDiagnostics {
+  std::uint64_t orderCommands{0u};
+  std::uint64_t cancelCommands{0u};
+  std::uint64_t postOnlyOrders{0u};
+  std::uint64_t serviceOrders{0u};
+  std::uint64_t warmupOrders{0u};
+  std::array<std::uint64_t, 8> statusCounts{};
+  std::array<std::uint64_t, 4> typeCounts{};
+  std::array<std::uint64_t, 5> fillReasonCounts{};
+  std::array<std::uint64_t, 2> fillLiquidityCounts{};
+};
+
+struct RateLimitDiagnostics {
+  std::uint64_t rejectedOrders{0u};
+  std::uint64_t rejectedCancels{0u};
+  std::uint64_t usageRows{0u};
+  std::uint64_t exhaustedRows{0u};
+  std::int64_t firstRejectTsNs{0};
+  std::int64_t lastRejectTsNs{0};
+};
+
+std::int64_t absI64(std::int64_t value) noexcept {
+  if (value >= 0) return value;
+  if (value == std::numeric_limits<std::int64_t>::min()) return std::numeric_limits<std::int64_t>::max();
+  return -value;
+}
+
+SignalDiagnostics collectSignalDiagnostics(const EngineState& engine,
+                                           const std::filesystem::path& configPath) {
+  SignalDiagnostics out{};
+  out.strategySpreadRows = engine.strategySpread.size();
+  absl::flat_hash_map<std::uint16_t, std::uint64_t> decisionCounts;
+  decisionCounts.reserve(engine.strategySpread.size() > 0u ? 16u : 0u);
+  bool haveEdge = false;
+  for (const JsonStrategySpreadPoint& row : engine.strategySpread) {
+    if (!haveEdge) {
+      out.minEdgeAfterCostBpsE8 = row.edgeAfterCostBpsE8;
+      out.maxEdgeAfterCostBpsE8 = row.edgeAfterCostBpsE8;
+      haveEdge = true;
+    } else {
+      out.minEdgeAfterCostBpsE8 = std::min(out.minEdgeAfterCostBpsE8, row.edgeAfterCostBpsE8);
+      out.maxEdgeAfterCostBpsE8 = std::max(out.maxEdgeAfterCostBpsE8, row.edgeAfterCostBpsE8);
+    }
+    out.maxAbsDeviationBpsE8 = std::max(out.maxAbsDeviationBpsE8, absI64(row.deviationBpsE8));
+    const std::uint16_t key = static_cast<std::uint16_t>((static_cast<std::uint16_t>(row.decisionKind) << 8u) |
+                                                         static_cast<std::uint16_t>(row.reasonRaw));
+    ++decisionCounts[key];
+  }
+  out.decisionCounts.reserve(decisionCounts.size());
+  for (const auto& entry : decisionCounts) {
+    out.decisionCounts.push_back(DecisionCount{
+        static_cast<std::uint8_t>((entry.first >> 8u) & 0xffu),
+        static_cast<std::uint8_t>(entry.first & 0xffu),
+        entry.second,
+    });
+  }
+  std::stable_sort(out.decisionCounts.begin(), out.decisionCounts.end(), [](const DecisionCount& lhs, const DecisionCount& rhs) noexcept {
+    if (lhs.count != rhs.count) return lhs.count > rhs.count;
+    if (lhs.decisionKind != rhs.decisionKind) return lhs.decisionKind < rhs.decisionKind;
+    return lhs.reasonRaw < rhs.reasonRaw;
+  });
+  if (out.decisionCounts.size() > kMaxDecisionDiagnostics) out.decisionCounts.resize(kMaxDecisionDiagnostics);
+  out.hasEntryEdgeBps = readConfigBpsE8(configPath, "entry_edge_bps", out.entryEdgeBpsE8);
+  return out;
+}
+
+ExecutionDiagnostics collectExecutionDiagnostics(const EngineState& engine) noexcept {
+  ExecutionDiagnostics out{};
+  for (const JsonOrder& order : engine.orders) {
+    if (order.action == kRecordActionOrder) ++out.orderCommands;
+    else if (order.action == kRecordActionCancel) ++out.cancelCommands;
+    if (order.postOnly && order.action == kRecordActionOrder) ++out.postOnlyOrders;
+    if (order.service) ++out.serviceOrders;
+    if (order.warmup) ++out.warmupOrders;
+    if (order.status < out.statusCounts.size()) ++out.statusCounts[order.status];
+    if (order.type < out.typeCounts.size()) ++out.typeCounts[order.type];
+  }
+  for (const JsonFill& fill : engine.fills) {
+    if (fill.fillReason < out.fillReasonCounts.size()) ++out.fillReasonCounts[fill.fillReason];
+    if (fill.liquidity < out.fillLiquidityCounts.size()) ++out.fillLiquidityCounts[fill.liquidity];
+  }
+  return out;
+}
+
+void mergeRateLimitRejects(RateLimitDiagnostics& out, const EngineState& engine) noexcept {
+  out.rejectedOrders += engine.rateLimitRejectedOrders;
+  out.rejectedCancels += engine.rateLimitRejectedCancels;
+  if (engine.firstRateLimitRejectTsNs > 0 &&
+      (out.firstRejectTsNs == 0 || engine.firstRateLimitRejectTsNs < out.firstRejectTsNs)) {
+    out.firstRejectTsNs = engine.firstRateLimitRejectTsNs;
+  }
+  if (engine.lastRateLimitRejectTsNs > out.lastRejectTsNs) out.lastRejectTsNs = engine.lastRateLimitRejectTsNs;
+}
+
+RateLimitDiagnostics collectRateLimitDiagnostics(const EngineState& engine,
+                                                 const std::vector<EngineState>* legEngines) noexcept {
+  RateLimitDiagnostics out{};
+  if (legEngines != nullptr) {
+    for (const EngineState& legEngine : *legEngines) mergeRateLimitRejects(out, legEngine);
+  } else {
+    mergeRateLimitRejects(out, engine);
+  }
+  out.usageRows = engine.rateLimitUsage.size();
+  for (const JsonRateLimitUsagePoint& row : engine.rateLimitUsage) {
+    if (row.exhausted) ++out.exhaustedRows;
+  }
+  return out;
+}
+
+std::uint64_t rejectedCommandCount(const RateLimitDiagnostics& rateLimits) noexcept {
+  return rateLimits.rejectedOrders + rateLimits.rejectedCancels;
+}
+
+std::string zeroActivityReason(const BacktestRunResult& result,
+                               const SignalDiagnostics& signal,
+                               const RateLimitDiagnostics& rateLimits) {
+  if (result.fills > 0u) return "fills_present";
+  if (result.orders == 0u) {
+    if (signal.strategySpreadRows > 0u &&
+        signal.hasEntryEdgeBps &&
+        signal.maxEdgeAfterCostBpsE8 < signal.entryEdgeBpsE8) {
+      return "no_signal_below_threshold";
+    }
+    if (signal.strategySpreadRows > 0u) return "no_orders_from_strategy";
+    return result.events == 0u ? "no_replay_events" : "no_orders";
+  }
+  if (rejectedCommandCount(rateLimits) > 0u) return "orders_without_fills_rate_limited";
+  return "orders_without_fills";
+}
+
+void writeDecisionCounts(std::ostream& out, const std::vector<DecisionCount>& counts) {
+  out << '[';
+  for (std::size_t i = 0u; i < counts.size(); ++i) {
+    const DecisionCount& row = counts[i];
+    if (i != 0u) out << ", ";
+    out << "{\"decision_kind\": " << static_cast<unsigned>(row.decisionKind)
+        << ", \"reason_raw\": " << static_cast<unsigned>(row.reasonRaw)
+        << ", \"count\": " << row.count << '}';
+  }
+  out << ']';
+}
+
+void writeDiagnosticsObject(std::ostream& out,
+                            const BacktestRunResult& result,
+                            const EngineState& engine,
+                            const std::vector<EngineState>* legEngines,
+                            std::size_t orderLifetimeRows,
+                            const char* indent) {
+  const SignalDiagnostics signal = collectSignalDiagnostics(engine, result.configPath);
+  const ExecutionDiagnostics execution = collectExecutionDiagnostics(engine);
+  const RateLimitDiagnostics rateLimits = collectRateLimitDiagnostics(engine, legEngines);
+  const std::string reason = zeroActivityReason(result, signal, rateLimits);
+  const char q = '"';
+  out << indent << q << "diagnostics" << q << ": {\n";
+  out << indent << "  " << q << "version" << q << ": 1,\n";
+  out << indent << "  " << q << "zero_activity_reason" << q << ": " << quote(reason) << ",\n";
+  out << indent << "  " << q << "activity" << q << ": {"
+      << q << "events" << q << ": " << result.events
+      << ", " << q << "orders" << q << ": " << result.orders
+      << ", " << q << "fills" << q << ": " << result.fills
+      << ", " << q << "order_lifetime_rows" << q << ": " << orderLifetimeRows
+      << ", " << q << "strategy_spread_rows" << q << ": " << signal.strategySpreadRows
+      << ", " << q << "rate_limit_usage_rows" << q << ": " << rateLimits.usageRows
+      << "},\n";
+  out << indent << "  " << q << "signal" << q << ": {"
+      << q << "strategy_spread_rows" << q << ": " << signal.strategySpreadRows
+      << ", " << q << "min_edge_after_cost_bps_e8" << q << ": " << signal.minEdgeAfterCostBpsE8
+      << ", " << q << "max_edge_after_cost_bps_e8" << q << ": " << signal.maxEdgeAfterCostBpsE8
+      << ", " << q << "max_abs_deviation_bps_e8" << q << ": " << signal.maxAbsDeviationBpsE8
+      << ", " << q << "entry_edge_bps_e8" << q << ": ";
+  if (signal.hasEntryEdgeBps) out << signal.entryEdgeBpsE8;
+  else out << "null";
+  out << ", " << q << "threshold_source" << q << ": " << q
+      << (signal.hasEntryEdgeBps ? "config.entry_edge_bps" : "none") << q
+      << ", " << q << "decision_counts" << q << ": ";
+  writeDecisionCounts(out, signal.decisionCounts);
+  out << "},\n";
+  out << indent << "  " << q << "execution" << q << ": {"
+      << q << "order_commands" << q << ": " << execution.orderCommands
+      << ", " << q << "cancel_commands" << q << ": " << execution.cancelCommands
+      << ", " << q << "post_only_orders" << q << ": " << execution.postOnlyOrders
+      << ", " << q << "service_orders" << q << ": " << execution.serviceOrders
+      << ", " << q << "warmup_orders" << q << ": " << execution.warmupOrders
+      << ", " << q << "order_status" << q << ": {"
+      << q << "none" << q << ": " << execution.statusCounts[kRecordStatusNone]
+      << ", " << q << "pending" << q << ": " << execution.statusCounts[kRecordStatusPending]
+      << ", " << q << "acked" << q << ": " << execution.statusCounts[kRecordStatusAcked]
+      << ", " << q << "filled" << q << ": " << execution.statusCounts[kRecordStatusFilled]
+      << ", " << q << "cancelled" << q << ": " << execution.statusCounts[kRecordStatusCancelled]
+      << ", " << q << "missing" << q << ": " << execution.statusCounts[kRecordStatusMissing]
+      << ", " << q << "rejected" << q << ": " << execution.statusCounts[kRecordStatusRejected]
+      << ", " << q << "partial_unfilled" << q << ": " << execution.statusCounts[kRecordStatusPartialUnfilled]
+      << "}, " << q << "order_types" << q << ": {"
+      << q << "none" << q << ": " << execution.typeCounts[kRecordTypeNone]
+      << ", " << q << "limit" << q << ": " << execution.typeCounts[kRecordTypeLimit]
+      << ", " << q << "market" << q << ": " << execution.typeCounts[kRecordTypeMarket]
+      << ", " << q << "stop_market" << q << ": " << execution.typeCounts[kRecordTypeStopMarket]
+      << "}, " << q << "fills_by_reason" << q << ": {"
+      << q << "unknown" << q << ": " << execution.fillReasonCounts[kFillReasonUnknown]
+      << ", " << q << "top" << q << ": " << execution.fillReasonCounts[kFillReasonTop]
+      << ", " << q << "trade" << q << ": " << execution.fillReasonCounts[kFillReasonTrade]
+      << ", " << q << "aggressive_book" << q << ": " << execution.fillReasonCounts[kFillReasonAggressiveBook]
+      << ", " << q << "passive_queue" << q << ": " << execution.fillReasonCounts[kFillReasonPassiveQueue]
+      << "}, " << q << "fills_by_liquidity" << q << ": {"
+      << q << "maker" << q << ": " << execution.fillLiquidityCounts[kFillLiquidityMaker]
+      << ", " << q << "taker" << q << ": " << execution.fillLiquidityCounts[kFillLiquidityTaker]
+      << "}},\n";
+  out << indent << "  " << q << "rate_limits" << q << ": {"
+      << q << "rate_limit_rejected_orders" << q << ": " << rateLimits.rejectedOrders
+      << ", " << q << "rate_limit_rejected_cancels" << q << ": " << rateLimits.rejectedCancels
+      << ", " << q << "rate_limit_rejected_commands" << q << ": " << rejectedCommandCount(rateLimits)
+      << ", " << q << "first_reject_ts_ns" << q << ": " << rateLimits.firstRejectTsNs
+      << ", " << q << "last_reject_ts_ns" << q << ": " << rateLimits.lastRejectTsNs
+      << ", " << q << "usage_rows" << q << ": " << rateLimits.usageRows
+      << ", " << q << "exhausted_rows" << q << ": " << rateLimits.exhaustedRows
+      << "},\n";
+  out << indent << "  " << q << "diagnostic_notes" << q << ": [";
+  bool firstNote = true;
+  auto appendNote = [&](std::string_view message) {
+    if (!firstNote) out << ", ";
+    firstNote = false;
+    out << '{' << q << "message" << q << ": " << quote(message) << '}';
+  };
+  if (reason == "no_signal_below_threshold") {
+    appendNote("max edge_after_cost_bps_e8 is below configured entry_edge_bps; zero orders are expected for these parameters");
+  } else if (reason == "orders_without_fills" || reason == "orders_without_fills_rate_limited") {
+    appendNote("orders were placed but no fills were produced by the strict inline fill model");
+    appendNote("passive maker fills require a later opposite-side trade crossing the resting limit price");
+  } else if (reason == "no_orders_from_strategy") {
+    appendNote("strategy emitted spread diagnostics but did not submit order intents");
+  } else if (reason == "no_orders") {
+    appendNote("replay had events but produced no order records");
+  }
+  if (rejectedCommandCount(rateLimits) > 0u) {
+    appendNote("rate-limit rejects were recorded; inspect rate_limit_usage and strategy decision counts before changing fill policy");
+  }
+  out << "]\n";
+  out << indent << '}';
 }
 
 bool writeFills(const std::filesystem::path& path, const EngineState& engine) noexcept {
@@ -613,6 +957,8 @@ bool writeManifest(const std::filesystem::path& path,
   out << "  " << q << "summary" << q << ": {\n";
   writeSummaryObject(out, result, engine, "    ");
   out << "  }";
+  out << ",\n";
+  writeDiagnosticsObject(out, result, engine, legEngines, orderLifetimeRows, "  ");
   if (!result.legs.empty()) {
     out << ",\n";
     writeLegsArray(out, result, "  ");

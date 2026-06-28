@@ -2723,6 +2723,100 @@ bool testWriterCreatesV2RunDirectory() {
          expect(!std::filesystem::exists(dir.parent_path() / "run-v2.summary.json"), "writer does not create legacy summary json");
 }
 
+bool testWriterDiagnosesNoSignalBelowThreshold() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_diagnostics_no_signal_" + std::to_string(std::rand()));
+  hft_backtest::BacktestRunResult result{};
+  result.status = hft_backtest::Status::Ok;
+  result.requestId = "run-no-signal";
+  result.runId = "run-no-signal";
+  result.strategy = "stat_arb_band_ladder";
+  result.sessionPath = dir.parent_path() / "session";
+  result.configPath = dir / "source_config.ini";
+  result.resultPath = dir;
+  result.events = 4;
+  result.trades = 2;
+  result.bookTickers = 2;
+  result.orders = 0;
+  result.fills = 0;
+
+  std::filesystem::create_directories(dir);
+  {
+    std::ofstream config(result.configPath, std::ios::out | std::ios::trunc);
+    config << "[strategy]\n"
+           << "type=stat_arb_band_ladder\n"
+           << "entry_edge_bps=50\n";
+  }
+
+  EngineState engine{};
+  engine.strategySpread.push_back(JsonStrategySpreadPoint{100, 0, 0, 4000000000ll, 100000000ll, 3900000000ll, 1, 1, 10});
+  engine.strategySpread.push_back(JsonStrategySpreadPoint{200, 0, 0, 4900000000ll, 86203413ll, 4813596587ll, 1, 1, 10});
+  engine.equityPoints.push_back(JsonEquityPoint{200, 0, 0, 0, 0, 0, 0, 0, 10000000000ll, 0, 0});
+  engine.riskSnapshots.push_back(JsonRiskSnapshot{200, 0, 0, 0, 0, 0, 0, 10000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonFinal});
+
+  const hft_backtest::Status status = writeResult(result, engine);
+  const std::string manifest = readText(dir / "manifest.json");
+
+  return expect(status == hft_backtest::Status::Ok, "diagnostic no-signal writer reports ok") &&
+         expect(manifest.find("\"diagnostics\": {") != std::string::npos, "manifest writes diagnostics object") &&
+         expect(manifest.find("\"zero_activity_reason\": \"no_signal_below_threshold\"") != std::string::npos,
+                "diagnostics classifies no-signal threshold miss") &&
+         expect(manifest.find("\"entry_edge_bps_e8\": 5000000000") != std::string::npos,
+                "diagnostics captures configured entry edge threshold") &&
+         expect(manifest.find("\"max_edge_after_cost_bps_e8\": 4813596587") != std::string::npos,
+                "diagnostics captures max edge after cost") &&
+         expect(manifest.find("{\"decision_kind\": 1, \"reason_raw\": 10, \"count\": 2}") != std::string::npos,
+                "diagnostics summarizes strategy spread decision reasons");
+}
+
+bool testWriterDiagnosesOrdersWithoutFillsAndRateLimits() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_diagnostics_no_fills_" + std::to_string(std::rand()));
+  hft_backtest::BacktestRunResult result{};
+  result.status = hft_backtest::Status::Ok;
+  result.requestId = "run-no-fills";
+  result.runId = "run-no-fills";
+  result.strategy = "stat_arb_edge_maker";
+  result.sessionPath = dir.parent_path() / "session";
+  result.configPath = dir / "source_config.ini";
+  result.resultPath = dir;
+  result.events = 4;
+  result.trades = 2;
+  result.bookTickers = 2;
+
+  std::filesystem::create_directories(dir);
+  {
+    std::ofstream config(result.configPath, std::ios::out | std::ios::trunc);
+    config << "[strategy]\n"
+           << "type=stat_arb_edge_maker\n"
+           << "entry_edge_bps=50\n";
+  }
+
+  EngineState engine{};
+  engine.orders.push_back(JsonOrder{0, 1, 0, 100, 110, 100, kRecordActionOrder, kRecordSideBuy, kRecordTypeLimit, kRecordStatusCancelled, kPx100 - 200000000ll, kQty1, false, true});
+  engine.orders.push_back(JsonOrder{0, 2, 0, 120, 130, 120, kRecordActionOrder, kRecordSideSell, kRecordTypeLimit, kRecordStatusRejected, kPx100 + 200000000ll, kQty1, false, true});
+  engine.rateLimitRejectedOrders = 1;
+  engine.firstRateLimitRejectTsNs = 120;
+  engine.lastRateLimitRejectTsNs = 120;
+  engine.equityPoints.push_back(JsonEquityPoint{200, 0, 0, 0, 0, 0, 0, 0, 10000000000ll, 0, 0});
+  engine.riskSnapshots.push_back(JsonRiskSnapshot{200, 0, 0, 0, 0, 0, 0, 10000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonFinal});
+  result.orders = engine.orders.size();
+  result.fills = engine.fills.size();
+
+  const hft_backtest::Status status = writeResult(result, engine);
+  const std::string manifest = readText(dir / "manifest.json");
+
+  return expect(status == hft_backtest::Status::Ok, "diagnostic no-fill writer reports ok") &&
+         expect(manifest.find("\"zero_activity_reason\": \"orders_without_fills_rate_limited\"") != std::string::npos,
+                "diagnostics classifies orders without fills plus rate-limit rejects") &&
+         expect(manifest.find("\"rate_limit_rejected_orders\": 1") != std::string::npos,
+                "diagnostics captures rejected order count") &&
+         expect(manifest.find("\"post_only_orders\": 2") != std::string::npos,
+                "diagnostics counts post-only orders") &&
+         expect(manifest.find("\"rejected\": 1") != std::string::npos,
+                "diagnostics counts rejected order status");
+}
+
 bool testTrendProbeWritesTrendScoreIndicator() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_trend_probe_" + std::to_string(std::rand()));
@@ -3199,6 +3293,8 @@ int main() {
   ok = testDepthRowBuildsInitialOrderBookSnapshot() && ok;
   ok = testTieredCandleHistoryBuildsCounts() && ok;
   ok = testWriterCreatesV2RunDirectory() && ok;
+  ok = testWriterDiagnosesNoSignalBelowThreshold() && ok;
+  ok = testWriterDiagnosesOrdersWithoutFillsAndRateLimits() && ok;
   ok = testTrendProbeWritesTrendScoreIndicator() && ok;
   ok = testVolatilityProbeWritesVolatilityIndicator() && ok;
   ok = testToxicFlowProbeWritesDepthBackedIndicator() && ok;

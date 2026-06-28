@@ -724,7 +724,7 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
     if (captureRangeTrace) appendStrategyRange(engine, tsNs, trace);
     if (captureSpreadTrace) appendStrategySpread(engine, tsNs, trace);
   }
-  if (!ok && captureSpreadTrace) return false;
+  if (!ok) return false;
   detail::applyIntents(engine, ctx.io, tsNs, engine.latency);
   return true;
 }
@@ -871,7 +871,7 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
     if (captureRangeTrace) appendStrategyRange(engines[0], tsNs, trace);
     if (captureSpreadTrace) appendStrategySpread(engines[0], tsNs, trace);
   }
-  if (!ok && captureSpreadTrace) return false;
+  if (!ok) return false;
   applyIntentsToLegs(engines, ctx.io, tsNs);
   return true;
 }
