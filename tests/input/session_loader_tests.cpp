@@ -121,6 +121,37 @@ bool testLoadSessionReadsOptionalReferenceStreams() {
          expect(data.lastTsNs == 2300, "reference stream last timestamp tracked");
 }
 
+bool testLoadSessionCarriesCaptureWarningsFromManifest() {
+  const std::filesystem::path dir = makeSessionDir("capture_warning");
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"bitget\", \"market\": \"futures\", \"symbols\": [\"AGLDUSDT\"]},\n"
+            "  \"integrity\": {\"session_health\": \"degraded\"},\n"
+            "  \"channels\": {\n"
+            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"}\n"
+            "  },\n"
+            "  \"summary\": {\"warning_summary\": \"reference: route status=disconnected stream=mark_price symbol=AGLDUSDT\"}\n"
+            "}\n");
+  writeText(dir / "jsonl" / "bookticker.jsonl",
+            "[21870000,60640000000,21900000,122950000000,1782577492350000000]\n");
+
+  hft_backtest::detail::SessionData data{};
+  hft_backtest::detail::SessionLoadPlan plan{};
+  plan.loadTrades = false;
+  plan.loadBookTickers = true;
+  plan.loadDepths = false;
+  std::string error{};
+
+  const hft_backtest::Status status = hft_backtest::detail::loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::Ok, "session with capture warning loads") &&
+         expect(data.bookTickers.size() == 1u, "bookticker still usable with capture warning") &&
+         expect(data.warnings.size() == 2u, "capture health and warning propagated") &&
+         expect(data.warnings[0] == "capture health: degraded", "capture health warning propagated") &&
+         expect(data.warnings[1] == "capture warning: reference: route status=disconnected stream=mark_price symbol=AGLDUSDT",
+                "capture warning summary propagated");
+}
+
 bool testLoadSessionReadsCanonicalPriceLimitRows() {
   const std::filesystem::path dir = makeSessionDir("canonical_price_limit");
   writeText(dir / "manifest.json",
@@ -384,6 +415,7 @@ int main() {
   bool ok = true;
   ok = testLoadSessionParsesInstrumentPriceBasis() && ok;
   ok = testLoadSessionReadsOptionalReferenceStreams() && ok;
+  ok = testLoadSessionCarriesCaptureWarningsFromManifest() && ok;
   ok = testLoadSessionReadsCanonicalPriceLimitRows() && ok;
   ok = testLoadSessionParsesCrLfAndFinalLineWithoutNewline() && ok;
   ok = testLoadSessionRejectsI64Overflow() && ok;

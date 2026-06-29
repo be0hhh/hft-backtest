@@ -706,7 +706,13 @@ void consumeTradeForPhase2Order(EngineState& engine,
   const std::int64_t executableQty = trade.qtyE8 - state.queueAheadE8;
   state.queueAheadE8 = 0;
   const std::int64_t fillQty = executableQty < state.remainingQty() ? executableQty : state.remainingQty();
-  appendPhase2MakerFill(engine, state, trade, fillQty, queueAheadBefore, state.queueAheadE8, stats);
+  appendPhase2MakerFill(engine,
+                        state,
+                        trade,
+                        fillQty,
+                        queueAheadBefore,
+                        state.queueAheadE8,
+                        stats);
 }
 
 void finishPhase2OrderStatuses(std::vector<Phase2LimitOrderState>& states) noexcept {

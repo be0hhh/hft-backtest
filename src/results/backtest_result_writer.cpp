@@ -171,7 +171,7 @@ struct ExecutionDiagnostics {
   std::uint64_t warmupOrders{0u};
   std::array<std::uint64_t, 8> statusCounts{};
   std::array<std::uint64_t, 4> typeCounts{};
-  std::array<std::uint64_t, 5> fillReasonCounts{};
+  std::array<std::uint64_t, kFillReasonCount> fillReasonCounts{};
   std::array<std::uint64_t, 2> fillLiquidityCounts{};
 };
 
@@ -366,6 +366,7 @@ void writeDiagnosticsObject(std::ostream& out,
       << ", " << q << "trade" << q << ": " << execution.fillReasonCounts[kFillReasonTrade]
       << ", " << q << "aggressive_book" << q << ": " << execution.fillReasonCounts[kFillReasonAggressiveBook]
       << ", " << q << "passive_queue" << q << ": " << execution.fillReasonCounts[kFillReasonPassiveQueue]
+      << ", " << q << "passive_bbo_touch" << q << ": " << execution.fillReasonCounts[kFillReasonPassiveBboTouch]
       << "}, " << q << "fills_by_liquidity" << q << ": {"
       << q << "maker" << q << ": " << execution.fillLiquidityCounts[kFillLiquidityMaker]
       << ", " << q << "taker" << q << ": " << execution.fillLiquidityCounts[kFillLiquidityTaker]
@@ -980,7 +981,7 @@ bool writeManifest(const std::filesystem::path& path,
       << q << "2" << q << ": " << q << "market" << q << ", "
       << q << "3" << q << ": " << q << "stop_market" << q << "},\n";
   out << "    " << q << "status" << q << ": {" << q << "1" << q << ": " << q << "pending" << q << ", " << q << "2" << q << ": " << q << "acked" << q << ", " << q << "3" << q << ": " << q << "filled" << q << ", " << q << "4" << q << ": " << q << "cancelled" << q << ", " << q << "5" << q << ": " << q << "missing" << q << ", " << q << "6" << q << ": " << q << "rejected" << q << ", " << q << "7" << q << ": " << q << "partial_unfilled" << q << "},\n";
-  out << "    " << q << "fill_reason" << q << ": {" << q << "0" << q << ": " << q << "unknown" << q << ", " << q << "1" << q << ": " << q << "top" << q << ", " << q << "2" << q << ": " << q << "trade" << q << ", " << q << "3" << q << ": " << q << "aggressive_book" << q << ", " << q << "4" << q << ": " << q << "passive_queue" << q << "},\n";
+  out << "    " << q << "fill_reason" << q << ": {" << q << "0" << q << ": " << q << "unknown" << q << ", " << q << "1" << q << ": " << q << "top" << q << ", " << q << "2" << q << ": " << q << "trade" << q << ", " << q << "3" << q << ": " << q << "aggressive_book" << q << ", " << q << "4" << q << ": " << q << "passive_queue" << q << ", " << q << "5" << q << ": " << q << "passive_bbo_touch" << q << "},\n";
   out << "    " << q << "liquidity" << q << ": {" << q << "0" << q << ": " << q << "maker" << q << ", " << q << "1" << q << ": " << q << "taker" << q << "},\n";
   out << "    " << q << "rate_limit_bucket" << q << ": {"
       << q << "1" << q << ": " << q << "request_weight" << q << ", "

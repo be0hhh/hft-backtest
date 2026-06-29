@@ -1838,7 +1838,7 @@ bool testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() {
   applyIntents(engine, io, 1000, 0, 0);
   const bool policyVisible = engine.open[0].state.limitTimeInForcePolicy == hft_trader::core::LimitTimeInForcePolicy::PostOnlyPrefer;
 
-  setTop(engine, kPx100 - 200000000ll, kPx100 - 100000000ll);
+  setTop(engine, kPx100 - 200000000ll, kPx100);
   tryFillOnTop(engine, 2000);
 
   cxet::composite::TradeRuntimeV1 trade{};
@@ -2697,6 +2697,7 @@ bool testWriterCreatesV2RunDirectory() {
          expect(manifest.find("\"user_data\": {\"base_us\": 800") != std::string::npos, "manifest includes user-data latency profile") &&
          expect(manifest.find("\"risk_snapshots\": {") != std::string::npos, "manifest declares risk snapshots stream") &&
          expect(manifest.find("fill_reason,liquidity,order_qty_e8") != std::string::npos, "manifest declares extended fill metadata") &&
+         expect(manifest.find("\"5\": \"passive_bbo_touch\"") != std::string::npos, "manifest declares passive BBO-touch fill reason") &&
          expect(manifest.find("\"partial_unfilled\"") != std::string::npos, "manifest declares partial-unfilled order status") &&
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
          expect(manifest.find("trend_fast_score") != std::string::npos, "manifest declares trend indicator components") &&

@@ -13,6 +13,12 @@ struct PassiveQueueTradeFill {
   std::int64_t queueAheadAfterE8{0};
 };
 
+struct PassiveBboTouchFill {
+  std::int64_t requestedQtyE8{0};
+  std::int64_t queueAheadBeforeE8{0};
+  std::int64_t queueAheadAfterE8{0};
+};
+
 [[nodiscard]] std::int64_t openOrderRemainingQty(const OpenOrder& order) noexcept;
 void initializePassiveQueue(OpenOrder& order, const EngineState& engine) noexcept;
 void initializePassiveQueue(OpenOrder& order,
@@ -29,5 +35,10 @@ void initializePassiveQueue(OpenOrder& order,
     EngineState& engine,
     OpenOrder& order,
     const cxet::composite::TradeRuntimeV1& trade) noexcept;
+[[nodiscard]] PassiveBboTouchFill consumePassiveQueueForBboTouch(
+    EngineState& engine,
+    OpenOrder& order,
+    const cxet::composite::BookTickerRuntimeV1& top,
+    std::int64_t tsNs) noexcept;
 
 }  // namespace hft_backtest::detail

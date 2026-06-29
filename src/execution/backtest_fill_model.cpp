@@ -1,5 +1,6 @@
 #include "execution/backtest_fill_model.hpp"
 
+#include <cstdint>
 #include <limits>
 
 namespace hft_backtest::detail {
@@ -41,6 +42,32 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
     return trade.price.raw <= order.state.price.raw - minCross;
   }
   return false;
+}
+
+[[nodiscard]] bool makerBboTouchesOrder(const OpenOrder& order,
+                                        const cxet::composite::BookTickerRuntimeV1& top,
+                                        std::int64_t& oppositeQtyE8) noexcept {
+  oppositeQtyE8 = 0;
+  if (order.state.side.raw == Side::Sell().raw) {
+    if (top.bid.px.raw <= 0 || top.bid.px.raw < order.state.price.raw) return false;
+    oppositeQtyE8 = top.bid.qty.raw;
+    return oppositeQtyE8 > 0;
+  }
+  if (order.state.side.raw == Side::Buy().raw) {
+    if (top.ask.px.raw <= 0 || top.ask.px.raw > order.state.price.raw) return false;
+    oppositeQtyE8 = top.ask.qty.raw;
+    return oppositeQtyE8 > 0;
+  }
+  return false;
+}
+
+[[nodiscard]] bool passiveBboTouchEligible(const OpenOrder& order,
+                                           std::int64_t bboTsNs) noexcept {
+  if (order.state.orderType != canon::OrderType::Limit) return false;
+  if (order.lastAggressiveBookTsNs == bboTsNs) return false;
+  if (order.postOnly) return true;
+  if (order.lastAggressiveBookTsNs != 0 || order.filledQtyRaw > 0) return true;
+  return bboTsNs > order.activeTsNs;
 }
 
 [[nodiscard]] hft_trader::core::BookSide passiveBookSide(const OpenOrder& order) noexcept {
@@ -254,6 +281,41 @@ PassiveQueueTradeFill consumePassiveQueueForTrade(EngineState& engine,
     return out;
   }
   out.requestedQtyE8 = trade.qty.raw - order.queueAheadQtyRaw;
+  order.queueAheadQtyRaw = 0;
+  out.queueAheadAfterE8 = 0;
+  return out;
+}
+
+PassiveBboTouchFill consumePassiveQueueForBboTouch(EngineState& engine,
+                                                   OpenOrder& order,
+                                                   const cxet::composite::BookTickerRuntimeV1& top,
+                                                   std::int64_t tsNs) noexcept {
+  PassiveBboTouchFill out{};
+  if (!order.state.valid || !order.active || order.state.orderType != canon::OrderType::Limit) return out;
+  if (tsNs <= 0 || top.ts.raw == 0u ||
+      top.ts.raw > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    return out;
+  }
+  const std::int64_t bboTsNs = static_cast<std::int64_t>(top.ts.raw);
+  if (bboTsNs != tsNs || order.lastPassiveBboTouchTsNs == bboTsNs ||
+      !passiveBboTouchEligible(order, bboTsNs)) {
+    return out;
+  }
+  if (!order.queueInitialized) {
+    order.queueAheadQtyRaw = 0;
+    order.queueInitialized = true;
+  }
+  std::int64_t oppositeQtyE8 = 0;
+  if (!makerBboTouchesOrder(order, top, oppositeQtyE8)) return out;
+  order.lastPassiveBboTouchTsNs = bboTsNs;
+  out.queueAheadBeforeE8 = order.queueAheadQtyRaw;
+  out.queueAheadAfterE8 = order.queueAheadQtyRaw;
+  if (oppositeQtyE8 <= order.queueAheadQtyRaw) {
+    order.queueAheadQtyRaw -= oppositeQtyE8;
+    out.queueAheadAfterE8 = order.queueAheadQtyRaw;
+    return out;
+  }
+  out.requestedQtyE8 = oppositeQtyE8 - order.queueAheadQtyRaw;
   order.queueAheadQtyRaw = 0;
   out.queueAheadAfterE8 = 0;
   return out;

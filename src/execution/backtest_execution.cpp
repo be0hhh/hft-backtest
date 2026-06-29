@@ -696,6 +696,7 @@ void submitOrderIntent(EngineState& engine,
   slot.filledQtyRaw = 0;
   slot.queueAheadQtyRaw = 0;
   slot.lastAggressiveBookTsNs = 0;
+  slot.lastPassiveBboTouchTsNs = 0;
   slot.active = false;
   slot.reduceOnly = intent.reduceOnly;
   slot.postOnly = postOnly;
@@ -1009,6 +1010,17 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
             terminalizeUnavailableLiquidity(engine, order, tsNs);
           }
         }
+        continue;
+      }
+    }
+    if (order.state.orderType == canon::OrderType::Limit) {
+      const PassiveBboTouchFill fill = consumePassiveQueueForBboTouch(engine, order, top, tsNs);
+      if (fill.requestedQtyE8 > 0) {
+        FillExecutionMetadata metadata{};
+        metadata.fillReason = kFillReasonPassiveBboTouch;
+        metadata.queueAheadBeforeE8 = fill.queueAheadBeforeE8;
+        metadata.queueAheadAfterE8 = fill.queueAheadAfterE8;
+        (void)fillOrderQty(engine, order, order.state.price.raw, fill.requestedQtyE8, tsNs, false, metadata);
         continue;
       }
     }

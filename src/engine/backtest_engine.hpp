@@ -84,6 +84,8 @@ constexpr std::uint8_t kFillReasonTop = 1u;
 constexpr std::uint8_t kFillReasonTrade = 2u;
 constexpr std::uint8_t kFillReasonAggressiveBook = 3u;
 constexpr std::uint8_t kFillReasonPassiveQueue = 4u;
+constexpr std::uint8_t kFillReasonPassiveBboTouch = 5u;
+constexpr std::size_t kFillReasonCount = 6u;
 constexpr std::uint8_t kFillLiquidityMaker = 0u;
 constexpr std::uint8_t kFillLiquidityTaker = 1u;
 constexpr std::size_t kStrategyIndicatorFeatureCapacity = 10u;
@@ -279,6 +281,7 @@ struct OpenOrder {
   std::int64_t filledQtyRaw{0};
   std::int64_t queueAheadQtyRaw{0};
   std::int64_t lastAggressiveBookTsNs{0};
+  std::int64_t lastPassiveBboTouchTsNs{0};
   bool active{false};
   bool reduceOnly{false};
   bool postOnly{false};

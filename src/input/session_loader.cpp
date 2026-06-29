@@ -765,9 +765,26 @@ std::string extractStringAfter(std::string_view text, std::string_view key) {
   if (colon == std::string_view::npos) return {};
   const std::size_t firstQuote = text.find('"', colon + 1);
   if (firstQuote == std::string_view::npos) return {};
-  const std::size_t secondQuote = text.find('"', firstQuote + 1);
-  if (secondQuote == std::string_view::npos) return {};
-  return std::string{text.substr(firstQuote + 1, secondQuote - firstQuote - 1)};
+  std::string out;
+  bool escaped = false;
+  for (std::size_t pos = firstQuote + 1u; pos < text.size(); ++pos) {
+    const char c = text[pos];
+    if (escaped) {
+      if (c == 'n') out.push_back('\n');
+      else if (c == 'r') out.push_back('\r');
+      else if (c == 't') out.push_back('\t');
+      else out.push_back(c);
+      escaped = false;
+      continue;
+    }
+    if (c == '\\') {
+      escaped = true;
+      continue;
+    }
+    if (c == '"') return out;
+    out.push_back(c);
+  }
+  return {};
 }
 
 std::string_view extractObjectAfter(std::string_view text, std::string_view key) noexcept {
@@ -829,6 +846,18 @@ std::string extractArtifactPath(std::string_view manifest, std::string_view keyN
   const std::string_view artifacts = extractObjectAfter(manifest, "\"artifacts\"");
   if (!artifacts.empty()) return extractStringAfter(artifacts, key);
   return extractStringAfter(manifest, key);
+}
+
+void appendManifestCaptureWarnings(std::string_view manifest, std::vector<std::string>& warnings) {
+  const std::string sessionHealth = extractStringAfter(manifest, "\"session_health\"");
+  if (!sessionHealth.empty() && sessionHealth != "clean") {
+    appendSessionWarning(warnings, "capture health: " + sessionHealth);
+  }
+
+  const std::string warningSummary = extractStringAfter(manifest, "\"warning_summary\"");
+  if (!warningSummary.empty()) {
+    appendSessionWarning(warnings, "capture warning: " + warningSummary);
+  }
 }
 
 std::filesystem::path existingPath(const std::filesystem::path& root, std::string_view path, std::string_view fallback) {
@@ -928,6 +957,7 @@ Status loadSession(const std::filesystem::path& sessionPath,
   out.exchange = extractStringAfter(manifest, "\"exchange\"");
   out.market = extractStringAfter(manifest, "\"market\"");
   out.symbol = extractStringAfter(manifest, "\"symbols\"");
+  appendManifestCaptureWarnings(manifest, out.warnings);
   const std::string tradesPath = extractChannelPath(manifest, "trades");
   const std::string bookTickerPath = extractChannelPath(manifest, "bookticker");
   const std::string priceLimitPath = extractChannelPath(manifest, "price_limit");
