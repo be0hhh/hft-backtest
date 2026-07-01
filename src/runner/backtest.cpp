@@ -76,6 +76,73 @@ void prefetchRead(const void* ptr) noexcept {
 #endif
 }
 
+std::size_t requestedLegCount(const BacktestRunRequest& request) noexcept {
+  return request.sessions.size() + (request.sessionPath.empty() ? 0u : 1u);
+}
+
+void applyLegSummaryLatency(BacktestLegSummary& leg,
+                            const detail::BacktestLatencyConfig& latency) noexcept {
+  leg.marketDataLatency = latency.marketData;
+  leg.marketOrderLatency = latency.marketOrder;
+  leg.limitOrderLatency = latency.limitOrder;
+  leg.cancelOrderLatency = latency.cancelOrder;
+  leg.userDataLatency = latency.userData;
+}
+
+void seedRequestedLegSummaries(BacktestRunResult& result,
+                               const BacktestRunRequest& request,
+                               bool hasExplicitSessions) noexcept {
+  if (!hasExplicitSessions) return;
+  try {
+    result.legs.clear();
+    result.legs.reserve(requestedLegCount(request));
+    auto appendLeg = [&](const std::filesystem::path& path, const BacktestSessionRequest* requested) {
+      const std::size_t i = result.legs.size();
+      BacktestLegSummary leg{};
+      leg.sessionPath = path;
+      if (requested != nullptr) leg.symbol = requested->symbol;
+      applyLegSummaryLatency(leg, latencyConfigForLeg(request, leg.exchange, leg.market, i));
+      leg.initialBalanceE8 = legInitialBalanceE8(request, i);
+      leg.walletBalanceE8 = leg.initialBalanceE8;
+      leg.strategyClosed = true;
+      result.legs.push_back(std::move(leg));
+    };
+    if (!request.sessionPath.empty()) appendLeg(request.sessionPath, nullptr);
+    for (const BacktestSessionRequest& session : request.sessions) {
+      appendLeg(session.path, &session);
+    }
+  } catch (...) {
+    result.legs.clear();
+  }
+}
+
+void seedLoadedLegSummaries(BacktestRunResult& result,
+                            const BacktestRunRequest& request,
+                            const std::vector<detail::SessionData>& sessions) noexcept {
+  try {
+    result.legs.clear();
+    result.legs.reserve(sessions.size());
+    for (std::size_t i = 0u; i < sessions.size(); ++i) {
+      const detail::SessionData& session = sessions[i];
+      BacktestLegSummary leg{};
+      leg.sessionPath = session.sessionPath;
+      leg.exchange = session.exchange;
+      leg.market = session.market;
+      leg.symbol = session.symbol;
+      const BacktestFeeSchedule fee = resolveFeeSchedule(request, session.exchange, session.market);
+      leg.makerFeeBpsE8 = fee.makerFeeBpsE8;
+      leg.takerFeeBpsE8 = fee.takerFeeBpsE8;
+      applyLegSummaryLatency(leg, latencyConfigForLeg(request, session.exchange, session.market, i));
+      leg.initialBalanceE8 = legInitialBalanceE8(request, i);
+      leg.walletBalanceE8 = leg.initialBalanceE8;
+      leg.strategyClosed = true;
+      result.legs.push_back(std::move(leg));
+    }
+  } catch (...) {
+    result.legs.clear();
+  }
+}
+
 }  // namespace
 
 BacktestRunResult runBacktest(const BacktestRunRequest& request,
@@ -87,6 +154,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.sessionPath = request.sessionPath;
   result.configPath = request.configPath;
   result.resultPath = resultPathFor(request, result.runId);
+  result.rateLimitsEnabled = request.rateLimitsEnabled;
+  result.strictRateLimitRejects = request.strictRateLimitRejects;
   const bool hasExplicitSessions = !request.sessions.empty();
   const std::size_t requestedSessionCount = explicitSessionPathCount(request, hasExplicitSessions);
   const std::int64_t portfolioInitialBalance = portfolioInitialBalanceE8(request, requestedSessionCount);
@@ -125,7 +194,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
   if (hasExplicitSessions && explicitSessionPathCount(request, hasExplicitSessions) > hft_trader::core::kStrategyRuntimeMaxLegs) {
     result.status = Status::InvalidArgument;
-    result.error = "too many backtest sessions";
+    result.error = "too many backtest sessions (max " + std::to_string(hft_trader::core::kStrategyRuntimeMaxLegs) + ")";
     return result;
   }
   if (!request.outputPath.empty() && request.outputPath.extension() == ".json") {
@@ -133,6 +202,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.error = "output_path must be a run directory, not a .json file";
     return result;
   }
+  seedRequestedLegSummaries(result, request, hasExplicitSessions);
 
   std::string error;
   if (hft_trader::runtime::hftRuntimeConfigAbiFingerprint() !=
@@ -246,6 +316,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   const std::vector<detail::SessionData>& sessions = *sessionsView;
   const detail::SessionData& session = sessions[0];
   result.sessionPath = session.sessionPath;
+  if (hasExplicitSessions) seedLoadedLegSummaries(result, request, sessions);
 
   const ExchangeId sessionExchange = detail::exchangeFromText(session.exchange);
   const canon::MarketType sessionMarket = detail::marketFromText(session.market);
@@ -271,7 +342,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
 
   StrategyParamStorage params{};
-  if (!descriptor->resolveParams(cfg, *venue, params, error)) {
+  if (!descriptor->resolveParams(hft_trader::runtime::makeStrategyParamContext(cfg, *venue), params, error)) {
     result.status = Status::InvalidArgument;
     result.error = error;
     (void)writeEmptyArtifacts();
@@ -573,6 +644,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       }
       populatePortfolioResultPnl(result, sessions, legEngines, portfolioInitialBalance);
       appendRateLimitWarnings(result, engine, &legEngines);
+      result.rateLimitRejectedCommands = rateLimitRejectedCommands(engine, &legEngines);
       try {
         auto aggregate = std::make_unique<detail::EngineState>();
         populateAggregateArtifactEngine(legEngines, portfolioInitialBalance, tsNs, *aggregate);
@@ -587,9 +659,19 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
     populateResultPnl(result, engine);
     appendRateLimitWarnings(result, engine);
+    result.rateLimitRejectedCommands = rateLimitRejectedCommands(engine);
     result.orders = engine.orders.size();
     result.fills = engine.fills.size();
     return writeArtifacts(engine);
+  };
+  auto stopOnStrictRateLimitReject = [&]() noexcept -> bool {
+    if (!result.rateLimitsEnabled || !result.strictRateLimitRejects) return false;
+    const std::uint64_t rejected = rateLimitRejectedCommands(engine, hasExplicitSessions ? &legEngines : nullptr);
+    if (rejected == 0u) return false;
+    result.rateLimitRejectedCommands = rejected;
+    (void)applyStrictRateLimitStatus(result, engine, hasExplicitSessions ? &legEngines : nullptr);
+    (void)writeCurrentArtifacts();
+    return true;
   };
   bool traderRiskCloseProblem = false;
   bool legLiquidationProblem = false;
@@ -731,6 +813,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)writeCurrentArtifacts();
       return result;
     }
+    if (stopOnStrictRateLimitReject()) return result;
     if (tripHardLiquidation(eventTsNs) || tripTraderRiskStop(eventTsNs)) {
       replayStopped = true;
       break;
@@ -749,6 +832,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
         (void)writeCurrentArtifacts();
         return result;
       }
+      if (stopOnStrictRateLimitReject()) return result;
       if (hasExplicitSessions) {
         for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, delivered.deliveryTsNs);
       } else {
@@ -769,6 +853,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)writeCurrentArtifacts();
       return result;
     }
+    if (stopOnStrictRateLimitReject()) return result;
     while (i < timeline.size() && timeline[i].tsNs == eventTsNs) {
       if (i + 1u < timeline.size()) prefetchRead(&timeline[i + 1u]);
       const detail::TimelineEvent& event = timeline[i++];
@@ -799,6 +884,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
         (void)writeCurrentArtifacts();
         return result;
       }
+      if (stopOnStrictRateLimitReject()) return result;
       if (hasExplicitSessions) {
         for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, delivered.deliveryTsNs);
       } else {
@@ -819,6 +905,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)writeCurrentArtifacts();
       return result;
     }
+    if (stopOnStrictRateLimitReject()) return result;
     if (tripHardLiquidation(eventTsNs) || tripTraderRiskStop(eventTsNs)) {
       replayStopped = true;
       break;
@@ -842,6 +929,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)writeCurrentArtifacts();
       return result;
     }
+    if (stopOnStrictRateLimitReject()) return result;
     if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, delivered, legSymbols, legInstruments, true);
     else applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
     const bool delayedOk = hasExplicitSessions
@@ -853,6 +941,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)writeCurrentArtifacts();
       return result;
     }
+    if (stopOnStrictRateLimitReject()) return result;
     if (hasExplicitSessions) {
       for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, delivered.deliveryTsNs);
     } else {
@@ -873,6 +962,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       (void)writeCurrentArtifacts();
       return result;
     }
+    if (stopOnStrictRateLimitReject()) return result;
   }
   if (!replayStopped) {
     const std::int64_t stopCheckTsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
@@ -1020,10 +1110,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.warnings.push_back(std::move(warning));
   }
   appendRateLimitWarnings(result, engine, hasExplicitSessions ? &legEngines : nullptr);
+  result.rateLimitRejectedCommands = rateLimitRejectedCommands(engine, hasExplicitSessions ? &legEngines : nullptr);
   if (legLiquidationProblem) {
     result.status = Status::Ok;
     result.warnings.push_back(result.error.empty() ? std::string{"leg liquidated"} : result.error);
     result.error.clear();
+    (void)applyStrictRateLimitStatus(result, engine, hasExplicitSessions ? &legEngines : nullptr);
     Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
     if (!isOk(writeStatus)) result.status = writeStatus;
     return result;
@@ -1036,6 +1128,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     return result;
   }
   result.status = Status::Ok;
+  (void)applyStrictRateLimitStatus(result, engine, hasExplicitSessions ? &legEngines : nullptr);
   Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
   if (!isOk(writeStatus)) result.status = writeStatus;
   (void)reportProgress(timeline.size(), timeline.size(), "complete", progressCallback, userData);

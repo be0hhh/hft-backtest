@@ -27,6 +27,34 @@ BacktestRateLimitSchedule scheduleFromPreset(ExchangeId exchange,
   return out;
 }
 
+void overlayRateLimitSchedule(BacktestRateLimitSchedule& base,
+                              const BacktestRateLimitSchedule& overlay) {
+  for (const hft_trader::core::RateLimitBucketConfig& bucket : overlay.buckets) {
+    bool replaced = false;
+    for (hft_trader::core::RateLimitBucketConfig& existing : base.buckets) {
+      if (existing.kind != bucket.kind ||
+          existing.intervalNs != bucket.intervalNs ||
+          existing.windowMode != bucket.windowMode) {
+        continue;
+      }
+      existing = bucket;
+      replaced = true;
+      break;
+    }
+    if (!replaced) base.buckets.push_back(bucket);
+  }
+  for (const hft_trader::core::RateLimitActionConfig& action : overlay.actions) {
+    bool replaced = false;
+    for (hft_trader::core::RateLimitActionConfig& existing : base.actions) {
+      if (existing.action != action.action) continue;
+      existing = action;
+      replaced = true;
+      break;
+    }
+    if (!replaced) base.actions.push_back(action);
+  }
+}
+
 }  // namespace
 
 bool sameLoadPlan(const detail::SessionLoadPlan& lhs, const detail::SessionLoadPlan& rhs) noexcept {
@@ -238,7 +266,7 @@ BacktestRateLimitSchedule resolveRateLimitSchedule(const BacktestRunRequest& req
   for (const BacktestRateLimitSchedule& schedule : request.rateLimitSchedules) {
     if (detail::exchangeFromText(schedule.exchange).raw != exchange.raw) continue;
     if (detail::marketFromText(schedule.market).raw != market.raw) continue;
-    return schedule;
+    overlayRateLimitSchedule(out, schedule);
   }
   return out;
 }

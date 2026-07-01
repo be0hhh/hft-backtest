@@ -47,6 +47,10 @@ bool resolveStrategyIndicatorProfile(std::string_view id, StrategyIndicatorProfi
     out = StrategyIndicatorProfileInfo{"toxic_flow", "Toxic flow", "Score", "Raw", "score"};
     return true;
   }
+  if (id == "toxic_flow_pair") {
+    out = StrategyIndicatorProfileInfo{"toxic_flow_pair", "Toxic flow A/B", "A", "B", "score"};
+    return true;
+  }
   if (id == "volatility_bps") {
     out = StrategyIndicatorProfileInfo{"volatility_bps", "Volatility", "EMA", "Sample", "bps"};
     return true;
@@ -128,6 +132,9 @@ void appendStrategyIndicator(detail::EngineState& engine,
     row.featureRaw[7] = static_cast<std::int64_t>(trace.toxicFlowBuyPressureScore);
     row.featureRaw[8] = static_cast<std::int64_t>(trace.toxicFlowSellPressureScore);
     row.featureRaw[9] = static_cast<std::int64_t>(trace.toxicFlowConfidencePct);
+  } else if (engine.strategyIndicatorProfile == "toxic_flow_pair") {
+    row.valueRaw = static_cast<std::int64_t>(trace.toxicFlowScoreRaw);
+    row.auxRaw = static_cast<std::int64_t>(trace.toxicFlowRawScore);
   } else if (engine.strategyIndicatorProfile == "volatility_bps") {
     row.valueRaw = static_cast<std::int64_t>(trace.volatilityBps);
     row.auxRaw = static_cast<std::int64_t>(trace.volatilitySampleBps);
@@ -144,7 +151,7 @@ void appendStrategyIndicator(detail::EngineState& engine,
   row.decisionKind = trace.decisionKind;
   row.sideRaw = trace.sideRaw;
   if ((engine.strategyIndicatorProfile == "trend_score" || engine.strategyIndicatorProfile == "toxic_flow" ||
-       engine.strategyIndicatorProfile == "volatility_bps") &&
+       engine.strategyIndicatorProfile == "toxic_flow_pair" || engine.strategyIndicatorProfile == "volatility_bps") &&
       !engine.strategyIndicator.empty() &&
       strategyIndicatorSecond(engine.strategyIndicator.back().tsNs) == strategyIndicatorSecond(row.tsNs)) {
     engine.strategyIndicator.back() = row;

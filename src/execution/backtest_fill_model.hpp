@@ -20,6 +20,8 @@ struct PassiveBboTouchFill {
 };
 
 [[nodiscard]] std::int64_t openOrderRemainingQty(const OpenOrder& order) noexcept;
+[[nodiscard]] bool triggeredStopLimitOrder(const OpenOrder& order) noexcept;
+[[nodiscard]] bool triggeredStopFokLimitOrder(const OpenOrder& order) noexcept;
 void initializePassiveQueue(OpenOrder& order, const EngineState& engine) noexcept;
 void initializePassiveQueue(OpenOrder& order,
                             const EngineState& engine,

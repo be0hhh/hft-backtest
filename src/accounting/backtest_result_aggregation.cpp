@@ -290,4 +290,35 @@ void appendRateLimitWarnings(BacktestRunResult& result,
   appendRateLimitWarningForEngine(result, engine, static_cast<std::size_t>(-1));
 }
 
+std::uint64_t rateLimitRejectedCommands(const detail::EngineState& engine,
+                                        const std::vector<detail::EngineState>* legEngines) noexcept {
+  std::uint64_t out = 0u;
+  if (legEngines && !legEngines->empty()) {
+    for (const detail::EngineState& legEngine : *legEngines) out += rateLimitRejectCount(legEngine);
+    return out;
+  }
+  return rateLimitRejectCount(engine);
+}
+
+bool applyStrictRateLimitStatus(BacktestRunResult& result,
+                                const detail::EngineState& engine,
+                                const std::vector<detail::EngineState>* legEngines) noexcept {
+  result.rateLimitRejectedCommands = rateLimitRejectedCommands(engine, legEngines);
+  result.rateLimitStrictFailure = false;
+  if (!result.rateLimitsEnabled || !result.strictRateLimitRejects || result.rateLimitRejectedCommands == 0u) {
+    return false;
+  }
+  result.rateLimitStrictFailure = true;
+  result.status = Status::InvalidArgument;
+  try {
+    result.error = "strict rate-limit mode rejected backtest: ";
+    result.error += std::to_string(result.rateLimitRejectedCommands);
+    result.error += result.rateLimitRejectedCommands == 1u ? " command was locally rate-limited"
+                                                           : " commands were locally rate-limited";
+  } catch (...) {
+    result.error = "strict rate-limit mode rejected backtest";
+  }
+  return true;
+}
+
 }  // namespace hft_backtest

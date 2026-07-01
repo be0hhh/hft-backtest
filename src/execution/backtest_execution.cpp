@@ -305,6 +305,44 @@ void terminalizeUnavailableLiquidity(EngineState& engine, OpenOrder& order, std:
   bumpContextRevision(engine);
 }
 
+std::int64_t triggeredStopLimitBboPrice(const OpenOrder& order,
+                                        const cxet::composite::BookTickerRuntimeV1& top) noexcept {
+  return order.state.side.raw == Side::Buy().raw ? top.ask.px.raw : top.bid.px.raw;
+}
+
+std::int64_t triggeredStopLimitBboQty(const OpenOrder& order,
+                                      const cxet::composite::BookTickerRuntimeV1& top) noexcept {
+  return order.state.side.raw == Side::Buy().raw ? top.ask.qty.raw : top.bid.qty.raw;
+}
+
+bool triggeredStopLimitBboCapOk(const OpenOrder& order, std::int64_t topPrice) noexcept {
+  if (topPrice <= 0) return false;
+  return order.state.side.raw == Side::Buy().raw
+      ? topPrice <= order.state.price.raw
+      : topPrice >= order.state.price.raw;
+}
+
+void fillTriggeredStopLimitFromBbo(EngineState& engine,
+                                   OpenOrder& order,
+                                   const cxet::composite::BookTickerRuntimeV1& top,
+                                   std::int64_t tsNs,
+                                   FillExecutionMetadata metadata) {
+  const std::int64_t topPrice = triggeredStopLimitBboPrice(order, top);
+  const std::int64_t topQty = triggeredStopLimitBboQty(order, top);
+  const std::int64_t remaining = openOrderRemainingQty(order);
+  if (!triggeredStopLimitBboCapOk(order, topPrice) || topQty <= 0 || remaining <= 0) {
+    terminalizeUnavailableLiquidity(engine, order, tsNs);
+    return;
+  }
+  if (triggeredStopFokLimitOrder(order) && topQty < remaining) {
+    terminalizeUnavailableLiquidity(engine, order, tsNs);
+    return;
+  }
+  const std::int64_t fillQty = topQty < remaining ? topQty : remaining;
+  (void)fillOrderQty(engine, order, topPrice, fillQty, tsNs, true, metadata);
+  if (order.state.valid) terminalizeUnavailableLiquidity(engine, order, tsNs);
+}
+
 bool isPostOnlyPolicy(hft_trader::core::LimitTimeInForcePolicy policy) noexcept {
   return policy == hft_trader::core::LimitTimeInForcePolicy::PostOnlyPrefer ||
          policy == hft_trader::core::LimitTimeInForcePolicy::PostOnlyStrict;
@@ -336,8 +374,12 @@ bool knownStopMarketTriggerSource(canon::OrderTriggerSource source) noexcept {
 }
 
 bool badStopMarketIntent(const hft_trader::core::OrderIntent& intent) noexcept {
-  return intent.orderType == canon::OrderType::Stop &&
-         (intent.triggerPrice.raw <= 0 || !knownStopMarketTriggerSource(intent.triggerSource));
+  if (intent.orderType != canon::OrderType::Stop) return false;
+  if (intent.triggerPrice.raw <= 0 || !knownStopMarketTriggerSource(intent.triggerSource)) return true;
+  if (intent.price.raw < 0) return true;
+  if (intent.price.raw == 0) return intent.triggeredTimeInForce != canon::TimeInForce::Unknown;
+  return intent.triggeredTimeInForce != canon::TimeInForce::IOC &&
+         intent.triggeredTimeInForce != canon::TimeInForce::FOK;
 }
 
 bool stopMarketSourcePrice(const EngineState& engine,
@@ -584,10 +626,12 @@ void submitOrderIntent(EngineState& engine,
     rejected.state.price = intent.price;
     rejected.state.triggerPrice = intent.triggerPrice;
     rejected.state.triggerSource = intent.triggerSource;
+    rejected.state.triggeredTimeInForce = intent.triggeredTimeInForce;
     rejected.state.qty = intent.qty;
     rejected.state.desiredPrice = intent.price;
     rejected.state.desiredTriggerPrice = intent.triggerPrice;
     rejected.state.desiredTriggerSource = intent.triggerSource;
+    rejected.state.desiredTriggeredTimeInForce = intent.triggeredTimeInForce;
     rejected.state.desiredQty = intent.qty;
     rejected.routeHandle = intent.routeHandle;
     rejected.recordIndex = recordIndex;
@@ -614,10 +658,12 @@ void submitOrderIntent(EngineState& engine,
     rejected.state.price = intent.price;
     rejected.state.triggerPrice = intent.triggerPrice;
     rejected.state.triggerSource = intent.triggerSource;
+    rejected.state.triggeredTimeInForce = intent.triggeredTimeInForce;
     rejected.state.qty = intent.qty;
     rejected.state.desiredPrice = intent.price;
     rejected.state.desiredTriggerPrice = intent.triggerPrice;
     rejected.state.desiredTriggerSource = intent.triggerSource;
+    rejected.state.desiredTriggeredTimeInForce = intent.triggeredTimeInForce;
     rejected.state.desiredQty = intent.qty;
     rejected.routeHandle = intent.routeHandle;
     rejected.recordIndex = recordIndex;
@@ -648,10 +694,12 @@ void submitOrderIntent(EngineState& engine,
     rejected.state.price = intent.price;
     rejected.state.triggerPrice = intent.triggerPrice;
     rejected.state.triggerSource = intent.triggerSource;
+    rejected.state.triggeredTimeInForce = intent.triggeredTimeInForce;
     rejected.state.qty = intent.qty;
     rejected.state.desiredPrice = intent.price;
     rejected.state.desiredTriggerPrice = intent.triggerPrice;
     rejected.state.desiredTriggerSource = intent.triggerSource;
+    rejected.state.desiredTriggeredTimeInForce = intent.triggeredTimeInForce;
     rejected.state.desiredQty = intent.qty;
     rejected.routeHandle = intent.routeHandle;
     rejected.recordIndex = recordIndex;
@@ -683,10 +731,12 @@ void submitOrderIntent(EngineState& engine,
   slot.state.price = intent.price;
   slot.state.triggerPrice = intent.triggerPrice;
   slot.state.triggerSource = intent.triggerSource;
+  slot.state.triggeredTimeInForce = intent.triggeredTimeInForce;
   slot.state.qty = intent.qty;
   slot.state.desiredPrice = intent.price;
   slot.state.desiredTriggerPrice = intent.triggerPrice;
   slot.state.desiredTriggerSource = intent.triggerSource;
+  slot.state.desiredTriggeredTimeInForce = intent.triggeredTimeInForce;
   slot.state.desiredQty = intent.qty;
   slot.state.state = hft_trader::core::StrategyOrderLocalState::PendingNew;
   slot.routeHandle = intent.routeHandle;
@@ -981,7 +1031,12 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
     AggressiveFillPlan* plan = fillBook != nullptr ? &topExecutionFillPlanScratch(engine) : nullptr;
     if (plan != nullptr && buildAggressiveBookFillPlan(engine, order, *fillBook, *plan)) {
       const bool marketOrder = marketExecutionOrder(order);
-      if (!marketOrder || marketDepthPlanUsable(order, *plan, *rawBook, top)) {
+      const bool cappedTriggeredStop = triggeredStopLimitOrder(order);
+      if (cappedTriggeredStop || !marketOrder || marketDepthPlanUsable(order, *plan, *rawBook, top)) {
+        if (triggeredStopFokLimitOrder(order) && plan->filledQtyE8 < openOrderRemainingQty(order)) {
+          terminalizeUnavailableLiquidity(engine, order, tsNs);
+          continue;
+        }
         for (std::size_t i = 0u; i < plan->count && order.state.valid; ++i) {
           const AggressiveFillChunk& chunk = plan->chunks[i];
           FillExecutionMetadata metadata{};
@@ -1032,7 +1087,9 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
     if (bid <= 0 || ask <= 0) continue;
     FillExecutionMetadata metadata{};
     metadata.fillReason = kFillReasonTop;
-    if (marketExecutionOrder(order)) {
+    if (triggeredStopLimitOrder(order)) {
+      fillTriggeredStopLimitFromBbo(engine, order, top, tsNs, metadata);
+    } else if (marketExecutionOrder(order)) {
       (void)fillOrder(engine, order, order.state.side.raw == Side::Buy().raw ? ask : bid, tsNs, true, metadata);
     } else if (!order.postOnly && order.state.side.raw == Side::Buy().raw && order.state.price.raw >= ask) {
       (void)fillOrder(engine, order, ask, tsNs, true, metadata);

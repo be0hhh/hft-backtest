@@ -152,10 +152,64 @@ bool testUptickReplayPlacesAndFillsFromValidFlatStart() {
                 "uptick synthetic replay diagnostics report fills present");
 }
 
+bool testMultiLegEarlyErrorManifestCarriesRequestedLegs() {
+  const std::filesystem::path root = makeRoot();
+  writeConfig(root / "uptick.ini");
+
+  hft_backtest::BacktestRunRequest request{};
+  request.sessionPath = root / "leg0";
+  request.configPath = root / "uptick.ini";
+  request.outputPath = root / "backtests" / "multi-leg-invalid-indicator";
+  request.strategy = "uptick";
+  request.indicatorProfile = "missing-profile";
+  request.runId = "multi-leg-invalid-indicator";
+  request.initialBalanceE8 = 900000000000ll;
+  request.writeArtifacts = true;
+
+  hft_backtest::BacktestSessionRequest leg1{};
+  leg1.path = root / "leg1";
+  leg1.symbol = "LEG1";
+  request.sessions.push_back(leg1);
+  hft_backtest::BacktestSessionRequest leg2{};
+  leg2.path = root / "leg2";
+  leg2.symbol = "LEG2";
+  request.sessions.push_back(leg2);
+
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+  if (!expect(result.status == hft_backtest::Status::InvalidArgument, "invalid indicator rejects before loading sessions")) {
+    std::cerr << "status=" << hft_backtest::statusToString(result.status)
+              << " error=" << result.error << "\n";
+    return false;
+  }
+  const std::string manifest = readText(result.resultPath / "manifest.json");
+
+  return expect(manifest.find("\"legs\": [") != std::string::npos,
+                "early error manifest includes legs array") &&
+         expect(manifest.find("\"leg_index\": 0") != std::string::npos,
+                "early error manifest includes primary leg index") &&
+         expect(manifest.find("\"leg_index\": 1") != std::string::npos,
+                "early error manifest includes first extra leg index") &&
+         expect(manifest.find("\"leg_index\": 2") != std::string::npos,
+                "early error manifest includes second extra leg index") &&
+         expect(manifest.find((root / "leg0").generic_string()) != std::string::npos,
+                "early error manifest includes primary session path") &&
+         expect(manifest.find((root / "leg1").generic_string()) != std::string::npos,
+                "early error manifest includes first extra session path") &&
+         expect(manifest.find((root / "leg2").generic_string()) != std::string::npos,
+                "early error manifest includes second extra session path") &&
+         expect(std::filesystem::exists(result.resultPath / "legs" / "0" / "equity.jsonl"),
+                "early error writes primary leg equity stream declared by manifest") &&
+         expect(std::filesystem::exists(result.resultPath / "legs" / "1" / "equity.jsonl"),
+                "early error writes first extra leg equity stream declared by manifest") &&
+         expect(std::filesystem::exists(result.resultPath / "legs" / "2" / "equity.jsonl"),
+                "early error writes second extra leg equity stream declared by manifest");
+}
+
 }  // namespace
 
 int main() {
   bool ok = true;
   ok = testUptickReplayPlacesAndFillsFromValidFlatStart() && ok;
+  ok = testMultiLegEarlyErrorManifestCarriesRequestedLegs() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

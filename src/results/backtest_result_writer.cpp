@@ -50,6 +50,7 @@ std::size_t strategyIndicatorFeatureCount(std::string_view profile) noexcept {
   if (profile == "trend_score") return 6u;
   if (profile == "volatility_bps") return 7u;
   if (profile == "toxic_flow") return 10u;
+  if (profile == "toxic_flow_pair") return 0u;
   return 0u;
 }
 
@@ -57,6 +58,7 @@ const char* strategyIndicatorRowSchema(std::string_view profile) noexcept {
   if (profile == "trend_score") return kTrendStrategyIndicatorRowSchema;
   if (profile == "volatility_bps") return kVolatilityStrategyIndicatorRowSchema;
   if (profile == "toxic_flow") return kToxicFlowStrategyIndicatorRowSchema;
+  if (profile == "toxic_flow_pair") return kStrategyIndicatorBaseRowSchema;
   return kStrategyIndicatorBaseRowSchema;
 }
 
@@ -188,6 +190,33 @@ std::int64_t absI64(std::int64_t value) noexcept {
   if (value >= 0) return value;
   if (value == std::numeric_limits<std::int64_t>::min()) return std::numeric_limits<std::int64_t>::max();
   return -value;
+}
+
+std::int64_t ratioPctE8(std::uint64_t numerator, std::uint64_t denominator) noexcept {
+  if (denominator == 0u) return 0;
+#if defined(__SIZEOF_INT128__)
+  const unsigned __int128 scaled = static_cast<unsigned __int128>(numerator) * 100000000u;
+  const unsigned __int128 value = scaled / denominator;
+  return value > static_cast<unsigned __int128>(std::numeric_limits<std::int64_t>::max())
+      ? std::numeric_limits<std::int64_t>::max()
+      : static_cast<std::int64_t>(value);
+#else
+  if (numerator > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / 100000000ll)) {
+    return std::numeric_limits<std::int64_t>::max();
+  }
+  return static_cast<std::int64_t>((numerator * 100000000ull) / denominator);
+#endif
+}
+
+std::int64_t ratioPctE8(std::int64_t numerator, std::int64_t denominator) noexcept {
+  const std::uint64_t num = static_cast<std::uint64_t>(absI64(numerator));
+  const std::uint64_t den = static_cast<std::uint64_t>(absI64(denominator));
+  return ratioPctE8(num, den);
+}
+
+const char* rateLimitModeName(const BacktestRunResult& result) noexcept {
+  if (!result.rateLimitsEnabled) return "off";
+  return result.strictRateLimitRejects ? "strict" : "model";
 }
 
 SignalDiagnostics collectSignalDiagnostics(const EngineState& engine,
@@ -326,6 +355,13 @@ void writeDiagnosticsObject(std::ostream& out,
       << ", " << q << "order_lifetime_rows" << q << ": " << orderLifetimeRows
       << ", " << q << "strategy_spread_rows" << q << ": " << signal.strategySpreadRows
       << ", " << q << "rate_limit_usage_rows" << q << ": " << rateLimits.usageRows
+      << "},\n";
+  const std::uint64_t commandCount = execution.orderCommands + execution.cancelCommands;
+  out << indent << "  " << q << "quality" << q << ": {"
+      << q << "commands_per_fill" << q << ": " << (result.fills == 0u ? 0u : commandCount / result.fills)
+      << ", " << q << "fee_drag_pct_e8" << q << ": " << ratioPctE8(result.feesPaidE8, result.grossRealizedPnlE8)
+      << ", " << q << "taker_fill_ratio_pct_e8" << q << ": "
+      << ratioPctE8(execution.fillLiquidityCounts[kFillLiquidityTaker], result.fills)
       << "},\n";
   out << indent << "  " << q << "signal" << q << ": {"
       << q << "strategy_spread_rows" << q << ": " << signal.strategySpreadRows
@@ -604,23 +640,47 @@ bool writeOrderLifetimes(const std::filesystem::path& path,
   return out.good();
 }
 
+void writeEquityRow(std::ostream& out, const JsonEquityPoint& row) {
+  out << '[' << row.tsNs
+      << ',' << row.grossRealizedPnlE8
+      << ',' << row.realizedPnlE8
+      << ',' << row.unrealizedPnlE8
+      << ',' << row.grossTotalPnlE8
+      << ',' << row.netTotalPnlE8
+      << ',' << row.totalPnlE8
+      << ',' << row.feesPaidE8
+      << ',' << row.walletBalanceE8
+      << ',' << row.positionQtyE8
+      << ',' << row.fillCount
+      << "]\n";
+}
+
 bool writeEquity(const std::filesystem::path& path, const EngineState& engine) noexcept {
   std::ofstream out(path, std::ios::out | std::ios::trunc);
   if (!out.is_open()) return false;
-  for (const JsonEquityPoint& row : engine.equityPoints) {
-    out << '[' << row.tsNs
-        << ',' << row.grossRealizedPnlE8
-        << ',' << row.realizedPnlE8
-        << ',' << row.unrealizedPnlE8
-        << ',' << row.grossTotalPnlE8
-        << ',' << row.netTotalPnlE8
-        << ',' << row.totalPnlE8
-        << ',' << row.feesPaidE8
-        << ',' << row.walletBalanceE8
-        << ',' << row.positionQtyE8
-        << ',' << row.fillCount
-        << "]\n";
-  }
+  for (const JsonEquityPoint& row : engine.equityPoints) writeEquityRow(out, row);
+  return out.good();
+}
+
+JsonEquityPoint syntheticLegEquityPoint(const BacktestLegSummary& leg) noexcept {
+  JsonEquityPoint out{};
+  out.grossRealizedPnlE8 = leg.grossRealizedPnlE8;
+  out.realizedPnlE8 = leg.netRealizedPnlE8;
+  out.unrealizedPnlE8 = leg.unrealizedPnlE8;
+  out.grossTotalPnlE8 = leg.grossRealizedPnlE8 + leg.unrealizedPnlE8;
+  out.netTotalPnlE8 = leg.netRealizedPnlE8 + leg.unrealizedPnlE8;
+  out.totalPnlE8 = leg.totalPnlE8;
+  out.feesPaidE8 = leg.feesPaidE8;
+  out.walletBalanceE8 = leg.walletBalanceE8;
+  out.positionQtyE8 = leg.openPositionQtyE8;
+  out.fillCount = leg.fills;
+  return out;
+}
+
+bool writeSyntheticLegEquity(const std::filesystem::path& path, const BacktestLegSummary& leg) noexcept {
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) return false;
+  writeEquityRow(out, syntheticLegEquityPoint(leg));
   return out.good();
 }
 
@@ -859,14 +919,19 @@ bool writeRunConfig(const std::filesystem::path& resultDir, const std::filesyste
 }
 
 bool writeLegEquityStreams(const std::filesystem::path& resultDir,
+                           const BacktestRunResult& result,
                            const std::vector<EngineState>* legEngines) noexcept {
-  if (legEngines == nullptr) return true;
-  for (std::size_t i = 0u; i < legEngines->size(); ++i) {
+  const std::size_t count = legEngines != nullptr ? legEngines->size() : result.legs.size();
+  for (std::size_t i = 0u; i < count; ++i) {
     const std::filesystem::path dir = resultDir / "legs" / std::to_string(i);
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     if (ec) return false;
-    if (!writeEquity(dir / "equity.jsonl", (*legEngines)[i])) return false;
+    if (legEngines != nullptr) {
+      if (!writeEquity(dir / "equity.jsonl", (*legEngines)[i])) return false;
+    } else if (!writeSyntheticLegEquity(dir / "equity.jsonl", result.legs[i])) {
+      return false;
+    }
   }
   return true;
 }
@@ -880,6 +945,10 @@ bool writeManifest(const std::filesystem::path& path,
   std::ofstream out(path, std::ios::out | std::ios::trunc);
   if (!out.is_open()) return false;
   const char q = '"';
+  const RateLimitDiagnostics manifestRateLimits = collectRateLimitDiagnostics(engine, legEngines);
+  const std::uint64_t manifestRejectedCommands = result.rateLimitRejectedCommands != 0u
+      ? result.rateLimitRejectedCommands
+      : rejectedCommandCount(manifestRateLimits);
   out << "{\n";
   out << "  " << q << "type" << q << ": " << q << "run.result.v2" << q << ",\n";
   out << "  " << q << "schema_version" << q << ": 2,\n";
@@ -918,6 +987,13 @@ bool writeManifest(const std::filesystem::path& path,
       << ", " << q << "jitter_us" << q << ": " << result.userDataLatency.jitterUs << "}"
       << ", " << q << "order_latency_us" << q << ": " << result.orderLatencyUs
       << ", " << q << "cancel_latency_us" << q << ": " << result.cancelLatencyUs << "},\n";
+  out << "  " << q << "rate_limits" << q << ": {"
+      << q << "enabled" << q << ": " << (result.rateLimitsEnabled ? "true" : "false")
+      << ", " << q << "strict_rejects" << q << ": " << (result.strictRateLimitRejects ? "true" : "false")
+      << ", " << q << "strict_failure" << q << ": " << (result.rateLimitStrictFailure ? "true" : "false")
+      << ", " << q << "mode" << q << ": " << q << rateLimitModeName(result) << q
+      << ", " << q << "rejected_commands" << q << ": " << manifestRejectedCommands
+      << "},\n";
   if (result.liveProbe.configured) {
     out << "  " << q << "live_probe" << q << ": {"
         << q << "configured" << q << ": true"
@@ -1030,7 +1106,7 @@ Status writeResult(const BacktestRunResult& result,
   if (ec) return Status::IoError;
   if (!writeFills(result.resultPath / "fills.jsonl", engine)) return Status::IoError;
   if (!writeEquity(result.resultPath / "equity.jsonl", engine)) return Status::IoError;
-  if (!writeLegEquityStreams(result.resultPath, legEngines)) return Status::IoError;
+  if (!writeLegEquityStreams(result.resultPath, result, legEngines)) return Status::IoError;
   if (!writeRiskSnapshots(result.resultPath / "risk_snapshots.jsonl", engine)) return Status::IoError;
   std::filesystem::remove(result.resultPath / "probe_metrics.jsonl", ec);
   if (ec) return Status::IoError;

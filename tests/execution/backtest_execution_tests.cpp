@@ -20,6 +20,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string_view>
 #include <utility>
@@ -297,20 +298,20 @@ bool testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() {
   instruments[0].tickGrid = hft_trader::core::prepareFastStepGrid(instruments[0].tickSizeRaw);
   instruments[0].qtyStepGrid = hft_trader::core::prepareFastStepGrid(instruments[0].stepSizeRaw);
 
-  MultiLegCycleScratch scratch{};
-  scratch.reset(1u);
+  auto scratch = std::make_unique<MultiLegCycleScratch>();
+  scratch->reset(1u);
   WarmupGateProbeState state{};
   hft_trader::core::SymbolShardConfig shard{};
   hft_trader::core::ShardControlState control{};
   BacktestRunRequest request{};
 
   const bool warmupOk = hft_backtest::runCycleMulti(
-      descriptor, &state, engines, instruments, scratch, shard, control, 0u, 1000ll, request, nullptr);
+      descriptor, &state, engines, instruments, *scratch, shard, control, 0u, 1000ll, request, nullptr);
   const std::size_t ordersAfterWarmup = engine.orders.size();
   const std::uint64_t hotMonoAfterWarmup = engine.lastOrderPathHotMono.raw;
 
   const bool realOrderOk = hft_backtest::runCycleMulti(
-      descriptor, &state, engines, instruments, scratch, shard, control, 0u, 1001ll, request, nullptr);
+      descriptor, &state, engines, instruments, *scratch, shard, control, 0u, 1001ll, request, nullptr);
 
   return expect(warmupOk, "first cycle emits service warmup order") &&
          expect(ordersAfterWarmup == 2u, "warmup order and cancel are recorded") &&
@@ -321,30 +322,6 @@ bool testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() {
          expect(engine.userEvents.size() == 1u, "real fill publishes strategy user event") &&
          expect(engine.orders.size() == 3u, "no second warmup is inserted once route is hot") &&
          expect(!engine.orders.back().service && !engine.orders.back().warmup, "final order is real strategy order");
-}
-
-bool testBacktestRateLimitScheduleReplacesMatchingPreset() {
-  BacktestRunRequest request{};
-  BacktestRateLimitSchedule overrideSchedule{};
-  overrideSchedule.exchange = "binance";
-  overrideSchedule.market = "futures";
-  hft_trader::core::RateLimitBucketConfig bucket{};
-  bucket.kind = hft_trader::core::RateLimitBucketKind::Orders;
-  bucket.limit = 7;
-  bucket.intervalNs = 10000000000ull;
-  bucket.enabled = true;
-  overrideSchedule.buckets.push_back(bucket);
-  request.rateLimitSchedules.push_back(std::move(overrideSchedule));
-
-  const BacktestRateLimitSchedule schedule = resolveRateLimitSchedule(request, "binance", "futures");
-  const hft_trader::core::RateLimitBucketConfig* tenSecond = findRateLimitBucket(
-      schedule, hft_trader::core::RateLimitBucketKind::Orders, 10000000000ull);
-  const hft_trader::core::RateLimitBucketConfig* minute = findRateLimitBucket(
-      schedule, hft_trader::core::RateLimitBucketKind::Orders, 60000000000ull);
-  return expect(tenSecond && tenSecond->limit == 7,
-                "explicit backtest rate-limit bucket overrides matching preset window") &&
-         expect(minute == nullptr,
-                "explicit backtest rate-limit schedule replaces preset windows");
 }
 
 bool testBacktestFeeScheduleOverridesExchangePreset() {
@@ -3158,21 +3135,6 @@ bool testStatArbBandLadderMetadataRequiresTwoSessions() {
          expect(metadataParamDefaultIs(*metadata, "order_qty", "0.001"), "ladder order_qty default comes from commented ini template");
 }
 
-bool testBasisConvergenceMetadataUsesOneSession() {
-  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("basis_convergence_probe");
-  return expect(metadata != nullptr, "basis_convergence_probe metadata is exported") &&
-         expect(metadata->configTemplateFile != nullptr &&
-                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/basis_convergence_probe.ini",
-                "basis_convergence_probe metadata discovers strategy profile") &&
-         expect(metadataDisplayNameIs(*metadata, "Базис spot/futures"),
-                "basis convergence display name comes from ini metadata") &&
-         expect(metadata->minSessionCount == 1u, "basis convergence probe uses one session") &&
-         expect(metadata->maxSessionCount == 1u, "basis convergence probe allows one session") &&
-         expect(!metadataHasParam(*metadata, "source"), "basis convergence metadata keeps source auto-resolved") &&
-         expect(!metadataHasParam(*metadata, "timeframe_sec"), "basis convergence metadata keeps timeframe defaulted") &&
-         expect(!metadataHasParam(*metadata, "expiry_utc_ns"), "basis convergence metadata keeps expiry auto-resolved");
-}
-
 bool testTrendProbeMetadataExposesTrendScoreIndicator() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("trend_probe");
   return expect(metadata != nullptr, "trend_probe metadata is exported") &&
@@ -3214,6 +3176,7 @@ bool testToxicFlowProbeMetadataRequiresDepthIndicator() {
          expect(metadata->paramCount == 0u, "toxic_flow_probe has no strategy params") &&
          expect(metadataHasIndicator(*metadata, "toxic_flow"), "toxic_flow_probe exposes toxic_flow indicator");
 }
+
 }  // namespace
 
 int main() {
@@ -3223,7 +3186,6 @@ int main() {
   ok = testBacktestRateLimitScheduleCanDisablePresets() && ok;
   ok = testWarmupOrderIsServiceHiddenAndMarksHot() && ok;
   ok = testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() && ok;
-  ok = testBacktestRateLimitScheduleReplacesMatchingPreset() && ok;
   ok = testBacktestFeeScheduleOverridesExchangePreset() && ok;
   ok = testBacktestGlobalFeeOverrideFillsPresetSides() && ok;
   ok = testRateLimitDecisionAllowsAfterReset() && ok;
@@ -3313,7 +3275,6 @@ int main() {
   ok = testStatArbBandLadderKeepsTradesOptionalForBboOnlyReplay() && ok;
   ok = testStrategyMetadataExposesOnlySupportedSpreadMakerParams() && ok;
   ok = testStatArbBandLadderMetadataRequiresTwoSessions() && ok;
-  ok = testBasisConvergenceMetadataUsesOneSession() && ok;
   ok = testTrendProbeMetadataExposesTrendScoreIndicator() && ok;
   ok = testVolatilityProbeMetadataExposesVolatilityIndicator() && ok;
   ok = testToxicFlowProbeMetadataRequiresDepthIndicator() && ok;

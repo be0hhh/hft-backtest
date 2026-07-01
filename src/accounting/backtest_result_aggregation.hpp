@@ -25,5 +25,10 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
 void appendRateLimitWarnings(BacktestRunResult& result,
                              const detail::EngineState& engine,
                              const std::vector<detail::EngineState>* legEngines = nullptr) noexcept;
+std::uint64_t rateLimitRejectedCommands(const detail::EngineState& engine,
+                                        const std::vector<detail::EngineState>* legEngines = nullptr) noexcept;
+bool applyStrictRateLimitStatus(BacktestRunResult& result,
+                                const detail::EngineState& engine,
+                                const std::vector<detail::EngineState>* legEngines = nullptr) noexcept;
 
 }  // namespace hft_backtest

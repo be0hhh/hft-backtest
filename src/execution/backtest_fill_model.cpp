@@ -81,8 +81,15 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
 }
 
 [[nodiscard]] bool levelExecutableByLimit(const OpenOrder& order, std::int64_t levelPriceE8) noexcept {
-  if (order.state.orderType == canon::OrderType::Market ||
-      (order.state.orderType == canon::OrderType::Stop && order.stopTriggered)) return true;
+  if (order.state.orderType == canon::OrderType::Market) return true;
+  if (order.state.orderType == canon::OrderType::Stop && order.stopTriggered) {
+    if (order.state.price.raw <= 0 || (order.state.triggeredTimeInForce != canon::TimeInForce::IOC &&
+                                       order.state.triggeredTimeInForce != canon::TimeInForce::FOK)) {
+      return true;
+    }
+    if (order.state.side.raw == Side::Buy().raw) return levelPriceE8 <= order.state.price.raw;
+    return levelPriceE8 >= order.state.price.raw;
+  }
   if (order.state.side.raw == Side::Buy().raw) return levelPriceE8 <= order.state.price.raw;
   return levelPriceE8 >= order.state.price.raw;
 }
@@ -172,6 +179,20 @@ void resetAggressivePlan(AggressiveFillPlan& out) noexcept {
 std::int64_t openOrderRemainingQty(const OpenOrder& order) noexcept {
   if (order.state.qty.raw <= order.filledQtyRaw) return 0;
   return order.state.qty.raw - order.filledQtyRaw;
+}
+
+bool triggeredStopLimitOrder(const OpenOrder& order) noexcept {
+  return order.state.valid &&
+         order.state.orderType == canon::OrderType::Stop &&
+         order.stopTriggered &&
+         order.state.price.raw > 0 &&
+         (order.state.triggeredTimeInForce == canon::TimeInForce::IOC ||
+          order.state.triggeredTimeInForce == canon::TimeInForce::FOK);
+}
+
+bool triggeredStopFokLimitOrder(const OpenOrder& order) noexcept {
+  return triggeredStopLimitOrder(order) &&
+         order.state.triggeredTimeInForce == canon::TimeInForce::FOK;
 }
 
 void initializePassiveQueue(OpenOrder& order, const EngineState& engine) noexcept {

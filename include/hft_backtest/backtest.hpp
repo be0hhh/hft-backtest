@@ -81,6 +81,7 @@ struct BacktestRunRequest {
   bool hasMakerFeeBps{false};
   bool hasTakerFeeBps{false};
   bool rateLimitsEnabled{true};
+  bool strictRateLimitRejects{false};
   bool writeArtifacts{true};
   bool captureStrategySpread{false};
 };
@@ -214,6 +215,10 @@ struct BacktestRunResult {
   std::vector<BacktestLegSummary> legs{};
   BacktestInputCoverage inputCoverage{};
   BacktestLiveProbeSummary liveProbe{};
+  std::uint64_t rateLimitRejectedCommands{0};
+  bool rateLimitsEnabled{true};
+  bool strictRateLimitRejects{false};
+  bool rateLimitStrictFailure{false};
   bool strategyClosed{false};
   bool liquidated{false};
   bool riskStopped{false};
