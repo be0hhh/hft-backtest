@@ -176,6 +176,7 @@ struct BacktestRunResult {
   std::uint64_t openInterest{0};
   std::uint64_t orders{0};
   std::uint64_t fills{0};
+  std::uint64_t strategySpreadRows{0};
   std::uint64_t events{0};
   std::uint64_t userEvents{0};
   std::uint64_t timerWakeEvents{0};

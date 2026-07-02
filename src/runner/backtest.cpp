@@ -173,7 +173,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.cancelLatencyUs = latencyConfig.cancelOrder.baseUs;
   result.initialBalanceE8 = portfolioInitialBalance;
   result.walletBalanceE8 = portfolioInitialBalance;
+  auto refreshArtifactCounters = [&](const detail::EngineState& engine) noexcept {
+    result.strategySpreadRows = engine.strategySpread.size();
+  };
   auto writeArtifacts = [&](const detail::EngineState& engine) noexcept -> Status {
+    refreshArtifactCounters(engine);
     if (!request.writeArtifacts) return Status::Ok;
     return detail::writeResult(result, engine);
   };
@@ -648,6 +652,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       try {
         auto aggregate = std::make_unique<detail::EngineState>();
         populateAggregateArtifactEngine(legEngines, portfolioInitialBalance, tsNs, *aggregate);
+        refreshArtifactCounters(*aggregate);
         return request.writeArtifacts ? detail::writeResult(result, *aggregate, &legEngines) : Status::Ok;
       } catch (...) {
         return Status::IoError;
@@ -1116,6 +1121,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.warnings.push_back(result.error.empty() ? std::string{"leg liquidated"} : result.error);
     result.error.clear();
     (void)applyStrictRateLimitStatus(result, engine, hasExplicitSessions ? &legEngines : nullptr);
+    refreshArtifactCounters(engine);
     Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
     if (!isOk(writeStatus)) result.status = writeStatus;
     return result;
@@ -1123,12 +1129,14 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (traderRiskCloseProblem) {
     result.status = Status::InvalidArgument;
     result.error = "trader risk stop could not force-close all open positions";
+    refreshArtifactCounters(engine);
     Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
     if (!isOk(writeStatus)) result.status = writeStatus;
     return result;
   }
   result.status = Status::Ok;
   (void)applyStrictRateLimitStatus(result, engine, hasExplicitSessions ? &legEngines : nullptr);
+  refreshArtifactCounters(engine);
   Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
   if (!isOk(writeStatus)) result.status = writeStatus;
   (void)reportProgress(timeline.size(), timeline.size(), "complete", progressCallback, userData);
