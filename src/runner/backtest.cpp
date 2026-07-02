@@ -38,6 +38,17 @@ namespace {
 using hft_trader::runtime::StrategyDescriptor;
 using hft_trader::runtime::StrategyParamStorage;
 
+BacktestLiveProbeSummary summarizeLiveProbeConfig(const hft_trader::runtime::HftRuntimeConfig& cfg) noexcept {
+  BacktestLiveProbeSummary summary{};
+  for (const hft_trader::runtime::VenueRuntimeConfig& venue : cfg.venues) {
+    if (venue.liveProbe == hft_trader::runtime::LiveProbeVenueMode::Default) continue;
+    summary.configured = true;
+    if (venue.liveProbe == hft_trader::runtime::LiveProbeVenueMode::Required) summary.enabled = true;
+  }
+  summary.ignored = summary.configured;
+  return summary;
+}
+
 bool reportProgress(std::uint64_t done, std::uint64_t total, std::string stage, BacktestProgressCallback cb, void* userData) noexcept {
   if (!cb) return true;
   BacktestProgress progress{};
@@ -224,12 +235,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)writeEmptyArtifacts();
     return result;
   }
-  result.liveProbe.configured = cfg.liveProbe.configured;
-  result.liveProbe.enabled = cfg.liveProbe.enabled;
-  result.liveProbe.ignored = cfg.liveProbe.configured;
-  result.liveProbe.notionalUsdtE8 = cfg.liveProbe.notionalUsdtE8;
-  result.liveProbe.timeoutMs = cfg.liveProbe.timeoutMs;
-  result.liveProbe.limitOffsetSpreadPct = cfg.liveProbe.limitOffsetSpreadPct;
+  result.liveProbe = summarizeLiveProbeConfig(cfg);
   result.strategy = request.strategy.empty() ? cfg.strategyType : request.strategy;
   StrategyIndicatorProfileInfo indicatorProfile{};
   if (!resolveStrategyIndicatorProfile(request.indicatorProfile, indicatorProfile)) {
@@ -609,7 +615,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (result.firstTsNs == std::numeric_limits<std::int64_t>::max()) result.firstTsNs = session.firstTsNs;
   result.events = timeline.size();
   const bool captureIndicatorTrace = !result.indicatorProfile.empty();
-  const bool captureRangeTrace = false;
+  const bool captureRangeTrace = emitsPriceRangeTrace(*descriptor);
   const bool captureSpreadTrace = request.captureStrategySpread && emitsArbSpreadTrace(*descriptor);
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {

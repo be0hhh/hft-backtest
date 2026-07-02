@@ -110,9 +110,6 @@ struct BacktestLiveProbeSummary {
   bool configured{false};
   bool enabled{false};
   bool ignored{false};
-  std::int64_t notionalUsdtE8{0};
-  unsigned timeoutMs{0};
-  unsigned limitOffsetSpreadPct{0};
 };
 
 struct BacktestLegSummary {

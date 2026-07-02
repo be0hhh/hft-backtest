@@ -999,9 +999,6 @@ bool writeManifest(const std::filesystem::path& path,
         << q << "configured" << q << ": true"
         << ", " << q << "enabled" << q << ": " << (result.liveProbe.enabled ? "true" : "false")
         << ", " << q << "mode" << q << ": " << q << "ignored_backtest" << q
-        << ", " << q << "notional_usdt_e8" << q << ": " << result.liveProbe.notionalUsdtE8
-        << ", " << q << "timeout_ms" << q << ": " << result.liveProbe.timeoutMs
-        << ", " << q << "limit_offset_spread_pct" << q << ": " << result.liveProbe.limitOffsetSpreadPct
         << "},\n";
   }
   out << "  " << q << "streams" << q << ": {\n";

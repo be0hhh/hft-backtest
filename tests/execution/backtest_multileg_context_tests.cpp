@@ -79,6 +79,24 @@ struct MultiLegContextProbeState {
   bool sawLastLegInstrument{false};
 };
 
+struct SingleLegContextProbeState {
+  std::size_t orderStateCount{0u};
+  std::size_t positionCount{0u};
+  bool sawRouteOrderState{false};
+  bool sawRoutePosition{false};
+};
+
+bool singleLegContextProbeRunCycle(void* rawState, hft_trader::core::StrategyContext& ctx) noexcept {
+  auto& state = *static_cast<SingleLegContextProbeState*>(rawState);
+  state.orderStateCount = ctx.orderStates.count;
+  state.positionCount = ctx.positionStates.count;
+  state.sawRouteOrderState = ctx.orderStates.get(0u) != nullptr;
+  if (const hft_trader::core::StrategyPositionState* position = ctx.positionStates.get(0u)) {
+    state.sawRoutePosition = position->valid && position->netQty.raw == 123000000ll;
+  }
+  return true;
+}
+
 bool multiLegContextProbeRunCycle(void* rawState, hft_trader::core::StrategyContext& ctx) noexcept {
   auto& state = *static_cast<MultiLegContextProbeState*>(rawState);
   state.marketDataCount = ctx.marketData.count;
@@ -101,6 +119,38 @@ bool multiLegContextProbeRunCycle(void* rawState, hft_trader::core::StrategyCont
     state.sawLastLegInstrument = instrument->tickSizeRaw == 900000000ll;
   }
   return true;
+}
+
+bool testRunCycleSinglePassesRouteContext() {
+  EngineState engine{};
+  StrategyInstrumentSpec instrument{};
+  setTop(engine, kPx100, kPx100 + 100000000ll);
+  engine.position.valid = true;
+  engine.position.netQty.raw = 123000000ll;
+  instrument.tickSizeRaw = 100000000ll;
+  instrument.stepSizeRaw = 100000000ll;
+  instrument.tickGrid = hft_trader::core::prepareFastStepGrid(instrument.tickSizeRaw);
+  instrument.qtyStepGrid = hft_trader::core::prepareFastStepGrid(instrument.stepSizeRaw);
+
+  hft_trader::runtime::StrategyDescriptor descriptor{};
+  descriptor.name = "single_leg_context_probe";
+  descriptor.streamCount = 1u;
+  descriptor.streams[0] = cxet::api::market::PublicMarketDataStream::BookTicker;
+  descriptor.runCycle = singleLegContextProbeRunCycle;
+
+  SingleLegCycleScratch scratch{};
+  SingleLegContextProbeState state{};
+  hft_trader::core::SymbolShardConfig shard{};
+  hft_trader::core::ShardControlState control{};
+  BacktestRunRequest request{};
+
+  const bool ok = runCycle(descriptor, &state, engine, instrument, scratch, shard, control, 1000ll, request, nullptr);
+
+  return expect(ok, "single-leg cycle runs") &&
+         expect(state.orderStateCount == 1u, "single-leg orderStates exposes route 0") &&
+         expect(state.positionCount == 1u, "single-leg positionStates exposes route 0") &&
+         expect(state.sawRouteOrderState, "strategy can read single-leg route order state") &&
+         expect(state.sawRoutePosition, "strategy can read single-leg route position");
 }
 
 bool testRunCycleMultiPassesNineLegContextWithoutTruncation() {
@@ -151,6 +201,7 @@ bool testRunCycleMultiPassesNineLegContextWithoutTruncation() {
 int main() {
   bool ok = true;
   ok = testBacktestExplicitSessionLimitAllowsRuntimeMaxAndRejectsOneMore() && ok;
+  ok = testRunCycleSinglePassesRouteContext() && ok;
   ok = testRunCycleMultiPassesNineLegContextWithoutTruncation() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

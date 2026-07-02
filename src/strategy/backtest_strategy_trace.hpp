@@ -29,6 +29,7 @@ struct StrategyIndicatorProfileInfo {
 void configureStrategyIndicator(detail::EngineState& engine,
                                 const StrategyIndicatorProfileInfo& profile);
 [[nodiscard]] bool emitsArbSpreadTrace(const hft_trader::runtime::StrategyDescriptor& descriptor) noexcept;
+[[nodiscard]] bool emitsPriceRangeTrace(const hft_trader::runtime::StrategyDescriptor& descriptor) noexcept;
 void reserveEngineStorage(detail::EngineState& engine,
                           std::size_t events,
                           bool captureIndicatorTrace,

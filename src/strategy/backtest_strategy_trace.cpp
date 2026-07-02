@@ -85,6 +85,10 @@ bool emitsArbSpreadTrace(const hft_trader::runtime::StrategyDescriptor& descript
   return descriptor.emitsArbSpreadTrace;
 }
 
+bool emitsPriceRangeTrace(const hft_trader::runtime::StrategyDescriptor& descriptor) noexcept {
+  return descriptor.emitsPriceRangeTrace;
+}
+
 void reserveEngineStorage(detail::EngineState& engine,
                           std::size_t events,
                           bool captureIndicatorTrace,

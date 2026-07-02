@@ -652,7 +652,11 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.instrumentSpecs.count = 1u;
   ctx.orderState.orders = scratch.orderStorage.data();
   ctx.orderState.count = orderViewCount;
+  ctx.orderStates.legs = &ctx.orderState;
+  ctx.orderStates.count = 1u;
   ctx.positionState = engine.position;
+  ctx.positionStates.legs = &ctx.positionState;
+  ctx.positionStates.count = 1u;
   ctx.accountState = accountStateFromEngine(engine);
   ctx.accountStates.legs = &ctx.accountState;
   ctx.accountStates.count = 1u;
@@ -693,7 +697,7 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
   recordInputCoverage(engine);
   hft_trader::core::StrategyDecisionTrace trace{};
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engine);
-  const bool captureRangeTrace = false;
+  const bool captureRangeTrace = emitsPriceRangeTrace(descriptor);
   const bool captureSpreadTrace = request.captureStrategySpread && emitsArbSpreadTrace(descriptor);
   if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
@@ -838,7 +842,7 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
   recordInputCoverage(engines[0]);
   hft_trader::core::StrategyDecisionTrace trace{};
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engines[0]);
-  const bool captureRangeTrace = false;
+  const bool captureRangeTrace = emitsPriceRangeTrace(descriptor);
   const bool captureSpreadTrace = request.captureStrategySpread && emitsArbSpreadTrace(descriptor);
   if (captureIndicatorTrace || captureRangeTrace || captureSpreadTrace) {
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);

@@ -2597,9 +2597,6 @@ bool testWriterCreatesV2RunDirectory() {
   result.liveProbe.configured = true;
   result.liveProbe.enabled = true;
   result.liveProbe.ignored = true;
-  result.liveProbe.notionalUsdtE8 = 1000000000ll;
-  result.liveProbe.timeoutMs = 1000u;
-  result.liveProbe.limitOffsetSpreadPct = 5u;
   hft_backtest::BacktestLegSummary leg{};
   leg.exchange = "binance";
   leg.market = "futures";
@@ -2652,6 +2649,7 @@ bool testWriterCreatesV2RunDirectory() {
   engine.strategyIndicatorUnit = "score";
   engine.strategyIndicator.push_back(JsonStrategyIndicatorPoint{150, 42, 44, 1, 7, 3, 1});
   engine.strategySpread.push_back(JsonStrategySpreadPoint{150, 100000000, 90000000, 10000000, 5000000, 5000000, 1, 3, 0});
+  engine.strategyRange.push_back(JsonStrategyRangePoint{150, 9900000000ll, 0, 10100000000ll});
   result.orders = engine.orders.size();
   result.fills = engine.fills.size();
 
@@ -2663,6 +2661,7 @@ bool testWriterCreatesV2RunDirectory() {
   const std::string risk = readText(dir / "risk_snapshots.jsonl");
   const std::string indicator = readText(dir / "strategy_indicator.jsonl");
   const std::string spread = readText(dir / "strategy_spread.jsonl");
+  const std::string range = readText(dir / "strategy_range.jsonl");
 
   return expect(status == hft_backtest::Status::Ok, "v2 writer reports ok") &&
          expect(std::filesystem::is_directory(dir), "result path is a directory") &&
@@ -2679,13 +2678,16 @@ bool testWriterCreatesV2RunDirectory() {
          expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
          expect(manifest.find("trend_fast_score") != std::string::npos, "manifest declares trend indicator components") &&
          expect(manifest.find("\"strategy_spread\": {") != std::string::npos, "manifest declares strategy spread stream") &&
+         expect(manifest.find("\"strategy_range\": {") != std::string::npos, "manifest declares strategy range stream") &&
          expect(manifest.find("\"warnings\": [{\"message\": \"partial depth replay: dropped 1 unpaired depth_tape rows; exact replay lost\"}]") != std::string::npos,
                 "manifest saves run warnings separately from errors") &&
          expect(manifest.find("\"profile\": \"trend_score\"") != std::string::npos, "indicator stream carries profile") &&
          expect(manifest.find("\"aux_label\": \"Raw\"") != std::string::npos, "trend score aux line is raw score") &&
          expect(manifest.find("\"live_probe\": {") != std::string::npos, "manifest carries live probe metadata") &&
          expect(manifest.find("\"mode\": \"ignored_backtest\"") != std::string::npos, "manifest marks live probe ignored in backtest") &&
-         expect(manifest.find("\"notional_usdt_e8\": 1000000000") != std::string::npos, "manifest carries live probe notional") &&
+         expect(manifest.find("\"notional_usdt_e8\"") == std::string::npos, "manifest omits removed live probe notional") &&
+         expect(manifest.find("\"timeout_ms\"") == std::string::npos, "manifest omits removed live probe timeout") &&
+         expect(manifest.find("\"limit_offset_spread_pct\"") == std::string::npos, "manifest omits removed live probe offset") &&
          expect(manifest.find("\"market_data_latency\": {\"base_us\": 250, \"jitter_us\": 100}") != std::string::npos,
                 "manifest leg summary carries per-leg market data latency") &&
          expect(orderLifetimes == "[110,150,10000000000,100000000,1,0,0,1]\n"
@@ -2698,6 +2700,7 @@ bool testWriterCreatesV2RunDirectory() {
          expect(risk == "[150,0,0,0,0,0,0,100000000000,100000000,10000000000,9900000000,10100000000,1,2]\n", "risk stream uses compact arrays") &&
          expect(indicator == "[150,42,44,1,7,3,1,0,0,0,0,0,0]\n", "strategy indicator stream uses compact arrays") &&
          expect(spread == "[150,100000000,90000000,10000000,5000000,5000000,1,3,0]\n", "strategy spread stream uses compact arrays") &&
+         expect(range == "[150,9900000000,0,10100000000]\n", "strategy range stream uses compact arrays") &&
          expect(std::filesystem::exists(dir / "config.ini"), "writer copies run config into result directory") &&
          expect(!std::filesystem::exists(dir.parent_path() / "run-v2.summary.json"), "writer does not create legacy summary json");
 }
@@ -2825,14 +2828,10 @@ bool testTrendProbeWritesTrendScoreIndicator() {
             "[strategy]\n"
             "type=trend_probe\n"
             "enabled=1\n"
-            "[live_probe]\n"
-            "enabled=true\n"
-            "notional_usdt=10\n"
-            "timeout_ms=1000\n"
-            "limit_offset_spread_pct=5\n"
             "[venue.binance_futures]\n"
             "api_slot=1\n"
-            "symbols=BTCUSDT\n");
+            "symbols=BTCUSDT\n"
+            "live_probe=required\n");
 
   hft_backtest::BacktestRunRequest request{};
   request.sessionPath = dir;
@@ -2849,7 +2848,6 @@ bool testTrendProbeWritesTrendScoreIndicator() {
          expect(result.liveProbe.configured, "backtest result carries configured live probe") &&
          expect(result.liveProbe.enabled, "backtest result carries enabled live probe") &&
          expect(result.liveProbe.ignored, "backtest marks live probe ignored") &&
-         expect(result.liveProbe.notionalUsdtE8 == 1000000000ll, "backtest result carries live probe notional") &&
          expect(result.inputCoverage.strategyCycles > 0u, "trend_probe was invoked") &&
          expect(result.inputCoverage.cyclesWithTrade > 0u, "trend_probe sees trades") &&
          expect(result.inputCoverage.cyclesWithBookTicker > 0u, "trend_probe sees bookticker") &&

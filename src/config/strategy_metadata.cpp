@@ -255,7 +255,28 @@ std::vector<IniTemplate> loadTemplates() {
       if (parseTemplateFile(path, fileName, parsed)) out.push_back(std::move(parsed));
     }
   };
-  appendDirectory(root / "strategy_profiles", "strategy_profiles");
+  const auto appendProfileTree = [&out](const std::filesystem::path& dir, const std::string& prefix) {
+    std::error_code ec{};
+    std::filesystem::recursive_directory_iterator it(dir, std::filesystem::directory_options::skip_permission_denied, ec);
+    const std::filesystem::recursive_directory_iterator end{};
+    while (!ec && it != end) {
+      const std::filesystem::directory_entry& entry = *it;
+      std::error_code entryError{};
+      if (entry.is_regular_file(entryError) && !entryError) {
+        const std::filesystem::path path = entry.path();
+        if (path.extension() == ".ini") {
+          std::error_code relError{};
+          const std::filesystem::path relative = std::filesystem::relative(path, dir, relError);
+          const std::string relativeName = relError ? path.filename().generic_string() : relative.generic_string();
+          const std::string fileName = prefix.empty() ? relativeName : prefix + "/" + relativeName;
+          IniTemplate parsed{};
+          if (parseTemplateFile(path, fileName, parsed)) out.push_back(std::move(parsed));
+        }
+      }
+      it.increment(ec);
+    }
+  };
+  appendProfileTree(root / "strategy_profiles", "strategy_profiles");
   appendDirectory(root, "");
   return out;
 }
