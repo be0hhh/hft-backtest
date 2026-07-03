@@ -14,7 +14,7 @@
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--strategy-spread] [--no-rate-limits] [--strict-rate-limits] [--two-phase-reprice] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--cancel-order-latency-us N] [--cancel-order-jitter-us N] [--user-data-latency-us N] [--user-data-jitter-us N] [--order-latency-us N] [--cancel-latency-us N] [--maker-fill-min-cross-ticks N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps] [--latency exchange:market:md_base:md_jitter:mkt_base:mkt_jitter:limit_base:limit_jitter[:cancel_base:cancel_jitter:user_base:user_jitter]]\n";
+  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--primary-leg-index N] [--trade-mode all|primary] [--strategy-spread] [--no-rate-limits] [--strict-rate-limits] [--two-phase-reprice] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--cancel-order-latency-us N] [--cancel-order-jitter-us N] [--user-data-latency-us N] [--user-data-jitter-us N] [--order-latency-us N] [--cancel-latency-us N] [--maker-fill-min-cross-ticks N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps] [--latency exchange:market:md_base:md_jitter:mkt_base:mkt_jitter:limit_base:limit_jitter[:cancel_base:cancel_jitter:user_base:user_jitter]]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {
@@ -35,6 +35,19 @@ bool parseU32(const char* text, std::uint32_t& out) noexcept {
   if (value > std::numeric_limits<std::uint32_t>::max()) return false;
   out = static_cast<std::uint32_t>(value);
   return true;
+}
+
+bool parseTradeMode(const char* text, hft_backtest::BacktestTradeMode& out) noexcept {
+  if (!text) return false;
+  if (std::strcmp(text, "all") == 0 || std::strcmp(text, "all_legs") == 0) {
+    out = hft_backtest::BacktestTradeMode::AllLegs;
+    return true;
+  }
+  if (std::strcmp(text, "primary") == 0 || std::strcmp(text, "primary_only") == 0) {
+    out = hft_backtest::BacktestTradeMode::PrimaryOnly;
+    return true;
+  }
+  return false;
 }
 
 bool parseI64Text(const char* first, const char* last, std::int64_t& out) noexcept {
@@ -214,6 +227,13 @@ int main(int argc, char** argv) {
       if (const char* value = needValue(arg)) request.strategy = value;
     } else if (std::strcmp(arg, "--indicator-profile") == 0) {
       if (const char* value = needValue(arg)) request.indicatorProfile = value;
+    } else if (std::strcmp(arg, "--primary-leg-index") == 0) {
+      const char* value = needValue(arg);
+      if (!value || !parseU32(value, request.primaryLegIndex)) return 2;
+      request.hasPrimaryLegIndex = true;
+    } else if (std::strcmp(arg, "--trade-mode") == 0) {
+      const char* value = needValue(arg);
+      if (!value || !parseTradeMode(value, request.tradeMode)) return 2;
     } else if (std::strcmp(arg, "--strategy-spread") == 0) {
       request.captureStrategySpread = true;
     } else if (std::strcmp(arg, "--no-rate-limits") == 0) {

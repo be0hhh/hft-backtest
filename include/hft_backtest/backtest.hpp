@@ -52,6 +52,11 @@ enum class BacktestExecutionPipeline : std::uint8_t {
   TwoPhaseReprice = 1,
 };
 
+enum class BacktestTradeMode : std::uint8_t {
+  AllLegs = 0,
+  PrimaryOnly = 1,
+};
+
 struct BacktestRunRequest {
   std::filesystem::path sessionPath{};
   std::vector<BacktestSessionRequest> sessions{};
@@ -78,8 +83,11 @@ struct BacktestRunRequest {
   std::vector<BacktestLatencySchedule> latencySchedules{};
   std::vector<BacktestRateLimitSchedule> rateLimitSchedules{};
   BacktestExecutionPipeline executionPipeline{BacktestExecutionPipeline::Inline};
+  BacktestTradeMode tradeMode{BacktestTradeMode::AllLegs};
+  std::uint32_t primaryLegIndex{0u};
   bool hasMakerFeeBps{false};
   bool hasTakerFeeBps{false};
+  bool hasPrimaryLegIndex{false};
   bool rateLimitsEnabled{true};
   bool strictRateLimitRejects{false};
   bool writeArtifacts{true};
@@ -214,9 +222,12 @@ struct BacktestRunResult {
   BacktestInputCoverage inputCoverage{};
   BacktestLiveProbeSummary liveProbe{};
   std::uint64_t rateLimitRejectedCommands{0};
+  BacktestTradeMode tradeMode{BacktestTradeMode::AllLegs};
+  std::uint32_t primaryLegIndex{0u};
   bool rateLimitsEnabled{true};
   bool strictRateLimitRejects{false};
   bool rateLimitStrictFailure{false};
+  bool hasPrimaryLegIndex{false};
   bool strategyClosed{false};
   bool liquidated{false};
   bool riskStopped{false};

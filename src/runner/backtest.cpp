@@ -10,6 +10,7 @@
 #include "strategy/backtest_strategy_runtime.hpp"
 #include "strategy/backtest_strategy_trace.hpp"
 #include "input/session_loader.hpp"
+#include "runner/backtest_run_error.hpp"
 
 #include "hft_trader/core/control/ControlState.hpp"
 #include "hft_trader/core/market/LocalOrderBook.hpp"
@@ -165,6 +166,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.sessionPath = request.sessionPath;
   result.configPath = request.configPath;
   result.resultPath = resultPathFor(request, result.runId);
+  result.tradeMode = request.tradeMode;
+  result.primaryLegIndex = request.hasPrimaryLegIndex ? request.primaryLegIndex : 0u;
+  result.hasPrimaryLegIndex = request.hasPrimaryLegIndex;
   result.rateLimitsEnabled = request.rateLimitsEnabled;
   result.strictRateLimitRejects = request.strictRateLimitRejects;
   const bool hasExplicitSessions = !request.sessions.empty();
@@ -210,6 +214,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (hasExplicitSessions && explicitSessionPathCount(request, hasExplicitSessions) > hft_trader::core::kStrategyRuntimeMaxLegs) {
     result.status = Status::InvalidArgument;
     result.error = "too many backtest sessions (max " + std::to_string(hft_trader::core::kStrategyRuntimeMaxLegs) + ")";
+    return result;
+  }
+  if (request.hasPrimaryLegIndex && request.primaryLegIndex >= requestedSessionCount) {
+    result.status = Status::InvalidArgument;
+    result.error = "primary leg index " + std::to_string(request.primaryLegIndex) +
+                   " is outside selected leg count " + std::to_string(requestedSessionCount);
     return result;
   }
   if (!request.outputPath.empty() && request.outputPath.extension() == ".json") {
@@ -839,7 +849,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
           : runCycle(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, delivered.deliveryTsNs, request, nullptr);
       if (!deliveredOk) {
         result.status = Status::InvalidArgument;
-        result.error = "strategy runCycle failed on delivered market event";
+        result.error = formatStrategyRunCycleError(*descriptor,
+                                                   state.data(),
+                                                   "delivered",
+                                                   delivered.deliveryTsNs,
+                                                   delivered.legIndex);
         (void)writeCurrentArtifacts();
         return result;
       }
@@ -891,7 +905,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
           : runCycle(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, delivered.deliveryTsNs, request, nullptr);
       if (!deliveredOk) {
         result.status = Status::InvalidArgument;
-        result.error = "strategy runCycle failed on delivered market event";
+        result.error = formatStrategyRunCycleError(*descriptor,
+                                                   state.data(),
+                                                   "delivered",
+                                                   delivered.deliveryTsNs,
+                                                   delivered.legIndex);
         (void)writeCurrentArtifacts();
         return result;
       }
@@ -948,7 +966,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
         : runCycle(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, delivered.deliveryTsNs, request, nullptr);
     if (!delayedOk) {
       result.status = Status::InvalidArgument;
-      result.error = "strategy runCycle failed on delayed market event";
+      result.error = formatStrategyRunCycleError(*descriptor,
+                                                 state.data(),
+                                                 "delayed",
+                                                 delivered.deliveryTsNs,
+                                                 delivered.legIndex);
       (void)writeCurrentArtifacts();
       return result;
     }

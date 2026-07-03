@@ -219,6 +219,14 @@ const char* rateLimitModeName(const BacktestRunResult& result) noexcept {
   return result.strictRateLimitRejects ? "strict" : "model";
 }
 
+const char* tradeModeName(BacktestTradeMode mode) noexcept {
+  switch (mode) {
+    case BacktestTradeMode::AllLegs: return "all_legs";
+    case BacktestTradeMode::PrimaryOnly: return "primary_only";
+  }
+  return "all_legs";
+}
+
 SignalDiagnostics collectSignalDiagnostics(const EngineState& engine,
                                            const std::filesystem::path& configPath) {
   SignalDiagnostics out{};
@@ -964,6 +972,9 @@ bool writeManifest(const std::filesystem::path& path,
       << (result.twoPhaseRepriceApplied ? "two_phase_reprice_v1" : "inline") << q
       << ", " << q << "two_phase_reprice_applied" << q << ": " << (result.twoPhaseRepriceApplied ? "true" : "false")
       << ", " << q << "two_phase_reprice_fallback" << q << ": " << (result.twoPhaseRepriceFallback ? "true" : "false")
+      << ", " << q << "trade_mode" << q << ": " << q << tradeModeName(result.tradeMode) << q
+      << ", " << q << "primary_leg_index" << q << ": " << result.primaryLegIndex
+      << ", " << q << "has_primary_leg_index" << q << ": " << (result.hasPrimaryLegIndex ? "true" : "false")
       << ", " << q << "phase2_depth_rows" << q << ": " << result.phase2DepthRows
       << ", " << q << "phase2_fills_repriced" << q << ": " << result.phase2FillsRepriced
       << ", " << q << "phase2_fills_missing_depth" << q << ": " << result.phase2FillsMissingDepth

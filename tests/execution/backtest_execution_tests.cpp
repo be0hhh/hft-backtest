@@ -7,7 +7,7 @@
 #include "config/backtest_run_config.hpp"
 #include "strategy/backtest_strategy_runtime.hpp"
 
-#include "hft_trader/api/UserDataTools.hpp"
+#include "hft_trader/api/user/UserDataTools.hpp"
 #include "hft_trader/core/rate_limit/RateLimit.hpp"
 #include "hft_trader/core/rate_limit/RateLimitPresets.hpp"
 #include "hft_trader/runtime/GeneratedStrategyRegistry.hpp"
@@ -22,6 +22,7 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -395,14 +396,6 @@ std::string readText(const std::filesystem::path& path) {
   std::ostringstream ss;
   ss << in.rdbuf();
   return ss.str();
-}
-
-std::size_t lineCount(std::string_view text) noexcept {
-  std::size_t out = 0u;
-  for (char ch : text) {
-    if (ch == '\n') ++out;
-  }
-  return out;
 }
 
 void writeText(const std::filesystem::path& path, std::string_view text) {
@@ -2799,204 +2792,44 @@ bool testWriterDiagnosesOrdersWithoutFillsAndRateLimits() {
                 "diagnostics counts rejected order status");
 }
 
-bool testTrendProbeWritesTrendScoreIndicator() {
+bool staleProbeStrategyIsRejected(std::string_view strategy) {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_trend_probe_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
-            "  \"channels\": {\n"
-            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
-            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"}\n"
-            "  },\n"
-            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
-            "}\n");
-  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
-  std::string trades;
-  std::string bookticker;
-  for (std::uint64_t second = 1u; second <= 650u; ++second) {
-    const std::int64_t px = 10000000000ll + static_cast<std::int64_t>(second) * 1000000ll;
-    const std::uint64_t ts = second * 1000000000ull;
-    trades += "[" + std::to_string(px) + ",100000000,1," + std::to_string(ts) + ",1,1,1," +
-              std::to_string(px) + ",0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n";
-    bookticker += "[" + std::to_string(px - 1000000ll) + ",100000000," + std::to_string(px + 1000000ll) +
-                  ",100000000," + std::to_string(ts) + ",1,1]\n";
-  }
-  writeText(dir / "jsonl" / "trades.jsonl", trades);
-  writeText(dir / "jsonl" / "bookticker.jsonl", bookticker);
-  writeText(dir / "trend_probe.ini",
-            "[strategy]\n"
-            "type=trend_probe\n"
-            "enabled=1\n"
-            "[venue.binance_futures]\n"
-            "api_slot=1\n"
-            "symbols=BTCUSDT\n"
-            "live_probe=required\n");
+                                    ("hft_backtest_stale_probe_" + std::to_string(std::rand()));
+  const std::filesystem::path configPath = dir / "stale_probe.ini";
+  std::string config =
+      "[strategy]\n"
+      "type=";
+  config += strategy;
+  config +=
+      "\n"
+      "enabled=1\n"
+      "[venue.binance_futures]\n"
+      "api_slot=1\n"
+      "symbols=BTCUSDT\n";
+  writeText(configPath, config);
 
   hft_backtest::BacktestRunRequest request{};
-  request.sessionPath = dir;
-  request.configPath = dir / "trend_probe.ini";
-  request.strategy = "trend_probe";
-  request.indicatorProfile = "trend_score";
-  request.runId = "trend-probe";
-  request.outputPath = dir / "backtests" / "trend-probe";
-  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
-  const std::string manifest = readText(request.outputPath / "manifest.json");
-  const std::string indicator = readText(request.outputPath / "strategy_indicator.jsonl");
+  request.sessionPath = dir / "session";
+  request.configPath = configPath;
+  request.strategy = std::string{strategy};
+  request.runId = std::string{strategy};
+  request.outputPath = dir / "backtests" / std::string{strategy};
 
-  return expect(result.status == hft_backtest::Status::Ok, "trend_probe backtest completes") &&
-         expect(result.liveProbe.configured, "backtest result carries configured live probe") &&
-         expect(result.liveProbe.enabled, "backtest result carries enabled live probe") &&
-         expect(result.liveProbe.ignored, "backtest marks live probe ignored") &&
-         expect(result.inputCoverage.strategyCycles > 0u, "trend_probe was invoked") &&
-         expect(result.inputCoverage.cyclesWithTrade > 0u, "trend_probe sees trades") &&
-         expect(result.inputCoverage.cyclesWithBookTicker > 0u, "trend_probe sees bookticker") &&
-         expect(manifest.find("\"live_probe\": {") != std::string::npos, "trend_probe manifest carries live probe metadata") &&
-         expect(manifest.find("\"mode\": \"ignored_backtest\"") != std::string::npos, "trend_probe manifest marks live probe ignored") &&
-         expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares strategy indicator stream") &&
-         expect(manifest.find("\"profile\": \"trend_score\"") != std::string::npos, "manifest carries trend score profile") &&
-         expect(manifest.find("\"aux_label\": \"Raw\"") != std::string::npos, "manifest carries raw trend aux label") &&
-         expect(manifest.find("trend_fast_score") != std::string::npos, "manifest carries fast trend component") &&
-         expect(!indicator.empty(), "trend score indicator rows are written") &&
-         expect(lineCount(indicator) <= 650u, "trend score indicator is aggregated to one row per second") &&
-         expect(lineCount(indicator) < result.inputCoverage.strategyCycles, "trend score indicator no longer mirrors every tick");
+  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
+  return expect(result.status == hft_backtest::Status::Unsupported, "stale probe strategy is rejected before replay") &&
+         expect(result.error == "strategy descriptor is missing required callbacks",
+                "stale probe rejection points at missing descriptor callbacks");
 }
 
-bool testVolatilityProbeWritesVolatilityIndicator() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_volatility_probe_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
-            "  \"channels\": {\n"
-            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
-            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"}\n"
-            "  },\n"
-            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
-            "}\n");
-  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
-  std::string trades;
-  std::string bookticker;
-  for (std::uint64_t second = 1u; second <= 700u; ++second) {
-    const std::int64_t px = 10000000000ll + static_cast<std::int64_t>(second % 2u == 0u ? 30000000ll : -30000000ll);
-    const std::int64_t nextPx = 10000000000ll + static_cast<std::int64_t>(second % 2u == 0u ? -30000000ll : 30000000ll);
-    const std::uint64_t ts = second * 1000000000ull;
-    trades += "[" + std::to_string(px) + ",100000000,1," + std::to_string(ts) + ",1,1,1," +
-              std::to_string(px) + ",0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n";
-    trades += "[" + std::to_string(nextPx) + ",100000000,1," + std::to_string(ts + 1u) + ",1,1,1," +
-              std::to_string(nextPx) + ",0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n";
-    bookticker += "[" + std::to_string(px - 1000000ll) + ",100000000," + std::to_string(px + 1000000ll) +
-                  ",100000000," + std::to_string(ts) + ",1,1]\n";
-  }
-  writeText(dir / "jsonl" / "trades.jsonl", trades);
-  writeText(dir / "jsonl" / "bookticker.jsonl", bookticker);
-  writeText(dir / "volatility_probe.ini",
-            "[strategy]\n"
-            "type=volatility_probe\n"
-            "enabled=1\n"
-            "[venue.binance_futures]\n"
-            "api_slot=1\n"
-            "symbols=BTCUSDT\n");
-
-  hft_backtest::BacktestRunRequest request{};
-  request.sessionPath = dir;
-  request.configPath = dir / "volatility_probe.ini";
-  request.strategy = "volatility_probe";
-  request.indicatorProfile = "volatility_bps";
-  request.runId = "volatility-probe";
-  request.outputPath = dir / "backtests" / "volatility-probe";
-  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
-  const std::string manifest = readText(request.outputPath / "manifest.json");
-  const std::string indicator = readText(request.outputPath / "strategy_indicator.jsonl");
-
-  return expect(result.status == hft_backtest::Status::Ok, "volatility_probe backtest completes") &&
-         expect(result.inputCoverage.strategyCycles > 0u, "volatility_probe was invoked") &&
-         expect(result.inputCoverage.cyclesWithTrade > 0u, "volatility_probe sees trades") &&
-         expect(result.inputCoverage.cyclesWithBookTicker > 0u, "volatility_probe sees bookticker") &&
-         expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares volatility indicator stream") &&
-         expect(manifest.find("\"profile\": \"volatility_bps\"") != std::string::npos, "manifest carries volatility profile") &&
-         expect(manifest.find("\"value_label\": \"EMA\"") != std::string::npos, "manifest carries volatility value label") &&
-         expect(manifest.find("\"aux_label\": \"Sample\"") != std::string::npos, "manifest carries volatility aux label") &&
-         expect(manifest.find("volatility_quote_move_bps") != std::string::npos, "manifest carries quote volatility component") &&
-         expect(!indicator.empty(), "volatility indicator rows are written") &&
-         expect(lineCount(indicator) <= 700u, "volatility indicator is aggregated to one row per second") &&
-         expect(lineCount(indicator) < result.inputCoverage.strategyCycles, "volatility indicator no longer mirrors every tick");
-}
-
-bool testToxicFlowProbeWritesDepthBackedIndicator() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_toxic_flow_probe_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
-            "  \"channels\": {\n"
-            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
-            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
-            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"}\n"
-            "  },\n"
-            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
-            "}\n");
-  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
-  std::string trades;
-  std::string bookticker;
-  std::string depth;
-  for (std::uint64_t second = 1u; second <= 45u; ++second) {
-    const std::int64_t bid = 10000000000ll + static_cast<std::int64_t>(second) * 1000000ll;
-    const std::int64_t ask = 10100000000ll + static_cast<std::int64_t>(second) * 1000000ll;
-    const std::uint64_t ts = second * 1000000000ull;
-    trades += "[" + std::to_string(ask) + ",100000000,1," + std::to_string(ts) + ",1,1,1," +
-              std::to_string(ask) + ",0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n";
-    bookticker += "[" + std::to_string(bid) + ",100000000," + std::to_string(ask) +
-                  ",100000000," + std::to_string(ts) + ",1,1]\n";
-    depth += "[[" + std::to_string(bid) + ",100000000,0],[" + std::to_string(ask) + ",100000000,1]," +
-             std::to_string(ts) + "]\n";
-  }
-  writeText(dir / "jsonl" / "trades.jsonl", trades);
-  writeText(dir / "jsonl" / "bookticker.jsonl", bookticker);
-  writeText(dir / "jsonl" / "depth.jsonl", depth);
-  writeText(dir / "toxic_flow_probe.ini",
-            "[strategy]\n"
-            "type=toxic_flow_probe\n"
-            "enabled=1\n"
-            "[venue.binance_futures]\n"
-            "api_slot=1\n"
-            "symbols=BTCUSDT\n");
-
-  hft_backtest::BacktestRunRequest request{};
-  request.sessionPath = dir;
-  request.configPath = dir / "toxic_flow_probe.ini";
-  request.strategy = "toxic_flow_probe";
-  request.indicatorProfile = "toxic_flow";
-  request.runId = "toxic-flow-probe";
-  request.outputPath = dir / "backtests" / "toxic-flow-probe";
-  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
-  const std::string manifest = readText(request.outputPath / "manifest.json");
-  const std::string indicator = readText(request.outputPath / "strategy_indicator.jsonl");
-
-  return expect(result.status == hft_backtest::Status::Ok, "toxic_flow_probe backtest completes") &&
-         expect(result.inputCoverage.strategyCycles > 0u, "toxic_flow_probe was invoked") &&
-         expect(result.inputCoverage.cyclesWithTrade > 0u, "toxic_flow_probe sees trades") &&
-         expect(result.inputCoverage.cyclesWithBookTicker > 0u, "toxic_flow_probe sees bookticker") &&
-         expect(result.inputCoverage.cyclesWithOrderBook > 0u, "toxic_flow_probe sees orderbook") &&
-         expect(manifest.find("\"strategy_indicator\": {") != std::string::npos, "manifest declares toxic flow indicator stream") &&
-         expect(manifest.find("\"profile\": \"toxic_flow\"") != std::string::npos, "manifest carries toxic flow profile") &&
-         expect(manifest.find("\"aux_label\": \"Raw\"") != std::string::npos, "manifest carries raw toxic aux label") &&
-         expect(manifest.find("toxic_imbalance_score") != std::string::npos, "manifest carries toxic imbalance component") &&
-         expect(!indicator.empty(), "toxic flow indicator rows are written") &&
-         expect(indicator.find("[") == 0u, "toxic flow indicator uses compact rows") &&
-         expect(lineCount(indicator) <= 45u, "toxic flow indicator is aggregated to one row per second");
+bool testStaleProbeStrategiesAreRejectedByRegistry() {
+  return staleProbeStrategyIsRejected("trend_probe") &&
+         staleProbeStrategyIsRejected("volatility_probe") &&
+         staleProbeStrategyIsRejected("toxic_flow_probe");
 }
 
 bool metadataHasParam(const hft_backtest::StrategyMetadata& metadata, std::string_view key) noexcept {
   for (std::size_t i = 0; i < metadata.paramCount; ++i) {
     if (metadata.params[i].key && key == metadata.params[i].key) return true;
-  }
-  return false;
-}
-
-bool metadataHasIndicator(const hft_backtest::StrategyMetadata& metadata, std::string_view id) noexcept {
-  for (std::size_t i = 0; i < metadata.indicatorCount; ++i) {
-    if (metadata.indicators[i].id && id == metadata.indicators[i].id) return true;
   }
   return false;
 }
@@ -3133,46 +2966,52 @@ bool testStatArbBandLadderMetadataRequiresTwoSessions() {
          expect(metadataParamDefaultIs(*metadata, "order_qty", "0.001"), "ladder order_qty default comes from commented ini template");
 }
 
-bool testTrendProbeMetadataExposesTrendScoreIndicator() {
-  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("trend_probe");
-  return expect(metadata != nullptr, "trend_probe metadata is exported") &&
-         expect(metadata->configTemplateFile != nullptr &&
-                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/trend_probe.ini",
-                "trend_probe metadata discovers strategy profile") &&
-         expect(metadataDisplayNameIs(*metadata, "Диагностика тренда"),
-                "trend_probe display name comes from ini metadata") &&
-         expect(metadata->minSessionCount == 1u, "trend_probe uses one session") &&
-         expect(metadata->maxSessionCount == 1u, "trend_probe allows one session") &&
-         expect(metadata->paramCount == 0u, "trend_probe has no strategy params") &&
-         expect(metadataHasIndicator(*metadata, "trend_score"), "trend_probe exposes trend_score indicator");
+bool testStaleProbeProfilesDoNotCreateMetadata() {
+  return expect(hft_backtest::findStrategyMetadata("trend_probe") == nullptr, "trend_probe metadata stays hidden without descriptor") &&
+         expect(hft_backtest::findStrategyMetadata("volatility_probe") == nullptr,
+                "volatility_probe metadata stays hidden without descriptor") &&
+         expect(hft_backtest::findStrategyMetadata("toxic_flow_probe") == nullptr,
+                "toxic_flow_probe metadata stays hidden without descriptor") &&
+         expect(hft_backtest::findStrategyMetadata("toxic_flow_pair_probe") == nullptr,
+                "toxic_flow_pair_probe metadata stays hidden without descriptor") &&
+         expect(hft_backtest::findStrategyMetadata("ewma_edge_maker") == nullptr,
+                "ewma_edge_maker metadata stays hidden without descriptor");
 }
 
-bool testVolatilityProbeMetadataExposesVolatilityIndicator() {
-  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("volatility_probe");
-  return expect(metadata != nullptr, "volatility_probe metadata is exported") &&
+bool testStatArbPairwiseTakerMetadataSupportsAllPairs() {
+  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("stat_arb_pairwise_taker");
+  return expect(metadata != nullptr, "stat_arb_pairwise_taker metadata is exported") &&
          expect(metadata->configTemplateFile != nullptr &&
-                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/volatility_probe.ini",
-                "volatility_probe metadata discovers strategy profile") &&
-         expect(metadataDisplayNameIs(*metadata, "Диагностика волатильности"),
-                "volatility_probe display name comes from ini metadata") &&
-         expect(metadata->minSessionCount == 1u, "volatility_probe uses one session") &&
-         expect(metadata->maxSessionCount == 1u, "volatility_probe allows one session") &&
-         expect(metadata->paramCount == 0u, "volatility_probe has no strategy params") &&
-         expect(metadataHasIndicator(*metadata, "volatility_bps"), "volatility_probe exposes volatility_bps indicator");
-}
-
-bool testToxicFlowProbeMetadataRequiresDepthIndicator() {
-  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("toxic_flow_probe");
-  return expect(metadata != nullptr, "toxic_flow_probe metadata is exported") &&
-         expect(metadata->configTemplateFile != nullptr &&
-                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/toxic_flow_probe.ini",
-                "toxic_flow_probe metadata discovers strategy profile") &&
-         expect(metadataDisplayNameIs(*metadata, "Диагностика toxic flow"),
-                "toxic_flow_probe display name comes from ini metadata") &&
-         expect(metadata->minSessionCount == 1u, "toxic_flow_probe uses one session") &&
-         expect(metadata->maxSessionCount == 1u, "toxic_flow_probe allows one session") &&
-         expect(metadata->paramCount == 0u, "toxic_flow_probe has no strategy params") &&
-         expect(metadataHasIndicator(*metadata, "toxic_flow"), "toxic_flow_probe exposes toxic_flow indicator");
+                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/stat_arb_pairwise_taker.ini",
+                "stat_arb_pairwise_taker metadata discovers strategy profile") &&
+         expect(metadataDisplayNameIs(*metadata, "Стат-арбитраж all-pairs taker"),
+                "stat_arb_pairwise_taker display name comes from ini metadata") &&
+         expect(metadata->minSessionCount == 2u, "stat_arb_pairwise_taker requires at least two sessions") &&
+         expect(metadata->maxSessionCount == 50u, "stat_arb_pairwise_taker allows the GUI multileg cap") &&
+         expect(metadataHasParam(*metadata, "ema_window_ms"), "pairwise metadata contains ema_window_ms") &&
+         expect(metadataHasParam(*metadata, "entry_edge_bps"), "pairwise metadata contains entry_edge_bps") &&
+         expect(metadataHasParam(*metadata, "ladder_step_bps"), "pairwise metadata contains ladder_step_bps") &&
+         expect(metadataHasParam(*metadata, "exit_edge_bps"), "pairwise metadata contains exit_edge_bps") &&
+         expect(metadataHasParam(*metadata, "max_ladder_levels"), "pairwise metadata contains max_ladder_levels") &&
+         expect(!metadataHasParam(*metadata, "max_active_pairs"), "pairwise metadata hides old max_active_pairs") &&
+         expect(!metadataHasParam(*metadata, "max_pair_entries_per_cycle"),
+                "pairwise metadata hides old max_pair_entries_per_cycle") &&
+         expect(!metadataHasParam(*metadata, "full_scan_budget_pairs"),
+                "pairwise metadata hides old full_scan_budget_pairs") &&
+         expect(metadataHasParam(*metadata, "amount_qty"), "pairwise metadata contains amount_qty") &&
+         expect(metadataHasParam(*metadata, "order_qty"), "pairwise metadata contains order_qty") &&
+         expect(metadataHasParamGroup(*metadata, 1u, "sizing_mode"), "pairwise sizing group comes from ini metadata") &&
+         expect(metadataParamGroupIs(*metadata, "amount_qty", 1u, true),
+                "pairwise amount_qty is active sizing default from ini") &&
+         expect(metadataParamGroupIs(*metadata, "order_qty", 1u, false),
+                "pairwise order_qty is inactive sizing option from ini") &&
+         expect(metadataParamDefaultIs(*metadata, "ladder_step_bps", "2"),
+                "pairwise ladder step default comes from ini") &&
+         expect(metadataParamDefaultIs(*metadata, "max_ladder_levels", "3"),
+                "pairwise ladder levels default comes from ini") &&
+         expect(metadataParamDefaultIs(*metadata, "amount_qty", "10"), "pairwise amount_qty default comes from ini") &&
+         expect(metadataParamDefaultIs(*metadata, "order_qty", "0.001"),
+                "pairwise order_qty default comes from commented ini template");
 }
 
 }  // namespace
@@ -3266,15 +3105,12 @@ int main() {
   ok = testWriterCreatesV2RunDirectory() && ok;
   ok = testWriterDiagnosesNoSignalBelowThreshold() && ok;
   ok = testWriterDiagnosesOrdersWithoutFillsAndRateLimits() && ok;
-  ok = testTrendProbeWritesTrendScoreIndicator() && ok;
-  ok = testVolatilityProbeWritesVolatilityIndicator() && ok;
-  ok = testToxicFlowProbeWritesDepthBackedIndicator() && ok;
+  ok = testStaleProbeStrategiesAreRejectedByRegistry() && ok;
   ok = testStrategyMetadataMirrorsTraderRegistry() && ok;
   ok = testStatArbBandLadderKeepsTradesOptionalForBboOnlyReplay() && ok;
   ok = testStrategyMetadataExposesOnlySupportedSpreadMakerParams() && ok;
   ok = testStatArbBandLadderMetadataRequiresTwoSessions() && ok;
-  ok = testTrendProbeMetadataExposesTrendScoreIndicator() && ok;
-  ok = testVolatilityProbeMetadataExposesVolatilityIndicator() && ok;
-  ok = testToxicFlowProbeMetadataRequiresDepthIndicator() && ok;
+  ok = testStaleProbeProfilesDoNotCreateMetadata() && ok;
+  ok = testStatArbPairwiseTakerMetadataSupportsAllPairs() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
