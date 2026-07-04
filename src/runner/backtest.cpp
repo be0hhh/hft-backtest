@@ -189,7 +189,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.initialBalanceE8 = portfolioInitialBalance;
   result.walletBalanceE8 = portfolioInitialBalance;
   auto refreshArtifactCounters = [&](const detail::EngineState& engine) noexcept {
-    result.strategySpreadRows = engine.strategySpread.size();
+    result.strategySpreadRows = engine.strategySpreadDiagnostics.rows != 0u
+        ? engine.strategySpreadDiagnostics.rows
+        : engine.strategySpread.size();
   };
   auto writeArtifacts = [&](const detail::EngineState& engine) noexcept -> Status {
     refreshArtifactCounters(engine);
@@ -626,13 +628,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.events = timeline.size();
   const bool captureIndicatorTrace = !result.indicatorProfile.empty();
   const bool captureRangeTrace = emitsPriceRangeTrace(*descriptor);
-  const bool captureSpreadTrace = request.captureStrategySpread && emitsArbSpreadTrace(*descriptor);
+  const bool captureSpreadRows = request.captureStrategySpread && emitsArbSpreadTrace(*descriptor);
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
-      reserveEngineStorage(legEngine, timeline.size(), captureIndicatorTrace, captureRangeTrace, captureSpreadTrace);
+      reserveEngineStorage(legEngine, timeline.size(), captureIndicatorTrace, captureRangeTrace, captureSpreadRows);
     }
   } else {
-    reserveEngineStorage(engine, timeline.size(), captureIndicatorTrace, captureRangeTrace, captureSpreadTrace);
+    reserveEngineStorage(engine, timeline.size(), captureIndicatorTrace, captureRangeTrace, captureSpreadRows);
   }
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {

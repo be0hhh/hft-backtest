@@ -34,7 +34,7 @@ void reserveEngineStorage(detail::EngineState& engine,
                           std::size_t events,
                           bool captureIndicatorTrace,
                           bool captureRangeTrace,
-                          bool captureSpreadTrace);
+                          bool captureSpreadRows);
 void appendStrategyIndicator(detail::EngineState& engine,
                              std::int64_t tsNs,
                              const hft_trader::core::StrategyDecisionTrace& trace);
@@ -44,6 +44,10 @@ void appendStrategyRange(detail::EngineState& engine,
 void appendStrategySpread(detail::EngineState& engine,
                           std::int64_t tsNs,
                           const hft_trader::core::StrategyDecisionTrace& trace);
+void recordStrategySpread(detail::EngineState& engine,
+                          std::int64_t tsNs,
+                          const hft_trader::core::StrategyDecisionTrace& trace,
+                          bool captureRows);
 void recordInputCoverage(detail::EngineState& engine) noexcept;
 
 }  // namespace hft_backtest

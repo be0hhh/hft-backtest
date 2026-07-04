@@ -52,7 +52,7 @@ void writePairwiseReplaySession(const std::filesystem::path& dir,
       "  \"identity\": {\"exchange\": \"";
   manifest.append(exchange);
   manifest +=
-      "\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+      "\", \"market\": \"futures\", \"symbols\": [\"BTC_USDT\"]},\n"
       "  \"channels\": {\n"
       "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"}\n"
       "  },\n"
@@ -80,11 +80,11 @@ void writePairwiseReplayConfig(const std::filesystem::path& path) {
             "exit_edge_bps=0\n"
             "max_ladder_levels=3\n"
             "\n"
-            "[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n"
-            "[venue.bybit_futures]\napi_slot=1\nsymbols=BTCUSDT\n"
-            "[venue.okx_futures]\napi_slot=1\nsymbols=BTCUSDT\n"
-            "[venue.bitget_futures]\napi_slot=1\nsymbols=BTCUSDT\n"
-            "[venue.kucoin_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
+            "[venue.binance_futures]\napi_slot=1\nsymbols=BTC_USDT\n"
+            "[venue.bybit_futures]\napi_slot=1\nsymbols=BTC_USDT\n"
+            "[venue.okx_futures]\napi_slot=1\nsymbols=BTC_USDT\n"
+            "[venue.bitget_futures]\napi_slot=1\nsymbols=BTC_USDT\n"
+            "[venue.kucoin_futures]\napi_slot=1\nsymbols=BTC_USDT\n");
 }
 
 void setTop(EngineState& engine, std::int64_t bid, std::int64_t ask) noexcept {
@@ -93,6 +93,7 @@ void setTop(EngineState& engine, std::int64_t bid, std::int64_t ask) noexcept {
   top.ask.px.raw = ask;
   hft_trader::core::copyBookTickerSnapshot(engine.snapshot, top);
   hft_trader::core::copyBookTickerSnapshot(engine.venueSnapshot, top);
+  engine.lastStrategySourceMarketDataTsNs = 1000ll;
 }
 
 bool expect(bool value, std::string_view message) {
@@ -109,7 +110,7 @@ BacktestRunRequest makeExplicitSessionLimitRequest(std::size_t count) {
     BacktestSessionRequest session{};
     session.path = "/tmp/hft-backtest-leg-" + std::to_string(i);
     session.venue = "binance_futures";
-    session.symbol = "BTCUSDT";
+    session.symbol = "BTC_USDT";
     request.sessions.push_back(std::move(session));
   }
   return request;
@@ -145,8 +146,10 @@ struct MultiLegContextProbeState {
   std::uint32_t eventLegIndex{0u};
   std::uint32_t primaryLegIndex{0u};
   std::uint64_t tradableLegMask{0u};
+  std::uint32_t haltReasonRaw{0u};
   bool hasEventLeg{false};
   bool contextPolicyExposed{false};
+  bool inputDegraded{false};
   bool sawLastLegBookTicker{false};
   bool sawLastLegAccount{false};
   bool sawLastLegInstrument{false};
@@ -213,6 +216,8 @@ bool multiLegContextProbeRunCycle(void* rawState, hft_trader::core::StrategyCont
   state.warmupCount = ctx.orderPathWarmups.count;
   state.eventLegIndex = ctx.eventLegIndex;
   state.hasEventLeg = ctx.hasEventLeg;
+  state.inputDegraded = ctx.control && ctx.control->inputDegraded.raw == hft_trader::core::kAlgoFlagTrue.raw;
+  state.haltReasonRaw = ctx.control ? ctx.control->haltReason.raw : 0u;
   captureContextTradePolicy(ctx, state);
   if (ctx.marketData.snapshots && ctx.marketData.count > 8u) {
     state.sawLastLegBookTicker =
@@ -347,6 +352,77 @@ bool testRunCycleMultiPassesNineLegContextWithoutTruncation() {
          expect(state.sawLastLegInstrument, "strategy can read the ninth leg instrument");
 }
 
+bool testRunCycleMultiMasksStaleSourceLegWithoutGlobalHalt() {
+  constexpr std::size_t kLegs = 3u;
+  constexpr std::int64_t kNowNs = 6000000000ll;
+  std::vector<EngineState> engines(kLegs);
+  std::vector<StrategyInstrumentSpec> instruments(kLegs);
+  for (std::size_t i = 0u; i < kLegs; ++i) {
+    setTop(engines[i], kPx100 + static_cast<std::int64_t>(i) * 100000000ll, kPx100 + 1000000000ll);
+    engines[i].lastStrategySourceMarketDataTsNs = i < 2u ? kNowNs : 1ll;
+    instruments[i].tickSizeRaw = 100000000ll;
+    instruments[i].stepSizeRaw = 100000000ll;
+    instruments[i].tickGrid = hft_trader::core::prepareFastStepGrid(instruments[i].tickSizeRaw);
+    instruments[i].qtyStepGrid = hft_trader::core::prepareFastStepGrid(instruments[i].stepSizeRaw);
+  }
+
+  hft_trader::runtime::StrategyDescriptor descriptor{};
+  descriptor.name = "multi_leg_source_freshness_probe";
+  descriptor.streamCount = 1u;
+  descriptor.streams[0] = cxet::api::market::PublicMarketDataStream::BookTicker;
+  descriptor.runCycle = multiLegContextProbeRunCycle;
+
+  auto scratch = std::make_unique<MultiLegCycleScratch>();
+  MultiLegContextProbeState state{};
+  hft_trader::core::SymbolShardConfig shard{};
+  hft_trader::core::ShardControlState control{};
+  BacktestRunRequest request{};
+
+  const bool ok = runCycleMulti(
+      descriptor, &state, engines, instruments, *scratch, shard, control, 2u, kNowNs, request, nullptr);
+
+  return expect(ok, "3-leg partial stale cycle runs") &&
+         expect(state.contextPolicyExposed, "partial stale context exposes trade policy") &&
+         expect(!state.inputDegraded, "3-leg context does not globally halt while two sources are fresh") &&
+         expect(state.tradableLegMask == 3ull, "3-leg context masks only the stale source leg");
+}
+
+bool testRunCycleMultiGlobalHaltsWhenFewerThanTwoSourcesRemain() {
+  constexpr std::size_t kLegs = 3u;
+  constexpr std::int64_t kNowNs = 6000000000ll;
+  std::vector<EngineState> engines(kLegs);
+  std::vector<StrategyInstrumentSpec> instruments(kLegs);
+  for (std::size_t i = 0u; i < kLegs; ++i) {
+    setTop(engines[i], kPx100 + static_cast<std::int64_t>(i) * 100000000ll, kPx100 + 1000000000ll);
+    engines[i].lastStrategySourceMarketDataTsNs = i == 0u ? kNowNs : 1ll;
+    instruments[i].tickSizeRaw = 100000000ll;
+    instruments[i].stepSizeRaw = 100000000ll;
+    instruments[i].tickGrid = hft_trader::core::prepareFastStepGrid(instruments[i].tickSizeRaw);
+    instruments[i].qtyStepGrid = hft_trader::core::prepareFastStepGrid(instruments[i].stepSizeRaw);
+  }
+
+  hft_trader::runtime::StrategyDescriptor descriptor{};
+  descriptor.name = "multi_leg_source_halt_probe";
+  descriptor.streamCount = 1u;
+  descriptor.streams[0] = cxet::api::market::PublicMarketDataStream::BookTicker;
+  descriptor.runCycle = multiLegContextProbeRunCycle;
+
+  auto scratch = std::make_unique<MultiLegCycleScratch>();
+  MultiLegContextProbeState state{};
+  hft_trader::core::SymbolShardConfig shard{};
+  hft_trader::core::ShardControlState control{};
+  BacktestRunRequest request{};
+
+  const bool ok = runCycleMulti(
+      descriptor, &state, engines, instruments, *scratch, shard, control, 0u, kNowNs, request, nullptr);
+
+  return expect(ok, "3-leg global stale cycle runs") &&
+         expect(state.inputDegraded, "3-leg context globally halts when fewer than two sources are fresh") &&
+         expect(state.haltReasonRaw == hft_trader::core::kHaltReasonStaleInput.raw,
+                "3-leg global stale context reports stale input halt") &&
+         expect(state.tradableLegMask == 0ull, "3-leg global stale context disables tradable legs");
+}
+
 bool testRunCycleMultiPrimaryOnlyDropsNonPrimaryRouteOrder() {
   constexpr std::size_t kLegs = 2u;
   std::vector<EngineState> engines(kLegs);
@@ -439,7 +515,7 @@ bool testPairwiseTakerMultiLegReplayRunsCycleForEveryDeliveredBookTicker() {
   BacktestRunRequest request{};
   request.sessionPath = root / "leg0";
   for (std::size_t i = 1u; i < kLegs; ++i) {
-    request.sessions.push_back(BacktestSessionRequest{root / ("leg" + std::to_string(i)), venues[i], "BTCUSDT"});
+    request.sessions.push_back(BacktestSessionRequest{root / ("leg" + std::to_string(i)), venues[i], "BTC_USDT"});
   }
   request.configPath = root / "pairwise.ini";
   request.outputPath = root / "backtests" / "pairwise-full-scan";
@@ -479,6 +555,8 @@ int main() {
   ok = testBacktestExplicitSessionLimitAllowsRuntimeMaxAndRejectsOneMore() && ok;
   ok = testRunCycleSinglePassesRouteContext() && ok;
   ok = testRunCycleMultiPassesNineLegContextWithoutTruncation() && ok;
+  ok = testRunCycleMultiMasksStaleSourceLegWithoutGlobalHalt() && ok;
+  ok = testRunCycleMultiGlobalHaltsWhenFewerThanTwoSourcesRemain() && ok;
   ok = testRunCycleMultiPrimaryOnlyDropsNonPrimaryRouteOrder() && ok;
   ok = testBacktestRejectsExplicitInvalidPrimaryBeforeLoad() && ok;
   ok = testStrategyRunCycleErrorIncludesRejectReasonContext() && ok;

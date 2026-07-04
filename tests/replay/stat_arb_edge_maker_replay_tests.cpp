@@ -67,27 +67,27 @@ std::string tradeRow(std::int64_t price,
 }
 
 void writeLeg0Session(const std::filesystem::path& dir) {
-  writeSessionManifest(dir, "binance", "BTCUSDT");
+  writeSessionManifest(dir, "binance", "BTC_USDT");
   std::string book;
   std::string trades;
   book += bookTickerRow(10000000000ll, 10010000000ll, 1000000ll, 10);
   book += bookTickerRow(10000000000ll, 10010000000ll, 3000000ll, 20);
-  trades += tradeRow(10005000000ll, kQty1, 1, 1000000ll, 11, "BTCUSDT", "binance");
+  trades += tradeRow(10005000000ll, kQty1, 1, 1000000ll, 11, "BTC_USDT", "binance");
   for (std::int64_t i = 0; i < 50; ++i) {
     const std::int64_t ts = 600000000ll + i * 1000000ll;
-    trades += tradeRow(kLeg0PassiveBidFillPx, kPartialQty, 0, ts, 100 + i, "BTCUSDT", "binance");
+    trades += tradeRow(kLeg0PassiveBidFillPx, kPartialQty, 0, ts, 100 + i, "BTC_USDT", "binance");
   }
   writeText(dir / "jsonl" / "bookticker.jsonl", book);
   writeText(dir / "jsonl" / "trades.jsonl", trades);
 }
 
 void writeLeg1Session(const std::filesystem::path& dir) {
-  writeSessionManifest(dir, "bybit", "BTCUSDT");
+  writeSessionManifest(dir, "bybit", "BTC_USDT");
   std::string book;
   std::string trades;
   book += bookTickerRow(10200000000ll, 10210000000ll, 1000000ll, 10);
   book += bookTickerRow(10200000000ll, 10210000000ll, 3000000ll, 20);
-  trades += tradeRow(10205000000ll, kQty1, 1, 1000000ll, 11, "BTCUSDT", "bybit");
+  trades += tradeRow(10205000000ll, kQty1, 1, 1000000ll, 11, "BTC_USDT", "bybit");
   writeText(dir / "jsonl" / "bookticker.jsonl", book);
   writeText(dir / "jsonl" / "trades.jsonl", trades);
 }
@@ -119,7 +119,7 @@ void writeConfigWithEdges(const std::filesystem::path& path,
       "user_enabled=true\n"
       "order_enabled=true\n"
       "control_enabled=true\n"
-      "symbols=BTCUSDT\n"
+      "symbols=BTC_USDT\n"
       "\n"
       "[venue.bybit_futures]\n"
       "api_slot=1\n"
@@ -127,7 +127,7 @@ void writeConfigWithEdges(const std::filesystem::path& path,
       "user_enabled=true\n"
       "order_enabled=true\n"
       "control_enabled=true\n"
-      "symbols=BTCUSDT\n";
+      "symbols=BTC_USDT\n";
   writeText(path, text);
 }
 
@@ -141,7 +141,7 @@ hft_backtest::BacktestRunRequest makeReplayRequest(const std::filesystem::path& 
                                                    std::string_view runId) {
   hft_backtest::BacktestRunRequest request{};
   request.sessionPath = leg0;
-  request.sessions.push_back(hft_backtest::BacktestSessionRequest{leg1, "bybit_futures", "BTCUSDT"});
+  request.sessions.push_back(hft_backtest::BacktestSessionRequest{leg1, "bybit_futures", "BTC_USDT"});
   request.configPath = root / "stat_arb_edge_maker.ini";
   request.outputPath = root / "backtests" / std::string{runId};
   request.strategy = "stat_arb_edge_maker";

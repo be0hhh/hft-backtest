@@ -70,7 +70,7 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
                                     ("hft_backtest_sweep_" + std::to_string(std::rand()));
   writeText(dir / "manifest.json",
             "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTC_USDT\"]},\n"
             "  \"channels\": {\n"
             "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
@@ -83,10 +83,10 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
             "}\n");
   writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
   writeText(dir / "jsonl" / "trades.jsonl",
-            "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n"
-            "[10020000000,100000000,0,1600000000,2,2,2,10020000000,0,\"BTCUSDT\",\"binance\",\"futures\",2,2]\n"
-            "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTCUSDT\",\"binance\",\"futures\",3,3]\n"
-            "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTCUSDT\",\"binance\",\"futures\",4,4]\n");
+            "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTC_USDT\",\"binance\",\"futures\",1,1]\n"
+            "[10020000000,100000000,0,1600000000,2,2,2,10020000000,0,\"BTC_USDT\",\"binance\",\"futures\",2,2]\n"
+            "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTC_USDT\",\"binance\",\"futures\",3,3]\n"
+            "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTC_USDT\",\"binance\",\"futures\",4,4]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
   writeText(dir / "jsonl" / "price_limit.jsonl", "[3000000000,9500000000,10500000000,1]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000,2,2]\n");
@@ -100,7 +100,7 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
             "distance_bps=100\n"
             "trigger_bps=5\n"
             "amount_qty=25\n"
-            "[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
+            "[venue.binance_futures]\napi_slot=1\nsymbols=BTC_USDT\n");
 
   hft_backtest::BacktestSweepRequest request{};
   request.baseRun.sessionPath = dir;
@@ -150,7 +150,7 @@ bool testSweepCanRunTwiceInOneProcess() {
                                     ("hft_backtest_sweep_twice_" + std::to_string(std::rand()));
   writeText(dir / "manifest.json",
             "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTC_USDT\"]},\n"
             "  \"channels\": {\n"
             "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
@@ -163,10 +163,10 @@ bool testSweepCanRunTwiceInOneProcess() {
             "}\n");
   writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
   writeText(dir / "jsonl" / "trades.jsonl",
-            "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,1]\n"
-            "[10020000000,100000000,0,1600000000,2,2,2,10020000000,0,\"BTCUSDT\",\"binance\",\"futures\",2,2]\n"
-            "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTCUSDT\",\"binance\",\"futures\",3,3]\n"
-            "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTCUSDT\",\"binance\",\"futures\",4,4]\n");
+            "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTC_USDT\",\"binance\",\"futures\",1,1]\n"
+            "[10020000000,100000000,0,1600000000,2,2,2,10020000000,0,\"BTC_USDT\",\"binance\",\"futures\",2,2]\n"
+            "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTC_USDT\",\"binance\",\"futures\",3,3]\n"
+            "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTC_USDT\",\"binance\",\"futures\",4,4]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
   writeText(dir / "jsonl" / "price_limit.jsonl", "[3000000000,9500000000,10500000000,1]\n");
   writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000,2,2]\n");
@@ -180,7 +180,7 @@ bool testSweepCanRunTwiceInOneProcess() {
             "distance_bps=100\n"
             "trigger_bps=5\n"
             "amount_qty=25\n"
-            "[venue.binance_futures]\napi_slot=1\nsymbols=BTCUSDT\n");
+            "[venue.binance_futures]\napi_slot=1\nsymbols=BTC_USDT\n");
 
   auto makeRequest = [&](const std::filesystem::path& out, std::string_view sweepId) {
     hft_backtest::BacktestSweepRequest request{};
@@ -213,7 +213,7 @@ bool testSweepManifestDeclaresTwoLegSessionPaths() {
   request.baseRun.sessionPath = dir / "leg-a";
   request.baseRun.configPath = dir / "config.ini";
   request.baseRun.strategy = "stat_arb_band_ladder";
-  request.baseRun.sessions.push_back(hft_backtest::BacktestSessionRequest{dir / "leg-b", "kucoin_futures", "B-USDT"});
+  request.baseRun.sessions.push_back(hft_backtest::BacktestSessionRequest{dir / "leg-b", "kucoin_futures", "B_USDT"});
   request.runBudget = 1u;
 
   hft_backtest::BacktestSweepResult result{};
@@ -225,12 +225,12 @@ bool testSweepManifestDeclaresTwoLegSessionPaths() {
   point.run.legs.back().sessionPath = dir / "leg-a";
   point.run.legs.back().exchange = "aster";
   point.run.legs.back().market = "futures";
-  point.run.legs.back().symbol = "A-USDT";
+  point.run.legs.back().symbol = "A_USDT";
   point.run.legs.push_back(hft_backtest::BacktestLegSummary{});
   point.run.legs.back().sessionPath = dir / "leg-b";
   point.run.legs.back().exchange = "kucoin";
   point.run.legs.back().market = "futures";
-  point.run.legs.back().symbol = "B-USDT";
+  point.run.legs.back().symbol = "B_USDT";
 
   const hft_backtest::Status status = hft_backtest::detail::writeSweepManifest(request, result, {point});
   const std::string manifest = readText(result.manifestPath);

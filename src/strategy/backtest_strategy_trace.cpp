@@ -2,6 +2,8 @@
 
 #include "hft_backtest/strategy_metadata.hpp"
 
+#include <algorithm>
+#include <limits>
 #include <string>
 
 namespace hft_backtest {
@@ -32,6 +34,44 @@ std::uint8_t indicatorEventCode(const hft_trader::core::StrategyDecisionTrace& t
 std::int64_t strategyIndicatorSecond(std::int64_t tsNs) noexcept {
   constexpr std::int64_t nsPerSecond = 1000000000ll;
   return tsNs >= 0 ? tsNs / nsPerSecond : (tsNs - (nsPerSecond - 1ll)) / nsPerSecond;
+}
+
+std::int64_t absI64(std::int64_t value) noexcept {
+  if (value >= 0) return value;
+  if (value == std::numeric_limits<std::int64_t>::min()) return std::numeric_limits<std::int64_t>::max();
+  return -value;
+}
+
+detail::JsonStrategySpreadPoint makeStrategySpreadPoint(std::int64_t tsNs,
+                                                        const hft_trader::core::StrategyDecisionTrace& trace) noexcept {
+  detail::JsonStrategySpreadPoint row{};
+  row.tsNs = tsNs;
+  row.spreadBpsE8 = trace.arbSpreadBpsE8;
+  row.emaBpsE8 = trace.arbEmaBpsE8;
+  row.deviationBpsE8 = trace.arbDeviationBpsE8;
+  row.costBandBpsE8 = trace.arbCostBandBpsE8;
+  row.edgeAfterCostBpsE8 = trace.arbEdgeAfterCostBpsE8;
+  row.direction = trace.arbDirection;
+  row.decisionKind = trace.decisionKind;
+  row.reasonRaw = trace.reasonRaw;
+  return row;
+}
+
+void recordStrategySpreadDiagnostics(detail::JsonStrategySpreadDiagnostics& out,
+                                     const hft_trader::core::StrategyDecisionTrace& trace) noexcept {
+  if (out.rows == 0u) {
+    out.minEdgeAfterCostBpsE8 = trace.arbEdgeAfterCostBpsE8;
+    out.maxEdgeAfterCostBpsE8 = trace.arbEdgeAfterCostBpsE8;
+  } else {
+    out.minEdgeAfterCostBpsE8 = std::min(out.minEdgeAfterCostBpsE8, trace.arbEdgeAfterCostBpsE8);
+    out.maxEdgeAfterCostBpsE8 = std::max(out.maxEdgeAfterCostBpsE8, trace.arbEdgeAfterCostBpsE8);
+  }
+  out.maxAbsDeviationBpsE8 = std::max(out.maxAbsDeviationBpsE8, absI64(trace.arbDeviationBpsE8));
+  if (trace.decisionKind < hft_trader::core::kStrategyDecisionKindCount &&
+      trace.reasonRaw < hft_trader::core::kStrategyDecisionReasonCapacity) {
+    ++out.decisionCounts[trace.decisionKind][trace.reasonRaw];
+  }
+  ++out.rows;
 }
 
 }  // namespace
@@ -93,7 +133,7 @@ void reserveEngineStorage(detail::EngineState& engine,
                           std::size_t events,
                           bool captureIndicatorTrace,
                           bool captureRangeTrace,
-                          bool captureSpreadTrace) {
+                          bool captureSpreadRows) {
   const std::size_t tradeRows = boundedReserve(events, 16u, 64u);
   engine.pending.reserve(detail::kIntentCapacity);
   engine.orders.reserve(tradeRows);
@@ -105,7 +145,7 @@ void reserveEngineStorage(detail::EngineState& engine,
   engine.riskSnapshots.reserve(boundedReserve(events, 1024u, 8u));
   if (captureIndicatorTrace) engine.strategyIndicator.reserve(boundedReserve(events, 64u, 64u));
   if (captureRangeTrace) engine.strategyRange.reserve(events + 8u);
-  if (captureSpreadTrace) engine.strategySpread.reserve(events + 8u);
+  if (captureSpreadRows) engine.strategySpread.reserve(events + 8u);
 }
 
 void appendStrategyIndicator(detail::EngineState& engine,
@@ -180,17 +220,16 @@ void appendStrategySpread(detail::EngineState& engine,
                           std::int64_t tsNs,
                           const hft_trader::core::StrategyDecisionTrace& trace) {
   if (trace.arbReady == 0u) return;
-  detail::JsonStrategySpreadPoint row{};
-  row.tsNs = tsNs;
-  row.spreadBpsE8 = trace.arbSpreadBpsE8;
-  row.emaBpsE8 = trace.arbEmaBpsE8;
-  row.deviationBpsE8 = trace.arbDeviationBpsE8;
-  row.costBandBpsE8 = trace.arbCostBandBpsE8;
-  row.edgeAfterCostBpsE8 = trace.arbEdgeAfterCostBpsE8;
-  row.direction = trace.arbDirection;
-  row.decisionKind = trace.decisionKind;
-  row.reasonRaw = trace.reasonRaw;
-  engine.strategySpread.push_back(row);
+  engine.strategySpread.push_back(makeStrategySpreadPoint(tsNs, trace));
+}
+
+void recordStrategySpread(detail::EngineState& engine,
+                          std::int64_t tsNs,
+                          const hft_trader::core::StrategyDecisionTrace& trace,
+                          bool captureRows) {
+  if (trace.arbReady == 0u) return;
+  recordStrategySpreadDiagnostics(engine.strategySpreadDiagnostics, trace);
+  if (captureRows) engine.strategySpread.push_back(makeStrategySpreadPoint(tsNs, trace));
 }
 
 void recordInputCoverage(detail::EngineState& engine) noexcept {

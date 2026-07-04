@@ -406,7 +406,7 @@ void writeText(const std::filesystem::path& path, std::string_view text) {
 
 Symbol btcUsdtSymbol() {
   Symbol symbol{};
-  symbol.copyFrom("BTCUSDT");
+  symbol.copyFrom("BTC_USDT");
   return symbol;
 }
 
@@ -1348,7 +1348,7 @@ bool testLazyExecutionDepthProviderMarketBuyConsumesLegacyDepth() {
             "[[9900000000,100000000,0],[10100000000,40000000,1],[10200000000,60000000,1],1000]\n");
 
   EngineState engine{};
-  engine.symbol.copyFrom("BTCUSDT");
+  engine.symbol.copyFrom("BTC_USDT");
   setTop(engine, 9900000000ll, 10100000000ll);
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
@@ -1385,7 +1385,7 @@ bool testLazyExecutionDepthProviderMarketBuyConsumesTapeDepth() {
             "[9223372036854776809,0,1,1,1]\n");
 
   EngineState engine{};
-  engine.symbol.copyFrom("BTCUSDT");
+  engine.symbol.copyFrom("BTC_USDT");
   setTop(engine, 9800000000ll, 10100000000ll);
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
@@ -1422,7 +1422,7 @@ bool testStaleLazyExecutionDepthMarketBuyFallsBackToBbo() {
             "[[9900000000,100000000,0],[10100000000,100000000,1],1000]\n");
 
   EngineState engine{};
-  engine.symbol.copyFrom("BTCUSDT");
+  engine.symbol.copyFrom("BTC_USDT");
   setTopAt(engine, 9900000000ll, 10400000000ll, 501002000u);
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
@@ -1453,7 +1453,7 @@ bool testFreshLazyExecutionDepthMarketBuyMayUseSlightlyOlderDepth() {
             "[[9900000000,100000000,0],[10100000000,40000000,1],[10200000000,60000000,1],1000000]\n");
 
   EngineState engine{};
-  engine.symbol.copyFrom("BTCUSDT");
+  engine.symbol.copyFrom("BTC_USDT");
   setTopAt(engine, 9900000000ll, 10100000000ll, 26000000u);
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
@@ -1484,7 +1484,7 @@ bool testStaleLazyExecutionDepthMarketSellFallsBackToBboBid() {
             "[[9900000000,100000000,0],[10100000000,100000000,1],1000]\n");
 
   EngineState engine{};
-  engine.symbol.copyFrom("BTCUSDT");
+  engine.symbol.copyFrom("BTC_USDT");
   setTopAt(engine, 9700000000ll, 10400000000ll, 501002000u);
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
@@ -1516,7 +1516,7 @@ bool testLazyExecutionDepthProviderDoesNotAdvanceWithoutExecutionCandidate() {
             "[[9900000000,100000000,0],[10200000000,100000000,1],2000]\n");
 
   EngineState engine{};
-  engine.symbol.copyFrom("BTCUSDT");
+  engine.symbol.copyFrom("BTC_USDT");
   setTop(engine, 9900000000ll, 10100000000ll);
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
@@ -1540,7 +1540,7 @@ bool testLazyExecutionDepthProviderInitializesPassiveQueueAtActivation() {
             "[[9900000000,55000000,0],[10100000000,100000000,1],1000]\n");
 
   EngineState engine{};
-  engine.symbol.copyFrom("BTCUSDT");
+  engine.symbol.copyFrom("BTC_USDT");
   setTop(engine, 9900000000ll, 10100000000ll);
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
@@ -2234,7 +2234,7 @@ bool testForceCloseOpenLongPositionUsesLazyExecutionDepth() {
             "[[9900000000,40000000,0],[9800000000,60000000,0],[10100000000,100000000,1],1000]\n");
 
   EngineState engine{};
-  engine.symbol.copyFrom("BTCUSDT");
+  engine.symbol.copyFrom("BTC_USDT");
   engine.takerFeeBpsE8 = 0;
   setTopWithQty(engine, 9900000000ll, 40000000ll, 10100000000ll, 100000000ll);
   std::int64_t netRealized = 0;
@@ -2305,7 +2305,7 @@ bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
                                     ("hft_backtest_loader_manifest_" + std::to_string(std::rand()));
   writeText(dir / "manifest.json",
             "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTC_USDT\"]},\n"
             "  \"channels\": {\n"
             "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
@@ -2338,7 +2338,7 @@ bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
   return expect(status == hft_backtest::Status::Ok, "loader accepts current manifest channel path schema") &&
          expect(data.exchange == "binance", "loader reads exchange identity") &&
          expect(data.market == "futures", "loader reads market identity") &&
-         expect(data.symbol == "BTCUSDT", "loader reads first symbol identity") &&
+         expect(data.symbol == "BTC_USDT", "loader reads first symbol identity") &&
          expect(data.trades.size() == 1u, "loader reads trades from channel path") &&
          expect(data.bookTickers.size() == 1u, "loader reads bookticker from channel path") &&
          expect(data.priceLimits.size() == 1u, "loader reads price_limit from channel path") &&
@@ -2353,7 +2353,7 @@ bool testLoadSessionFailsMissingRequiredDepth() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_loader_missing_depth_" + std::to_string(std::rand()));
   writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
             "\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
   SessionLoadPlan plan{};
   plan.loadDepths = true;
@@ -2371,7 +2371,7 @@ bool testLoadSessionPrefersDepthTapeSidecar() {
                                     ("hft_backtest_depth_tape_" + std::to_string(std::rand()));
   std::filesystem::create_directories(dir / "jsonl");
   writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
             "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
             "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
   writeText(dir / "jsonl" / "depth_tape.jsonl",
@@ -2400,7 +2400,7 @@ bool testLoadSessionKeepsDepthTapeSidecarPrefixWhenTapeTailIsUnpaired() {
                                     ("hft_backtest_depth_tape_partial_tail_" + std::to_string(std::rand()));
   std::filesystem::create_directories(dir / "jsonl");
   writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
             "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
             "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
   writeText(dir / "jsonl" / "depth_tape.jsonl",
@@ -2431,7 +2431,7 @@ bool testLoadSessionResyncsDepthTapeSidecarAfterMissingMiddleSidecarRow() {
                                     ("hft_backtest_depth_tape_resync_" + std::to_string(std::rand()));
   std::filesystem::create_directories(dir / "jsonl");
   writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
             "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
             "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
   writeText(dir / "jsonl" / "depth_tape.jsonl",
@@ -2464,7 +2464,7 @@ bool testLoadSessionSkipsCorruptMiddleDepthTapeSidecarPair() {
                                     ("hft_backtest_depth_tape_corrupt_pair_" + std::to_string(std::rand()));
   std::filesystem::create_directories(dir / "jsonl");
   writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
             "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
             "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
   writeText(dir / "jsonl" / "depth_tape.jsonl",
@@ -2498,7 +2498,7 @@ bool testLoadSessionRejectsDepthTapeWithoutTaggedTimestamp() {
                                     ("hft_backtest_depth_tape_bad_tag_" + std::to_string(std::rand()));
   std::filesystem::create_directories(dir / "jsonl");
   writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTCUSDT\"]},"
+            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
             "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
             "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
   writeText(dir / "jsonl" / "depth_tape.jsonl",
@@ -2533,7 +2533,7 @@ bool testDepthRowBuildsInitialOrderBookSnapshot() {
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   config.tickSizeRaw = 1000000;
   Symbol symbol{};
-  symbol.copyFrom("BTCUSDT");
+  symbol.copyFrom("BTC_USDT");
   hft_trader::core::applySnapshot(book, snapshot, symbol, config);
 
   const hft_trader::core::LocalOrderBookView view = hft_trader::core::orderBook(book);
@@ -2593,7 +2593,7 @@ bool testWriterCreatesV2RunDirectory() {
   hft_backtest::BacktestLegSummary leg{};
   leg.exchange = "binance";
   leg.market = "futures";
-  leg.symbol = "BTCUSDT";
+  leg.symbol = "BTC_USDT";
   leg.marketDataLatency = hft_backtest::BacktestLatencyProfile{250u, 100u};
   leg.marketOrderLatency = hft_backtest::BacktestLatencyProfile{2500u, 1000u};
   leg.limitOrderLatency = hft_backtest::BacktestLatencyProfile{1800u, 700u};
@@ -2744,6 +2744,59 @@ bool testWriterDiagnosesNoSignalBelowThreshold() {
                 "diagnostics summarizes strategy spread decision reasons");
 }
 
+bool testWriterUsesSpreadDiagnosticsWithoutFullTrace() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_diagnostics_light_spread_" + std::to_string(std::rand()));
+  hft_backtest::BacktestRunResult result{};
+  result.status = hft_backtest::Status::Ok;
+  result.requestId = "run-light-spread";
+  result.runId = "run-light-spread";
+  result.strategy = "stat_arb_edge_maker";
+  result.sessionPath = dir.parent_path() / "session";
+  result.configPath = dir / "source_config.ini";
+  result.resultPath = dir;
+  result.events = 4;
+  result.trades = 2;
+  result.bookTickers = 2;
+  result.orders = 0;
+  result.fills = 0;
+
+  std::filesystem::create_directories(dir);
+  {
+    std::ofstream config(result.configPath, std::ios::out | std::ios::trunc);
+    config << "[strategy]\n"
+           << "type=stat_arb_edge_maker\n"
+           << "entry_edge_bps=50\n";
+  }
+
+  EngineState engine{};
+  engine.strategySpreadDiagnostics.rows = 2;
+  engine.strategySpreadDiagnostics.minEdgeAfterCostBpsE8 = 3900000000ll;
+  engine.strategySpreadDiagnostics.maxEdgeAfterCostBpsE8 = 4813596587ll;
+  engine.strategySpreadDiagnostics.maxAbsDeviationBpsE8 = 4900000000ll;
+  engine.strategySpreadDiagnostics.decisionCounts[1][10] = 2;
+  engine.equityPoints.push_back(JsonEquityPoint{200, 0, 0, 0, 0, 0, 0, 0, 10000000000ll, 0, 0});
+  engine.riskSnapshots.push_back(JsonRiskSnapshot{200, 0, 0, 0, 0, 0, 0, 10000000000ll, 0, 0, 0, 0, 0, kRiskSnapshotReasonFinal});
+
+  const hft_backtest::Status status = writeResult(result, engine);
+  const std::string manifest = readText(dir / "manifest.json");
+
+  return expect(status == hft_backtest::Status::Ok, "light spread diagnostics writer reports ok") &&
+         expect(manifest.find("\"diagnostics\": {") != std::string::npos, "manifest writes diagnostics object") &&
+         expect(manifest.find("\"zero_activity_reason\": \"no_signal_below_threshold\"") != std::string::npos,
+                "light diagnostics classify no-signal threshold miss") &&
+         expect(manifest.find("\"strategy_spread_rows\": 2") != std::string::npos,
+                "light diagnostics preserve logical spread row count") &&
+         expect(manifest.find("\"max_edge_after_cost_bps_e8\": 4813596587") != std::string::npos,
+                "light diagnostics preserve max edge after cost") &&
+         expect(manifest.find("{\"decision_kind\": 1, \"reason_raw\": 10, \"count\": 2}") != std::string::npos,
+                "light diagnostics summarize strategy decision reasons") &&
+         expect(manifest.find("\"strategy_spread\": {") == std::string::npos,
+                "manifest omits full strategy spread artifact when rows were not captured") &&
+         expect(!std::filesystem::exists(dir / "strategy_spread.jsonl"),
+                "writer does not create full strategy spread file for light diagnostics");
+}
+
 bool testWriterDiagnosesOrdersWithoutFillsAndRateLimits() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_diagnostics_no_fills_" + std::to_string(std::rand()));
@@ -2805,7 +2858,7 @@ bool staleProbeStrategyIsRejected(std::string_view strategy) {
       "enabled=1\n"
       "[venue.binance_futures]\n"
       "api_slot=1\n"
-      "symbols=BTCUSDT\n";
+      "symbols=BTC_USDT\n";
   writeText(configPath, config);
 
   hft_backtest::BacktestRunRequest request{};
@@ -2922,11 +2975,14 @@ bool testStrategyMetadataExposesOnlySupportedSpreadMakerParams() {
                 "spread_maker1and2 display name comes from ini metadata") &&
          expect(metadataHasParam(*metadata, "distance_bps"), "spread metadata contains distance_bps") &&
          expect(metadataHasParam(*metadata, "trigger_bps"), "spread metadata contains trigger_bps") &&
+         expect(metadataHasParam(*metadata, "max_quote_age_ms"), "spread metadata contains max_quote_age_ms") &&
          expect(metadataHasParam(*metadata, "amount_qty"), "spread metadata contains amount_qty") &&
          expect(metadataHasParam(*metadata, "order_qty"), "spread metadata contains order_qty") &&
          expect(metadataHasParamGroup(*metadata, 1u, "sizing_mode"), "spread sizing group comes from ini metadata") &&
          expect(metadataParamGroupIs(*metadata, "amount_qty", 1u, true), "spread amount_qty is active sizing default from ini") &&
          expect(metadataParamGroupIs(*metadata, "order_qty", 1u, false), "spread order_qty is inactive sizing option from ini") &&
+         expect(metadataParamDefaultIs(*metadata, "max_quote_age_ms", "5000"),
+                "spread max quote age default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "amount_qty", "25"), "spread amount_qty default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "order_qty", "0.001"), "spread order_qty default comes from commented ini template") &&
          expect(!metadataHasParam(*metadata, "fixed quote distance in basis points. 1 bps"),
@@ -2955,11 +3011,13 @@ bool testStatArbBandLadderMetadataRequiresTwoSessions() {
          expect(metadataHasParam(*metadata, "entry_edge_bps"), "stat arb band ladder metadata contains entry_edge_bps") &&
          expect(metadataHasParam(*metadata, "exit_edge_bps"), "stat arb band ladder metadata contains exit_edge_bps") &&
          expect(!metadataHasParam(*metadata, "pending_timeout_ms"), "stat arb band ladder metadata hides pending_timeout_ms") &&
-         expect(!metadataHasParam(*metadata, "max_quote_age_ms"), "stat arb band ladder metadata hides max_quote_age_ms") &&
+         expect(metadataHasParam(*metadata, "max_quote_age_ms"), "stat arb band ladder metadata exposes max_quote_age_ms") &&
          expect(!metadataHasParam(*metadata, "max_leg_skew_ms"), "stat arb band ladder metadata hides max_leg_skew_ms") &&
          expect(metadataHasParam(*metadata, "ladder_step_bps"), "stat arb band ladder metadata exposes ladder_step_bps") &&
          expect(metadataHasParam(*metadata, "max_ladder_levels"), "stat arb band ladder metadata exposes max_ladder_levels") &&
          expect(metadataParamDefaultIs(*metadata, "max_ladder_levels", "3"), "ladder levels default comes from ini") &&
+         expect(metadataParamDefaultIs(*metadata, "max_quote_age_ms", "5000"),
+                "stat arb band ladder max quote age default comes from ini") &&
          expect(metadataHasParam(*metadata, "amount_qty"), "stat arb band ladder metadata contains amount_qty") &&
          expect(metadataHasParam(*metadata, "order_qty"), "stat arb band ladder metadata contains order_qty") &&
          expect(metadataHasParamGroup(*metadata, 1u, "sizing_mode"), "stat arb band ladder sizing group comes from ini metadata") &&
@@ -2993,6 +3051,7 @@ bool testStatArbPairwiseTakerMetadataSupportsAllPairs() {
          expect(metadataHasParam(*metadata, "ladder_step_bps"), "pairwise metadata contains ladder_step_bps") &&
          expect(metadataHasParam(*metadata, "exit_edge_bps"), "pairwise metadata contains exit_edge_bps") &&
          expect(metadataHasParam(*metadata, "max_ladder_levels"), "pairwise metadata contains max_ladder_levels") &&
+         expect(metadataHasParam(*metadata, "max_quote_age_ms"), "pairwise metadata contains max_quote_age_ms") &&
          expect(!metadataHasParam(*metadata, "max_active_pairs"), "pairwise metadata hides old max_active_pairs") &&
          expect(!metadataHasParam(*metadata, "max_pair_entries_per_cycle"),
                 "pairwise metadata hides old max_pair_entries_per_cycle") &&
@@ -3009,9 +3068,36 @@ bool testStatArbPairwiseTakerMetadataSupportsAllPairs() {
                 "pairwise ladder step default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "max_ladder_levels", "3"),
                 "pairwise ladder levels default comes from ini") &&
+         expect(metadataParamDefaultIs(*metadata, "max_quote_age_ms", "5000"),
+                "pairwise max quote age default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "amount_qty", "10"), "pairwise amount_qty default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "order_qty", "0.001"),
                 "pairwise order_qty default comes from commented ini template");
+}
+
+bool testStrategyMetadataExposesInputFreshnessParam() {
+  constexpr std::string_view kStrategies[] = {
+      "basis_convergence_probe",
+      "spread_maker1and2",
+      "stat_arb_band_ladder",
+      "stat_arb_edge_maker",
+      "stat_arb_pairwise_edge_maker",
+      "stat_arb_pairwise_taker",
+      "uptick",
+  };
+  bool ok = true;
+  for (std::string_view strategy : kStrategies) {
+    const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata(strategy);
+    ok = expect(metadata != nullptr, "strategy metadata is exported for input freshness") && ok;
+    if (metadata == nullptr) continue;
+    ok = expect(metadataHasParam(*metadata, "max_quote_age_ms"),
+                "strategy metadata exposes max_quote_age_ms") &&
+         ok;
+    ok = expect(metadataParamDefaultIs(*metadata, "max_quote_age_ms", "5000"),
+                "strategy metadata max_quote_age_ms default comes from ini") &&
+         ok;
+  }
+  return ok;
 }
 
 }  // namespace
@@ -3104,6 +3190,7 @@ int main() {
   ok = testTieredCandleHistoryBuildsCounts() && ok;
   ok = testWriterCreatesV2RunDirectory() && ok;
   ok = testWriterDiagnosesNoSignalBelowThreshold() && ok;
+  ok = testWriterUsesSpreadDiagnosticsWithoutFullTrace() && ok;
   ok = testWriterDiagnosesOrdersWithoutFillsAndRateLimits() && ok;
   ok = testStaleProbeStrategiesAreRejectedByRegistry() && ok;
   ok = testStrategyMetadataMirrorsTraderRegistry() && ok;
@@ -3112,5 +3199,6 @@ int main() {
   ok = testStatArbBandLadderMetadataRequiresTwoSessions() && ok;
   ok = testStaleProbeProfilesDoNotCreateMetadata() && ok;
   ok = testStatArbPairwiseTakerMetadataSupportsAllPairs() && ok;
+  ok = testStrategyMetadataExposesInputFreshnessParam() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

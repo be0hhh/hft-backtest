@@ -61,13 +61,13 @@ std::string tradeRow(std::int64_t price,
   return "[" + std::to_string(price) + "," + std::to_string(qty) + "," +
          std::to_string(side) + "," + std::to_string(tsNs) +
          ",1,1,1," + std::to_string(price) +
-         ",0,\"H-USDT-SWAP\",\"okx\",\"futures\",1," + std::to_string(seq) + "]\n";
+         ",0,\"H_USDT\",\"okx\",\"futures\",1," + std::to_string(seq) + "]\n";
 }
 
 void writeUptickSession(const std::filesystem::path& dir) {
   writeText(dir / "manifest.json",
             "{\n"
-            "  \"identity\": {\"exchange\": \"okx\", \"market\": \"futures\", \"symbols\": [\"H-USDT-SWAP\"]},\n"
+            "  \"identity\": {\"exchange\": \"okx\", \"market\": \"futures\", \"symbols\": [\"H_USDT\"]},\n"
             "  \"channels\": {\n"
             "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
@@ -105,7 +105,7 @@ void writeConfig(const std::filesystem::path& path) {
             "user_enabled=true\n"
             "order_enabled=true\n"
             "control_enabled=true\n"
-            "symbols=H-USDT-SWAP\n");
+            "symbols=H_USDT\n");
 }
 
 bool testUptickReplayPlacesAndFillsFromValidFlatStart() {

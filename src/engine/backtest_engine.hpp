@@ -10,6 +10,7 @@
 #include "hft_trader/core/intents/OrderState.hpp"
 #include "hft_trader/core/intents/PositionState.hpp"
 #include "hft_trader/core/strategy/StrategyContract.hpp"
+#include "hft_trader/core/strategy/StrategyDecisionTrace.hpp"
 
 #include "canon/PositionAndExchange.hpp"
 #include "canon/Subtypes.hpp"
@@ -261,6 +262,15 @@ struct JsonStrategySpreadPoint {
   std::uint8_t reasonRaw{0u};
 };
 
+struct JsonStrategySpreadDiagnostics {
+  std::uint64_t rows{0u};
+  std::int64_t minEdgeAfterCostBpsE8{0};
+  std::int64_t maxEdgeAfterCostBpsE8{0};
+  std::int64_t maxAbsDeviationBpsE8{0};
+  std::array<std::array<std::uint64_t, hft_trader::core::kStrategyDecisionReasonCapacity>,
+             hft_trader::core::kStrategyDecisionKindCount> decisionCounts{};
+};
+
 struct JsonRateLimitUsagePoint {
   std::uint32_t legIndex{0u};
   std::int64_t tsNs{0};
@@ -314,6 +324,7 @@ struct EngineState {
   std::vector<JsonStrategyIndicatorPoint> strategyIndicator{};
   std::vector<JsonStrategyRangePoint> strategyRange{};
   std::vector<JsonStrategySpreadPoint> strategySpread{};
+  JsonStrategySpreadDiagnostics strategySpreadDiagnostics{};
   std::vector<JsonRateLimitUsagePoint> rateLimitUsage{};
   std::string strategyIndicatorProfile{};
   std::string strategyIndicatorTitle{};
@@ -336,6 +347,7 @@ struct EngineState {
   hft_trader::core::BboReconstructionState bboReconstruction{};
   hft_trader::core::BboReconstructionState venueBboReconstruction{};
   std::uint64_t contextRevision{1u};
+  std::int64_t lastStrategySourceMarketDataTsNs{0};
   BacktestInputCoverage inputCoverage{};
   std::uint32_t legIndex{0u};
   ExchangeId exchange{};

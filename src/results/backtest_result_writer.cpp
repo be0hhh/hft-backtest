@@ -227,9 +227,40 @@ const char* tradeModeName(BacktestTradeMode mode) noexcept {
   return "all_legs";
 }
 
+void sortAndTrimDecisionCounts(std::vector<DecisionCount>& counts) {
+  std::stable_sort(counts.begin(), counts.end(), [](const DecisionCount& lhs, const DecisionCount& rhs) noexcept {
+    if (lhs.count != rhs.count) return lhs.count > rhs.count;
+    if (lhs.decisionKind != rhs.decisionKind) return lhs.decisionKind < rhs.decisionKind;
+    return lhs.reasonRaw < rhs.reasonRaw;
+  });
+  if (counts.size() > kMaxDecisionDiagnostics) counts.resize(kMaxDecisionDiagnostics);
+}
+
 SignalDiagnostics collectSignalDiagnostics(const EngineState& engine,
                                            const std::filesystem::path& configPath) {
   SignalDiagnostics out{};
+  out.hasEntryEdgeBps = readConfigBpsE8(configPath, "entry_edge_bps", out.entryEdgeBpsE8);
+  if (engine.strategySpreadDiagnostics.rows > 0u) {
+    out.strategySpreadRows = engine.strategySpreadDiagnostics.rows;
+    out.minEdgeAfterCostBpsE8 = engine.strategySpreadDiagnostics.minEdgeAfterCostBpsE8;
+    out.maxEdgeAfterCostBpsE8 = engine.strategySpreadDiagnostics.maxEdgeAfterCostBpsE8;
+    out.maxAbsDeviationBpsE8 = engine.strategySpreadDiagnostics.maxAbsDeviationBpsE8;
+    out.decisionCounts.reserve(16u);
+    for (std::size_t kind = 0u; kind < engine.strategySpreadDiagnostics.decisionCounts.size(); ++kind) {
+      for (std::size_t reason = 0u; reason < engine.strategySpreadDiagnostics.decisionCounts[kind].size(); ++reason) {
+        const std::uint64_t count = engine.strategySpreadDiagnostics.decisionCounts[kind][reason];
+        if (count == 0u) continue;
+        out.decisionCounts.push_back(DecisionCount{
+            static_cast<std::uint8_t>(kind),
+            static_cast<std::uint8_t>(reason),
+            count,
+        });
+      }
+    }
+    sortAndTrimDecisionCounts(out.decisionCounts);
+    return out;
+  }
+
   out.strategySpreadRows = engine.strategySpread.size();
   absl::flat_hash_map<std::uint16_t, std::uint64_t> decisionCounts;
   decisionCounts.reserve(engine.strategySpread.size() > 0u ? 16u : 0u);
@@ -256,13 +287,7 @@ SignalDiagnostics collectSignalDiagnostics(const EngineState& engine,
         entry.second,
     });
   }
-  std::stable_sort(out.decisionCounts.begin(), out.decisionCounts.end(), [](const DecisionCount& lhs, const DecisionCount& rhs) noexcept {
-    if (lhs.count != rhs.count) return lhs.count > rhs.count;
-    if (lhs.decisionKind != rhs.decisionKind) return lhs.decisionKind < rhs.decisionKind;
-    return lhs.reasonRaw < rhs.reasonRaw;
-  });
-  if (out.decisionCounts.size() > kMaxDecisionDiagnostics) out.decisionCounts.resize(kMaxDecisionDiagnostics);
-  out.hasEntryEdgeBps = readConfigBpsE8(configPath, "entry_edge_bps", out.entryEdgeBpsE8);
+  sortAndTrimDecisionCounts(out.decisionCounts);
   return out;
 }
 

@@ -31,7 +31,7 @@ std::filesystem::path makeSessionDir(std::string_view name) {
 void writeManifest(const std::filesystem::path& dir) {
   writeText(dir / "manifest.json",
             "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTC_USDT\"]},\n"
             "  \"channels\": {\n"
             "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
@@ -77,7 +77,7 @@ bool testLoadSessionReadsOptionalReferenceStreams() {
   const std::filesystem::path dir = makeSessionDir("reference_streams");
   writeText(dir / "manifest.json",
             "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTCUSDT\"]},\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTC_USDT\"]},\n"
             "  \"channels\": {\n"
             "    \"liquidations\": {\"path\": \"jsonl/liquidations.jsonl\"},\n"
             "    \"mark_price\": {\"path\": \"jsonl/mark_price.jsonl\"},\n"
@@ -87,7 +87,7 @@ bool testLoadSessionReadsOptionalReferenceStreams() {
             "  }\n"
             "}\n");
   writeText(dir / "jsonl" / "liquidations.jsonl",
-            "[10000000000,200000000,1,1000,10010000000,150000000,\"BTCUSDT\",\"binance\",\"futures\",1,2,3,2,11,21]\n");
+            "[10000000000,200000000,1,1000,10010000000,150000000,\"BTC_USDT\",\"binance\",\"futures\",1,2,3,2,11,21]\n");
   writeText(dir / "jsonl" / "mark_price.jsonl", "[2000,10020000000]\n");
   writeText(dir / "jsonl" / "index_price.jsonl", "[2100,10000000000]\n");
   writeText(dir / "jsonl" / "funding.jsonl", "[2200,1234,2200,5800]\n");
@@ -121,16 +121,57 @@ bool testLoadSessionReadsOptionalReferenceStreams() {
          expect(data.lastTsNs == 2300, "reference stream last timestamp tracked");
 }
 
+bool testLoadSessionRejectsLegacyCryptoManifestSymbol() {
+  const std::filesystem::path dir = makeSessionDir("legacy_crypto_symbol");
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"okx\", \"market\": \"futures\", \"symbols\": [\"H-USDT-SWAP\"]}\n"
+            "}\n");
+
+  hft_backtest::detail::SessionData data{};
+  hft_backtest::detail::SessionLoadPlan plan{};
+  plan.loadTrades = false;
+  plan.loadBookTickers = false;
+  plan.loadDepths = false;
+  std::string error{};
+
+  const hft_backtest::Status status = hft_backtest::detail::loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::CorruptData, "legacy crypto manifest symbol is rejected") &&
+         expect(error.find("legacy crypto symbol") != std::string::npos, "legacy crypto symbol error is explicit");
+}
+
+bool testLoadSessionAcceptsUtf8LocalCryptoManifestSymbol() {
+  const std::filesystem::path dir = makeSessionDir("utf8_crypto_symbol");
+  writeText(dir / "manifest.json",
+            "{\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"龙虾:USDT\"]}\n"
+            "}\n");
+
+  hft_backtest::detail::SessionData data{};
+  hft_backtest::detail::SessionLoadPlan plan{};
+  plan.loadTrades = false;
+  plan.loadBookTickers = false;
+  plan.loadDepths = false;
+  std::string error{};
+
+  const hft_backtest::Status status = hft_backtest::detail::loadSession(dir, plan, data, error);
+
+  return expect(status == hft_backtest::Status::Ok, "utf8 local crypto manifest symbol loads") &&
+         expect(data.symbol == "龙虾:USDT", "utf8 manifest symbol is preserved") &&
+         expect(error.empty(), "utf8 manifest symbol does not produce loader error");
+}
+
 bool testLoadSessionCarriesCaptureWarningsFromManifest() {
   const std::filesystem::path dir = makeSessionDir("capture_warning");
   writeText(dir / "manifest.json",
             "{\n"
-            "  \"identity\": {\"exchange\": \"bitget\", \"market\": \"futures\", \"symbols\": [\"AGLDUSDT\"]},\n"
+            "  \"identity\": {\"exchange\": \"bitget\", \"market\": \"futures\", \"symbols\": [\"AGLD_USDT\"]},\n"
             "  \"integrity\": {\"session_health\": \"degraded\"},\n"
             "  \"channels\": {\n"
             "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"}\n"
             "  },\n"
-            "  \"summary\": {\"warning_summary\": \"reference: route status=disconnected stream=mark_price symbol=AGLDUSDT\"}\n"
+            "  \"summary\": {\"warning_summary\": \"reference: route status=disconnected stream=mark_price symbol=AGLD_USDT\"}\n"
             "}\n");
   writeText(dir / "jsonl" / "bookticker.jsonl",
             "[21870000,60640000000,21900000,122950000000,1782577492350000000]\n");
@@ -148,7 +189,7 @@ bool testLoadSessionCarriesCaptureWarningsFromManifest() {
          expect(data.bookTickers.size() == 1u, "bookticker still usable with capture warning") &&
          expect(data.warnings.size() == 2u, "capture health and warning propagated") &&
          expect(data.warnings[0] == "capture health: degraded", "capture health warning propagated") &&
-         expect(data.warnings[1] == "capture warning: reference: route status=disconnected stream=mark_price symbol=AGLDUSDT",
+         expect(data.warnings[1] == "capture warning: reference: route status=disconnected stream=mark_price symbol=AGLD_USDT",
                 "capture warning summary propagated");
 }
 
@@ -156,7 +197,7 @@ bool testLoadSessionReadsCanonicalPriceLimitRows() {
   const std::filesystem::path dir = makeSessionDir("canonical_price_limit");
   writeText(dir / "manifest.json",
             "{\n"
-            "  \"identity\": {\"exchange\": \"okx\", \"market\": \"futures\", \"symbols\": [\"H-USDT-SWAP\"]},\n"
+            "  \"identity\": {\"exchange\": \"okx\", \"market\": \"futures\", \"symbols\": [\"H_USDT\"]},\n"
             "  \"channels\": {\n"
             "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"}\n"
             "  }\n"
@@ -201,8 +242,8 @@ bool testLoadSessionParsesCrLfAndFinalLineWithoutNewline() {
   const std::filesystem::path dir = makeSessionDir("crlf");
   writeManifest(dir);
   writeText(dir / "jsonl" / "trades.jsonl",
-            "[10000000000,100000000,1,1000,1,1,1,10000000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,11]\r\n"
-            "[10010000000,200000000,0,2000,2,2,2,10010000000,0,\"BTCUSDT\",\"binance\",\"futures\",2,12]");
+            "[10000000000,100000000,1,1000,1,1,1,10000000000,0,\"BTC_USDT\",\"binance\",\"futures\",1,11]\r\n"
+            "[10010000000,200000000,0,2000,2,2,2,10010000000,0,\"BTC_USDT\",\"binance\",\"futures\",2,12]");
   writeText(dir / "jsonl" / "bookticker.jsonl",
             "[9900000000,100000000,10100000000,100000000,1500,3,21]");
   writeText(dir / "jsonl" / "depth.jsonl",
@@ -239,7 +280,7 @@ bool testLoadSessionRejectsI64Overflow() {
   const std::filesystem::path dir = makeSessionDir("overflow");
   writeManifest(dir);
   writeText(dir / "jsonl" / "trades.jsonl",
-            "[9223372036854775808,100000000,1,1000,1,1,1,10000000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,11]\n");
+            "[9223372036854775808,100000000,1,1000,1,1,1,10000000000,0,\"BTC_USDT\",\"binance\",\"futures\",1,11]\n");
 
   hft_backtest::detail::SessionData data{};
   hft_backtest::detail::SessionLoadPlan plan{};
@@ -260,8 +301,8 @@ bool testLoadSessionSortsUnorderedTimelineChannels() {
   const std::filesystem::path dir = makeSessionDir("unordered_channels");
   writeManifest(dir);
   writeText(dir / "jsonl" / "trades.jsonl",
-            "[10030000000,100000000,1,3000,1,1,1,10030000000,0,\"BTCUSDT\",\"binance\",\"futures\",3,30]\n"
-            "[10010000000,100000000,0,1000,1,1,1,10010000000,0,\"BTCUSDT\",\"binance\",\"futures\",1,10]\n");
+            "[10030000000,100000000,1,3000,1,1,1,10030000000,0,\"BTC_USDT\",\"binance\",\"futures\",3,30]\n"
+            "[10010000000,100000000,0,1000,1,1,1,10010000000,0,\"BTC_USDT\",\"binance\",\"futures\",1,10]\n");
   writeText(dir / "jsonl" / "bookticker.jsonl",
             "[9900000000,100000000,10100000000,100000000,2000,2,20]\n");
 
@@ -415,6 +456,8 @@ int main() {
   bool ok = true;
   ok = testLoadSessionParsesInstrumentPriceBasis() && ok;
   ok = testLoadSessionReadsOptionalReferenceStreams() && ok;
+  ok = testLoadSessionRejectsLegacyCryptoManifestSymbol() && ok;
+  ok = testLoadSessionAcceptsUtf8LocalCryptoManifestSymbol() && ok;
   ok = testLoadSessionCarriesCaptureWarningsFromManifest() && ok;
   ok = testLoadSessionReadsCanonicalPriceLimitRows() && ok;
   ok = testLoadSessionParsesCrLfAndFinalLineWithoutNewline() && ok;

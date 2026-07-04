@@ -2,6 +2,7 @@
 
 #include "accounting/backtest_metrics.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -53,6 +54,25 @@ void appendRateLimitWarningForEngine(BacktestRunResult& result,
   } catch (...) {
     // Warning emission is best-effort; it must not change replay status.
   }
+}
+
+void mergeStrategySpreadDiagnostics(detail::JsonStrategySpreadDiagnostics& out,
+                                    const detail::JsonStrategySpreadDiagnostics& in) noexcept {
+  if (in.rows == 0u) return;
+  if (out.rows == 0u) {
+    out.minEdgeAfterCostBpsE8 = in.minEdgeAfterCostBpsE8;
+    out.maxEdgeAfterCostBpsE8 = in.maxEdgeAfterCostBpsE8;
+  } else {
+    out.minEdgeAfterCostBpsE8 = std::min(out.minEdgeAfterCostBpsE8, in.minEdgeAfterCostBpsE8);
+    out.maxEdgeAfterCostBpsE8 = std::max(out.maxEdgeAfterCostBpsE8, in.maxEdgeAfterCostBpsE8);
+  }
+  out.maxAbsDeviationBpsE8 = std::max(out.maxAbsDeviationBpsE8, in.maxAbsDeviationBpsE8);
+  for (std::size_t kind = 0u; kind < out.decisionCounts.size(); ++kind) {
+    for (std::size_t reason = 0u; reason < out.decisionCounts[kind].size(); ++reason) {
+      out.decisionCounts[kind][reason] += in.decisionCounts[kind][reason];
+    }
+  }
+  out.rows += in.rows;
 }
 
 }  // namespace
@@ -118,6 +138,7 @@ void populateAggregateArtifactEngine(const std::vector<detail::EngineState>& eng
     out.strategyIndicator.insert(out.strategyIndicator.end(), engine.strategyIndicator.begin(), engine.strategyIndicator.end());
     out.strategyRange.insert(out.strategyRange.end(), engine.strategyRange.begin(), engine.strategyRange.end());
     out.strategySpread.insert(out.strategySpread.end(), engine.strategySpread.begin(), engine.strategySpread.end());
+    mergeStrategySpreadDiagnostics(out.strategySpreadDiagnostics, engine.strategySpreadDiagnostics);
     out.rateLimitUsage.insert(out.rateLimitUsage.end(), engine.rateLimitUsage.begin(), engine.rateLimitUsage.end());
     out.userEvents.insert(out.userEvents.end(), engine.userEvents.begin(), engine.userEvents.end());
     out.userEventDeliveryTsNs.insert(out.userEventDeliveryTsNs.end(), engine.userEventDeliveryTsNs.begin(), engine.userEventDeliveryTsNs.end());

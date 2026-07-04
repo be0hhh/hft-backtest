@@ -1,5 +1,6 @@
 #include "input/session_loader.hpp"
 
+#include "api/resolve/LocalSymbolValidation.hpp"
 #include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
 
 #include <algorithm>
@@ -66,6 +67,41 @@ bool readText(const std::filesystem::path& path, std::string& out) {
   ss << in.rdbuf();
   out = ss.str();
   return true;
+}
+
+char lowerAscii(char c) noexcept {
+  return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+bool equalsNoCase(std::string_view lhs, std::string_view rhs) noexcept {
+  if (lhs.size() != rhs.size()) return false;
+  for (std::size_t i = 0u; i < lhs.size(); ++i) {
+    if (lowerAscii(lhs[i]) != lowerAscii(rhs[i])) return false;
+  }
+  return true;
+}
+
+bool cryptoRecorderExchange(std::string_view exchange) noexcept {
+  static constexpr std::string_view kExchanges[] = {
+      "aster",       "backpack", "binance",  "bingx",   "bitget",
+      "bitmart",     "bitunix",  "bybit",    "coinbase", "coinex",
+      "gate",        "htx",      "hyperliquid", "kraken", "kucoin",
+      "mexc",        "okx",      "phemex",   "poloniex", "toobit",
+      "xt",
+  };
+  for (const std::string_view known : kExchanges) {
+    if (equalsNoCase(exchange, known)) return true;
+  }
+  return false;
+}
+
+bool validLocalCryptoSymbol(std::string_view symbol) noexcept {
+  std::string text{symbol};
+  return cxet::api::isLocalCryptoSymbolText(text.c_str());
+}
+
+bool legacyCryptoManifestSymbol(std::string_view exchange, std::string_view symbol) noexcept {
+  return cryptoRecorderExchange(exchange) && !validLocalCryptoSymbol(symbol);
 }
 
 void skipWs(std::string_view text, std::size_t& pos) noexcept {
@@ -974,6 +1010,10 @@ Status loadSession(const std::filesystem::path& sessionPath,
   loadTradeHistoryManifestFields(manifest, out);
   if (out.exchange.empty() || out.market.empty() || out.symbol.empty()) {
     error = "manifest identity is incomplete";
+    return Status::CorruptData;
+  }
+  if (legacyCryptoManifestSymbol(out.exchange, out.symbol)) {
+    error = "manifest identity has legacy crypto symbol; expected local symbol format BASE_QUOTE";
     return Status::CorruptData;
   }
 
