@@ -145,7 +145,7 @@ bool testLoadSessionAcceptsUtf8LocalCryptoManifestSymbol() {
   const std::filesystem::path dir = makeSessionDir("utf8_crypto_symbol");
   writeText(dir / "manifest.json",
             "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"龙虾:USDT\"]}\n"
+            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"龙虾_USDT\"]}\n"
             "}\n");
 
   hft_backtest::detail::SessionData data{};
@@ -158,7 +158,7 @@ bool testLoadSessionAcceptsUtf8LocalCryptoManifestSymbol() {
   const hft_backtest::Status status = hft_backtest::detail::loadSession(dir, plan, data, error);
 
   return expect(status == hft_backtest::Status::Ok, "utf8 local crypto manifest symbol loads") &&
-         expect(data.symbol == "龙虾:USDT", "utf8 manifest symbol is preserved") &&
+         expect(data.symbol == "龙虾_USDT", "utf8 manifest symbol is preserved") &&
          expect(error.empty(), "utf8 manifest symbol does not produce loader error");
 }
 

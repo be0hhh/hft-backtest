@@ -128,6 +128,9 @@ void setTop(EngineState& engine, std::int64_t bid, std::int64_t ask) noexcept {
   top.ask.px.raw = ask;
   hft_trader::core::copyBookTickerSnapshot(engine.snapshot, top);
   hft_trader::core::copyBookTickerSnapshot(engine.venueSnapshot, top);
+  engine.lastStrategySourceMarketDataTsNs = 1000u;
+  engine.snapshot.lastBookTicker.ts.raw = 1000u;
+  engine.venueSnapshot.lastBookTicker.ts.raw = 1000u;
 }
 
 void setTopWithQty(EngineState& engine,

@@ -284,13 +284,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)writeEmptyArtifacts();
     return result;
   }
-  const bool requestedTwoPhaseReprice = request.executionPipeline == BacktestExecutionPipeline::TwoPhaseReprice;
-  const bool twoPhaseRepriceActive = requestedTwoPhaseReprice && !loadPlan.requireDepths;
-  if (requestedTwoPhaseReprice && loadPlan.requireDepths) {
-    result.twoPhaseRepriceFallback = true;
-    result.warnings.push_back("two-phase reprice disabled: strategy requires orderbook stream");
-  }
-  if (twoPhaseRepriceActive) loadPlan.loadDepths = false;
+  (void)request.executionPipeline;
 
   detail::PreparedBacktestInput* preparedInput = detail::activePreparedBacktestInput();
   const bool usePreparedSessions = preparedInput != nullptr &&
@@ -518,7 +512,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
 
   std::vector<std::unique_ptr<detail::ExecutionDepthProvider>> executionDepthProviders{};
-  if (!loadPlan.loadDepths && !twoPhaseRepriceActive) {
+  if (!loadPlan.loadDepths) {
     if (hasExplicitSessions) {
       executionDepthProviders.reserve(legEngines.size());
       for (std::size_t leg = 0; leg < sessions.size() && leg < legEngines.size(); ++leg) {
@@ -776,12 +770,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   };
 
   auto reportReplayProgress = [&](std::uint64_t done, std::uint64_t total) noexcept -> bool {
-    return twoPhaseRepriceActive
-        ? reportProgress(done, total, "phase1 replay", 0u, 50u, progressCallback, userData)
-        : reportProgress(done, total, "running", progressCallback, userData);
-  };
-  auto reportRepriceProgress = [&](std::uint64_t done, std::uint64_t total) noexcept -> bool {
-    return reportProgress(done, total, "phase2 reprice", 50u, 50u, progressCallback, userData);
+    return reportProgress(done, total, "running", progressCallback, userData);
   };
 
   if (!reportReplayProgress(0, timeline.size())) {
@@ -1003,105 +992,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     const std::int64_t stopCheckTsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
     (void)(tripHardLiquidation(stopCheckTsNs) || tripTraderRiskStop(stopCheckTsNs, true));
   }
-  if (twoPhaseRepriceActive) {
-    if (hasExplicitSessions) {
-      for (std::size_t leg = 0; leg < legEngines.size() && leg < sessions.size(); ++leg) {
-        detail::Phase2MakerQueueStats makerStats{};
-        const bool makerOk = detail::repriceMakerLimitQueueWithBboTrades(sessions[leg].sessionPath,
-                                                                         legEngines[leg],
-                                                                         result.lastTsNs,
-                                                                         makerStats);
-        if (!makerOk && makerStats.ordersVisited > 0u) {
-          result.warnings.push_back("two-phase maker queue skipped leg " + std::to_string(leg) + ": BBO/trade stream unavailable");
-        }
-      }
-      if (!legEngines.empty()) engine = legEngines[0];
-    } else {
-      detail::Phase2MakerQueueStats makerStats{};
-      const bool makerOk = detail::repriceMakerLimitQueueWithBboTrades(session.sessionPath,
-                                                                       engine,
-                                                                       result.lastTsNs,
-                                                                       makerStats);
-      if (!makerOk && makerStats.ordersVisited > 0u) {
-        result.warnings.push_back("two-phase maker queue skipped: BBO/trade stream unavailable");
-      }
-    }
-    std::uint64_t totalFillsForReprice = 0;
-    if (hasExplicitSessions) {
-      for (const detail::EngineState& legEngine : legEngines) totalFillsForReprice += legEngine.fills.size();
-    } else {
-      totalFillsForReprice = engine.fills.size();
-    }
-    if (!reportRepriceProgress(0, totalFillsForReprice)) {
-      result.status = Status::Cancelled;
-      result.error = "cancelled";
-      (void)writeCurrentArtifacts();
-      return result;
-    }
-    std::uint64_t repriceDone = 0;
-    if (hasExplicitSessions) {
-      for (std::size_t leg = 0; leg < legEngines.size() && leg < sessions.size() && leg < legSymbols.size() && leg < legInstruments.size(); ++leg) {
-        detail::ExecutionRepriceStats stats{};
-        const bool ok = detail::repriceFillsWithDepth(sessions[leg].sessionPath,
-                                                      legSymbols[leg],
-                                                      legInstruments[leg].tickSizeRaw,
-                                                      legEngines[leg],
-                                                      stats);
-        result.phase2DepthRows += stats.depthRowsRead;
-        result.phase2FillsRepriced += stats.fillsRepriced;
-        result.phase2FillsMissingDepth += stats.fillsMissingDepth;
-        result.phase2BboRepriced += stats.fillsBboRepriced;
-        result.phase2DepthVwapRepriced += stats.fillsDepthVwapRepriced;
-        result.phase2DepthRejectedUnseeded += stats.fillsDepthRejectedUnseeded;
-        result.phase2DepthRejectedCrossed += stats.fillsDepthRejectedCrossed;
-        result.phase2DepthRejectedStale += stats.fillsDepthRejectedStale;
-        result.phase2MissingBbo += stats.fillsMissingBbo;
-        detail::rebuildAccountingFromFills(legEngines[leg], result.firstTsNs, 0);
-        if (!ok && !legEngines[leg].fills.empty()) {
-          result.warnings.push_back("two-phase reprice skipped leg " + std::to_string(leg) + ": BBO stream unavailable");
-        }
-        repriceDone += legEngines[leg].fills.size();
-        if (!reportRepriceProgress(repriceDone, totalFillsForReprice)) {
-          result.status = Status::Cancelled;
-          result.error = "cancelled";
-          (void)writeCurrentArtifacts();
-          return result;
-        }
-      }
-      if (!legEngines.empty()) engine = legEngines[0];
-    } else {
-      detail::ExecutionRepriceStats stats{};
-      const bool ok = detail::repriceFillsWithDepth(session.sessionPath,
-                                                    selectedSymbol,
-                                                    instrument.tickSizeRaw,
-                                                    engine,
-                                                    stats);
-      result.phase2DepthRows = stats.depthRowsRead;
-      result.phase2FillsRepriced = stats.fillsRepriced;
-      result.phase2FillsMissingDepth = stats.fillsMissingDepth;
-      result.phase2BboRepriced = stats.fillsBboRepriced;
-      result.phase2DepthVwapRepriced = stats.fillsDepthVwapRepriced;
-      result.phase2DepthRejectedUnseeded = stats.fillsDepthRejectedUnseeded;
-      result.phase2DepthRejectedCrossed = stats.fillsDepthRejectedCrossed;
-      result.phase2DepthRejectedStale = stats.fillsDepthRejectedStale;
-      result.phase2MissingBbo = stats.fillsMissingBbo;
-      detail::rebuildAccountingFromFills(engine, result.firstTsNs, 0);
-      if (!ok && !engine.fills.empty()) result.warnings.push_back("two-phase reprice skipped: BBO stream unavailable");
-      if (!reportRepriceProgress(totalFillsForReprice, totalFillsForReprice)) {
-        result.status = Status::Cancelled;
-        result.error = "cancelled";
-        (void)writeCurrentArtifacts();
-        return result;
-      }
-    }
-    if (!replayStopped) {
-      const std::int64_t postRepriceCheckTsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
-      (void)(tripHardLiquidation(postRepriceCheckTsNs) ||
-             tripTraderRiskStop(postRepriceCheckTsNs, true));
-    }
-    result.warnings.push_back("two-phase reprice is diagnostic: fills are updated post-hoc after phase1 strategy decisions");
-    result.twoPhaseRepriceApplied = true;
-  }
   const std::int64_t finalTsNs = result.lastTsNs > 0 ? result.lastTsNs + 1 : result.lastTsNs;
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
@@ -1127,22 +1017,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     populateResultPnl(result, engine);
     result.orders = engine.orders.size();
     result.fills = engine.fills.size();
-  }
-  if (result.twoPhaseRepriceApplied && !result.strategyClosed) {
-    std::string warning = "two-phase reprice left open exposure after post-hoc fill updates; "
-                          "downstream strategy hedge/close decisions were generated from phase1 fills";
-    warning += " (open_position_qty_e8=";
-    warning += std::to_string(result.openPositionQtyE8);
-    if (!result.legs.empty()) {
-      warning += ", leg_open_position_qty_e8=[";
-      for (std::size_t i = 0u; i < result.legs.size(); ++i) {
-        if (i != 0u) warning += ",";
-        warning += std::to_string(result.legs[i].openPositionQtyE8);
-      }
-      warning += "]";
-    }
-    warning += ")";
-    result.warnings.push_back(std::move(warning));
   }
   appendRateLimitWarnings(result, engine, hasExplicitSessions ? &legEngines : nullptr);
   result.rateLimitRejectedCommands = rateLimitRejectedCommands(engine, hasExplicitSessions ? &legEngines : nullptr);

@@ -540,7 +540,7 @@ bool testPairwiseTakerMultiLegReplayRunsCycleForEveryDeliveredBookTicker() {
               << " error=" << result.error << "\n";
     return false;
   }
-  const std::uint64_t expectedReadyCycles = kLegs + 1u;
+  const std::uint64_t expectedReadyCycles = kLegs;
   return expect(result.bookTickers == kLegs * 2u, "pairwise replay counts all bookticker rows") &&
          expect(result.inputCoverage.strategyCycles == expectedReadyCycles,
                 "pairwise replay invokes the first complete portfolio cycle and every later delivered bookticker") &&

@@ -49,7 +49,6 @@ struct BacktestRateLimitSchedule {
 
 enum class BacktestExecutionPipeline : std::uint8_t {
   Inline = 0,
-  TwoPhaseReprice = 1,
 };
 
 enum class BacktestTradeMode : std::uint8_t {

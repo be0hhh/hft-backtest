@@ -160,14 +160,6 @@ hft_backtest::BacktestRunRequest makeReplayRequest(const std::filesystem::path& 
   return request;
 }
 
-bool hasWarningContaining(const hft_backtest::BacktestRunResult& result,
-                          std::string_view needle) {
-  for (const std::string& warning : result.warnings) {
-    if (warning.find(needle) != std::string::npos) return true;
-  }
-  return false;
-}
-
 bool testBurstPartialMakerFillReplayKeepsPairExposureBounded() {
   const std::filesystem::path root = makeRoot();
   const std::filesystem::path leg0 = root / "leg0";
@@ -205,36 +197,6 @@ bool testBurstPartialMakerFillReplayKeepsPairExposureBounded() {
          expect(!result.riskStopped, "replay does not risk stop");
 }
 
-bool testTwoPhaseReplayWarnsWhenPostHocRepriceLeavesExposureOpen() {
-  const std::filesystem::path root = makeRoot();
-  const std::filesystem::path leg0 = root / "leg0";
-  const std::filesystem::path leg1 = root / "leg1";
-  writeLeg0Session(leg0);
-  writeLeg1Session(leg1);
-  writeConfig(root / "stat_arb_edge_maker.ini");
-
-  hft_backtest::BacktestRunRequest request = makeReplayRequest(root,
-                                                               leg0,
-                                                               leg1,
-                                                               "stat-arb-edge-maker-two-phase-replay");
-  request.executionPipeline = hft_backtest::BacktestExecutionPipeline::TwoPhaseReprice;
-
-  const hft_backtest::BacktestRunResult result = hft_backtest::runBacktest(request, nullptr, nullptr);
-  if (!expect(result.status == hft_backtest::Status::Ok, "two-phase stat_arb replay completes")) {
-    std::cerr << "status=" << hft_backtest::statusToString(result.status)
-              << " error=" << result.error << "\n";
-    return false;
-  }
-
-  return expect(result.twoPhaseRepriceApplied, "two-phase replay applies repricing") &&
-         expect(hasWarningContaining(result, "two-phase reprice is diagnostic"),
-                "two-phase result warns that repricing is post-hoc diagnostic") &&
-         expect(!result.strategyClosed, "two-phase conservative repricing can leave exposure open") &&
-         expect(result.openPositionQtyE8 != 0, "two-phase result reports remaining exposure") &&
-         expect(hasWarningContaining(result, "two-phase reprice left open exposure"),
-                "two-phase result warns about post-hoc fill path invalidation");
-}
-
 bool testNegativeEntryExitEdgesReplayCompletes() {
   const std::filesystem::path root = makeRoot();
   const std::filesystem::path leg0 = root / "leg0";
@@ -267,7 +229,6 @@ bool testNegativeEntryExitEdgesReplayCompletes() {
 int main() {
   bool ok = true;
   ok = testBurstPartialMakerFillReplayKeepsPairExposureBounded() && ok;
-  ok = testTwoPhaseReplayWarnsWhenPostHocRepriceLeavesExposureOpen() && ok;
   ok = testNegativeEntryExitEdgesReplayCompletes() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

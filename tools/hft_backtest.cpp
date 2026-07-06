@@ -14,7 +14,7 @@
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--primary-leg-index N] [--trade-mode all|primary] [--strategy-spread] [--no-rate-limits] [--strict-rate-limits] [--two-phase-reprice] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--cancel-order-latency-us N] [--cancel-order-jitter-us N] [--user-data-latency-us N] [--user-data-jitter-us N] [--order-latency-us N] [--cancel-latency-us N] [--maker-fill-min-cross-ticks N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps] [--latency exchange:market:md_base:md_jitter:mkt_base:mkt_jitter:limit_base:limit_jitter[:cancel_base:cancel_jitter:user_base:user_jitter]]\n";
+  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--primary-leg-index N] [--trade-mode all|primary] [--strategy-spread] [--no-rate-limits] [--strict-rate-limits] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--cancel-order-latency-us N] [--cancel-order-jitter-us N] [--user-data-latency-us N] [--user-data-jitter-us N] [--order-latency-us N] [--cancel-latency-us N] [--maker-fill-min-cross-ticks N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps] [--latency exchange:market:md_base:md_jitter:mkt_base:mkt_jitter:limit_base:limit_jitter[:cancel_base:cancel_jitter:user_base:user_jitter]]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {
@@ -242,8 +242,6 @@ int main(int argc, char** argv) {
     } else if (std::strcmp(arg, "--strict-rate-limits") == 0) {
       request.rateLimitsEnabled = true;
       request.strictRateLimitRejects = true;
-    } else if (std::strcmp(arg, "--two-phase-reprice") == 0) {
-      request.executionPipeline = hft_backtest::BacktestExecutionPipeline::TwoPhaseReprice;
     } else if (std::strcmp(arg, "--output") == 0) {
       if (const char* value = needValue(arg)) request.outputPath = value;
     } else if (std::strcmp(arg, "--run-id") == 0) {
