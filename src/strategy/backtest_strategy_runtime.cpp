@@ -212,6 +212,29 @@ bool backtestCommandIntentTradable(const BacktestRunRequest& request,
   return true;
 }
 
+bool backtestCommandSequencesTradable(const BacktestRunRequest& request,
+                                      std::size_t legCount,
+                                      const hft_trader::core::StrategyIo& io,
+                                      std::uint64_t effectiveTradableLegMask) noexcept {
+  for (std::size_t i = 0u; i < io.commandCount;) {
+    const hft_trader::core::StrategyCommandIntent& first = io.commandOut[i];
+    if (first.sequenceKind == hft_trader::core::StrategyCommandSequenceKind::None) {
+      ++i;
+      continue;
+    }
+    if (!hft_trader::core::strategyCommandAmendPairValid(io.commandOut.data(), io.commandCount, i)) {
+      return false;
+    }
+    const hft_trader::core::StrategyCommandIntent& second = io.commandOut[i + 1u];
+    if (!backtestCommandIntentTradable(request, legCount, first, effectiveTradableLegMask) ||
+        !backtestCommandIntentTradable(request, legCount, second, effectiveTradableLegMask)) {
+      return false;
+    }
+    i += 2u;
+  }
+  return true;
+}
+
 template<typename Context>
 void setBacktestTradePolicy(Context& ctx,
                             const BacktestRunRequest& request,
@@ -239,15 +262,34 @@ void setBacktestTradePolicy(Context& ctx,
   }
 }
 
-void applyIntentsToSingleLeg(detail::EngineState& engine,
-                             const hft_trader::core::StrategyIo& io,
-                             std::int64_t tsNs,
-                             detail::BacktestLatencyRuntime& latency,
-                             const BacktestRunRequest& request,
-                             std::uint64_t effectiveTradableLegMask) {
+detail::IntentApplyResult applyIntentsToSingleLeg(detail::EngineState& engine,
+                                                  const hft_trader::core::StrategyIo& io,
+                                                  std::int64_t tsNs,
+                                                  detail::BacktestLatencyRuntime& latency,
+                                                  const BacktestRunRequest& request,
+                                                  std::uint64_t effectiveTradableLegMask) {
+  detail::IntentApplyResult result{};
+  if (io.commandSequenceFiltered || !hft_trader::core::strategyIoCommandSequencesValid(io)) {
+    result.disposition = detail::IntentApplyDisposition::RestoreStrategyState;
+    return result;
+  }
+  for (std::size_t i = 0u; i < io.commandCount;) {
+    const hft_trader::core::StrategyCommandIntent& first = io.commandOut[i];
+    if (first.sequenceKind == hft_trader::core::StrategyCommandSequenceKind::None) {
+      ++i;
+      continue;
+    }
+    const hft_trader::core::StrategyCommandIntent& second = io.commandOut[i + 1u];
+    if (!backtestCommandIntentTradable(request, 1u, first, effectiveTradableLegMask) ||
+        !backtestCommandIntentTradable(request, 1u, second, effectiveTradableLegMask)) {
+      result.disposition = detail::IntentApplyDisposition::RestoreStrategyState;
+      return result;
+    }
+    i += 2u;
+  }
+
   if (request.tradeMode != BacktestTradeMode::PrimaryOnly && (effectiveTradableLegMask & 1u) != 0u) {
-    detail::applyIntents(engine, io, tsNs, latency);
-    return;
+    return detail::applyIntents(engine, io, tsNs, latency);
   }
 
   std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orders{};
@@ -258,6 +300,7 @@ void applyIntentsToSingleLeg(detail::EngineState& engine,
   filtered.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancels.size());
   filtered.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
   filtered.requestRateLimitSnapshot = io.requestRateLimitSnapshot;
+  filtered.hasCommandSequence = io.hasCommandSequence;
 
   for (std::size_t i = 0u; i < io.commandCount && filtered.commandCount < filtered.commandOut.size(); ++i) {
     if (!backtestCommandIntentTradable(request, 1u, io.commandOut[i], effectiveTradableLegMask)) continue;
@@ -271,7 +314,7 @@ void applyIntentsToSingleLeg(detail::EngineState& engine,
     if (!backtestOrderIntentTradable(request, 1u, io.orderOut[i], effectiveTradableLegMask)) continue;
     filtered.orderOut[filtered.orderCount++] = io.orderOut[i];
   }
-  detail::applyIntents(engine, filtered, tsNs, latency);
+  return detail::applyIntents(engine, filtered, tsNs, latency);
 }
 
 bool orderPathWarmupCandidate(const hft_trader::core::OrderIntent& intent) noexcept {
@@ -338,6 +381,105 @@ Id allocateBacktestServiceClientIntentId(detail::EngineState& engine) noexcept {
   out.raw = engine.nextServiceClientIntentRaw++;
   if (engine.nextServiceClientIntentRaw == 0u) engine.nextServiceClientIntentRaw = 0x8000000000000000ull;
   return out;
+}
+
+bool acceptedMarketOrderSince(const detail::EngineState& engine,
+                              std::size_t firstRecord) noexcept {
+  for (std::size_t i = firstRecord; i < engine.orders.size(); ++i) {
+    const detail::JsonOrder& record = engine.orders[i];
+    if (record.action != detail::kRecordActionOrder || record.type != detail::kRecordTypeMarket) continue;
+    if (record.status != detail::kRecordStatusRejected && record.status != detail::kRecordStatusMissing) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool transactionOrderAccepted(Span<const detail::EngineState> engines,
+                              const std::array<std::size_t, hft_trader::core::kStrategyRuntimeMaxLegs>& firstRecords,
+                              std::size_t leg,
+                              hft_trader::core::Id clientIntentId) noexcept {
+  if (leg >= engines.size() || clientIntentId.raw == 0u) return false;
+  const std::vector<detail::JsonOrder>& orders = engines[leg].orders;
+  const std::size_t first = firstRecords[leg] < orders.size() ? firstRecords[leg] : orders.size();
+  for (std::size_t index = first; index < orders.size(); ++index) {
+    const detail::JsonOrder& order = orders[index];
+    if (order.id != clientIntentId.raw || order.action != detail::kRecordActionOrder) continue;
+    return order.status != detail::kRecordStatusRejected && order.status != detail::kRecordStatusMissing;
+  }
+  return false;
+}
+
+bool applyBacktestTransactionReports(
+    const hft_trader::runtime::StrategyDescriptor& descriptor,
+    void* state,
+    const hft_trader::core::StrategyIo& io,
+    Span<const detail::EngineState> engines,
+    const std::array<std::size_t, hft_trader::core::kStrategyRuntimeMaxLegs>& firstRecords) noexcept {
+  if (io.transactionCount == 0u || !descriptor.applyEmitReport) return true;
+  if (io.transactionCount > io.transactionOut.size()) return false;
+  for (std::size_t transactionIndex = 0u; transactionIndex < io.transactionCount; ++transactionIndex) {
+    const hft_trader::core::StrategyTransactionIntent& transaction = io.transactionOut[transactionIndex];
+    if (transaction.recordKind != hft_trader::core::StrategyTransactionRecordKind::Proposed) continue;
+    if (transaction.transactionId.raw == 0u ||
+        transaction.legCount > hft_trader::core::kStrategyTransactionMaxLegs) return false;
+
+    hft_trader::core::StrategyEmitReport report{};
+    report.transactionId = transaction.transactionId;
+    report.semantic = transaction.semantic;
+    report.allAccepted = true;
+    for (std::uint8_t legIndex = 0u; legIndex < transaction.legCount; ++legIndex) {
+      const hft_trader::core::StrategyTransactionLegDelta& transactionLeg = transaction.legs[legIndex];
+      const std::size_t routeLeg = backtestRouteLegIndex(engines.size(), transactionLeg.routeHandle);
+      hft_trader::core::StrategyEmitLegReport& leg = report.legs[report.legCount++];
+      leg.clientIntentId = transactionLeg.clientIntentId;
+      leg.routeHandle = transactionLeg.routeHandle;
+      leg.requestedQty = transactionLeg.expectedFillQty;
+      leg.generation = transactionLeg.generation;
+      leg.attempted = routeLeg < engines.size() && leg.clientIntentId.raw != 0u && leg.requestedQty.raw > 0;
+      leg.accepted = leg.attempted && transactionOrderAccepted(engines, firstRecords, routeLeg, leg.clientIntentId);
+      report.anyAccepted = report.anyAccepted || leg.accepted;
+      report.allAccepted = report.allAccepted && leg.accepted;
+      if (!leg.accepted) report.localFault = true;
+    }
+    if (!descriptor.applyEmitReport(state, report)) return false;
+  }
+  return true;
+}
+
+void cleanupFailedCycleOrders(detail::EngineState& engine,
+                              std::size_t firstRecord,
+                              std::int64_t tsNs) {
+  std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancels{};
+  std::size_t cancelCount = 0u;
+  const std::size_t recordEnd = engine.orders.size();
+  for (std::size_t i = firstRecord; i < recordEnd && cancelCount < cancels.size(); ++i) {
+    const detail::JsonOrder& record = engine.orders[i];
+    if (record.action != detail::kRecordActionOrder || record.type == detail::kRecordTypeMarket ||
+        record.status == detail::kRecordStatusRejected || record.status == detail::kRecordStatusMissing ||
+        record.status == detail::kRecordStatusFilled || record.status == detail::kRecordStatusCancelled) {
+      continue;
+    }
+    const detail::OpenOrder* accepted = nullptr;
+    for (const detail::OpenOrder& order : engine.open) {
+      if (order.state.valid && order.state.clientIntentId.raw == record.id) {
+        accepted = &order;
+        break;
+      }
+    }
+    if (!accepted) continue;
+    hft_trader::core::CancelIntent& cancel = cancels[cancelCount++];
+    cancel.clientIntentId = allocateBacktestServiceClientIntentId(engine);
+    cancel.quoteSlotId = accepted->state.quoteSlotId;
+    cancel.targetClientIntentId = accepted->state.clientIntentId;
+    cancel.targetOrderType = accepted->state.orderType;
+    cancel.routeHandle = accepted->routeHandle;
+  }
+  if (cancelCount == 0u) return;
+  hft_trader::core::StrategyIo cleanup{};
+  cleanup.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancelCount);
+  cleanup.cancelCount = cancelCount;
+  (void)detail::applyIntents(engine, cleanup, tsNs, engine.latency);
 }
 
 void markBacktestWarmupSkipped(detail::EngineState& engine,
@@ -408,45 +550,99 @@ bool applyBacktestWarmupGate(hft_trader::core::StrategyContext& ctx,
   return true;
 }
 
-void applyIntentsToLegs(std::vector<detail::EngineState>& engines,
-                        const hft_trader::core::StrategyIo& io,
-                        std::int64_t tsNs,
-                        const BacktestRunRequest& request,
-                        std::uint64_t effectiveTradableLegMask) {
-  for (std::size_t i = 0; i < io.commandCount; ++i) {
+detail::IntentApplyResult applyIntentsToLegs(std::vector<detail::EngineState>& engines,
+                                             const hft_trader::core::StrategyIo& io,
+                                             std::int64_t tsNs,
+                                             const BacktestRunRequest& request,
+                                             std::uint64_t effectiveTradableLegMask) {
+  detail::IntentApplyResult result{};
+  if (io.commandSequenceFiltered || !hft_trader::core::strategyIoCommandSequencesValid(io)) {
+    result.disposition = detail::IntentApplyDisposition::RestoreStrategyState;
+    return result;
+  }
+  for (std::size_t i = 0u; i < io.commandCount;) {
+    const hft_trader::core::StrategyCommandIntent& first = io.commandOut[i];
+    if (first.sequenceKind == hft_trader::core::StrategyCommandSequenceKind::None) {
+      ++i;
+      continue;
+    }
+    const hft_trader::core::StrategyCommandIntent& second = io.commandOut[i + 1u];
+    if (!backtestCommandIntentTradable(request, engines.size(), first, effectiveTradableLegMask) ||
+        !backtestCommandIntentTradable(request, engines.size(), second, effectiveTradableLegMask)) {
+      result.disposition = detail::IntentApplyDisposition::RestoreStrategyState;
+      return result;
+    }
+    i += 2u;
+  }
+
+  for (std::size_t i = 0u; i < io.commandCount;) {
     const hft_trader::core::StrategyCommandIntent& command = io.commandOut[i];
+    if (command.sequenceKind != hft_trader::core::StrategyCommandSequenceKind::None) {
+      const bool cancelThenNew =
+          command.sequenceKind == hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew;
+      const hft_trader::core::StrategyCommandIntent& orderCommand = cancelThenNew ? io.commandOut[i + 1u] : command;
+      const std::size_t leg = backtestRouteLegIndex(engines.size(), orderCommand.order.routeHandle);
+      if (leg >= engines.size()) {
+        result.disposition = detail::IntentApplyDisposition::RestoreStrategyState;
+        return result;
+      }
+      std::array<hft_trader::core::StrategyCommandIntent, 2> commands{command, io.commandOut[i + 1u]};
+      hft_trader::core::StrategyIo pair{};
+      pair.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
+      pair.commandCount = commands.size();
+      pair.hasCommandSequence = true;
+      result = detail::applyIntents(engines[leg], pair, tsNs, engines[leg].latency);
+      if (result.disposition != detail::IntentApplyDisposition::Applied) return result;
+      i += 2u;
+      continue;
+    }
     if (command.kind == hft_trader::core::StrategyCommandIntentKind::Cancel) {
       const std::size_t leg = backtestRouteLegIndex(engines.size(), command.cancel.routeHandle);
-      if (leg >= engines.size()) continue;
-      if (!backtestRouteTradable(request, engines.size(), leg)) continue;
+      if (leg >= engines.size() || !backtestRouteTradable(request, engines.size(), leg)) {
+        ++i;
+        continue;
+      }
       std::array<hft_trader::core::CancelIntent, 1> cancel{command.cancel};
       hft_trader::core::StrategyIo one{};
       one.cancelOut = Span<hft_trader::core::CancelIntent>(cancel.data(), cancel.size());
       one.cancelCount = 1u;
-      detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
+      (void)detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
     } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::Order) {
       const std::size_t leg = backtestRouteLegIndex(engines.size(), command.order.routeHandle);
-      if (leg >= engines.size()) continue;
+      if (leg >= engines.size()) {
+        ++i;
+        continue;
+      }
       if (!backtestRouteTradable(request, engines.size(), leg) ||
           leg >= 64u ||
-          (effectiveTradableLegMask & (std::uint64_t{1} << leg)) == 0u) continue;
+          (effectiveTradableLegMask & (std::uint64_t{1} << leg)) == 0u) {
+        ++i;
+        continue;
+      }
       std::array<hft_trader::core::OrderIntent, 1> order{command.order};
       hft_trader::core::StrategyIo one{};
       one.orderOut = Span<hft_trader::core::OrderIntent>(order.data(), order.size());
       one.orderCount = 1u;
-      detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
+      (void)detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
     } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::WarmupOrder) {
       const std::size_t leg = backtestRouteLegIndex(engines.size(), command.warmup.order.routeHandle);
-      if (leg >= engines.size()) continue;
+      if (leg >= engines.size()) {
+        ++i;
+        continue;
+      }
       if (!backtestRouteTradable(request, engines.size(), leg) ||
           leg >= 64u ||
-          (effectiveTradableLegMask & (std::uint64_t{1} << leg)) == 0u) continue;
+          (effectiveTradableLegMask & (std::uint64_t{1} << leg)) == 0u) {
+        ++i;
+        continue;
+      }
       std::array<hft_trader::core::StrategyCommandIntent, 1> warmup{command};
       hft_trader::core::StrategyIo one{};
       one.commandOut = Span<hft_trader::core::StrategyCommandIntent>(warmup.data(), warmup.size());
       one.commandCount = 1u;
-      detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
+      (void)detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
     }
+    ++i;
   }
   for (std::size_t i = 0; i < io.cancelCount; ++i) {
     const std::size_t leg = backtestRouteLegIndex(engines.size(), io.cancelOut[i].routeHandle);
@@ -455,7 +651,7 @@ void applyIntentsToLegs(std::vector<detail::EngineState>& engines,
     hft_trader::core::StrategyIo one{};
     one.cancelOut = Span<hft_trader::core::CancelIntent>(const_cast<hft_trader::core::CancelIntent*>(&io.cancelOut[i]), 1u);
     one.cancelCount = 1u;
-    detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
+    (void)detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
   }
   for (std::size_t i = 0; i < io.orderCount; ++i) {
     const std::size_t leg = backtestRouteLegIndex(engines.size(), io.orderOut[i].routeHandle);
@@ -466,8 +662,9 @@ void applyIntentsToLegs(std::vector<detail::EngineState>& engines,
     hft_trader::core::StrategyIo one{};
     one.orderOut = Span<hft_trader::core::OrderIntent>(const_cast<hft_trader::core::OrderIntent*>(&io.orderOut[i]), 1u);
     one.orderCount = 1u;
-    detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
+    (void)detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
   }
+  return result;
 }
 
 std::int64_t nextPendingTs(const std::vector<detail::EngineState>& engines) noexcept {
@@ -617,6 +814,7 @@ void MultiLegCycleScratch::refreshLeg(std::size_t leg,
   positions[leg] = engine.position;
   accounts[leg] = accountStateFromEngine(engine);
   instruments[leg] = leg < legInstruments.size() ? legInstruments[leg] : StrategyInstrumentSpec{};
+  markets[leg] = engine.market;
   revisions[leg] = engine.contextRevision;
 }
 
@@ -834,6 +1032,8 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.instrumentSpec = instrument;
   ctx.instrumentSpecs.legs = &instrument;
   ctx.instrumentSpecs.count = 1u;
+  ctx.legMarkets.legs = &engine.market;
+  ctx.legMarkets.count = 1u;
   ctx.orderState.orders = scratch.orderStorage.data();
   ctx.orderState.count = orderViewCount;
   ctx.orderStates.legs = &ctx.orderState;
@@ -853,6 +1053,9 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.orderPathWarmup = scratch.warmupViews[0];
   ctx.orderPathWarmups.routes = scratch.warmupViews.data();
   ctx.orderPathWarmups.count = 1u;
+  if (userEvent) {
+    recordExecutionQualityFill(engine, *userEvent, 0u, tsNs, instrument);
+  }
   if (userEvent && userEvent->orderProblem != canon::OrderProblem::None) {
     engine.pendingProblem = hft_trader::core::StrategyProblemEvent{};
     engine.pendingProblem.problem = userEvent->orderProblem;
@@ -878,9 +1081,12 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.io.orderOut = Span<hft_trader::core::OrderIntent>(scratch.orderBuf.data(), scratch.orderBuf.size());
   ctx.io.cancelOut = Span<hft_trader::core::CancelIntent>(scratch.cancelBuf.data(), scratch.cancelBuf.size());
   ctx.io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(scratch.commandBuf.data(), scratch.commandBuf.size());
+  ctx.io.transactionOut = Span<hft_trader::core::StrategyTransactionIntent>(
+      scratch.transactionBuf.data(), scratch.transactionBuf.size());
   ctx.io.clear();
   recordInputCoverage(engine);
   hft_trader::core::StrategyDecisionTrace trace{};
+  hft_trader::core::StrategyExecutionTraceBatch executionTrace{};
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engine);
   const bool captureRangeTrace = emitsPriceRangeTrace(descriptor);
   const bool captureSpreadDiagnostics = emitsArbSpreadTrace(descriptor);
@@ -889,17 +1095,35 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
-  const bool canWarmupRollback = descriptor.captureState && descriptor.restoreAfterOrderFailure;
+  if (captureSpreadDiagnostics) {
+    executionTrace.clear();
+    ctx.executionTrace = &executionTrace;
+  }
+  const bool canOrderFailureRollback = descriptor.captureState && descriptor.restoreAfterOrderFailure;
   hft_trader::runtime::StrategyStateSnapshot before{};
-  if (canWarmupRollback) descriptor.captureState(state, before);
+  if (canOrderFailureRollback) descriptor.captureState(state, before);
   const bool ok = descriptor.runCycle(state, ctx);
   if (ctx.io.requestRateLimitSnapshot) engine.rateLimitSnapshotRequested = true;
+  bool commandSequenceBlocked =
+      ctx.io.commandSequenceFiltered ||
+      !hft_trader::core::strategyIoCommandSequencesValid(ctx.io) ||
+      !backtestCommandSequencesTradable(request, 1u, ctx.io, freshness.tradableLegMask);
   if (!hft_trader::core::canEmitNewOrder(effectiveControl)) {
+    commandSequenceBlocked = commandSequenceBlocked ||
+        hft_trader::core::strategyIoHasCommandSequenceMetadata(ctx.io);
     ctx.io.orderCount = 0u;
     ctx.io.commandCount = 0u;
   }
-  const bool warmupGateHeldRealOrders = canWarmupRollback && applyBacktestWarmupGate(ctx, &engine, 1u, request);
-  if (warmupGateHeldRealOrders) descriptor.restoreAfterOrderFailure(state, before);
+  if (commandSequenceBlocked) {
+    ctx.io.cancelCount = 0u;
+    ctx.io.orderCount = 0u;
+    ctx.io.commandCount = 0u;
+  }
+  const bool warmupGateHeldRealOrders = !commandSequenceBlocked &&
+      canOrderFailureRollback && applyBacktestWarmupGate(ctx, &engine, 1u, request);
+  if ((commandSequenceBlocked || warmupGateHeldRealOrders) && canOrderFailureRollback) {
+    descriptor.restoreAfterOrderFailure(state, before);
+  }
   if (captureIndicatorTrace || captureRangeTrace || captureSpreadDiagnostics) {
     std::uint32_t orderedOrderCount = 0u;
     std::uint32_t orderedCancelCount = 0u;
@@ -914,8 +1138,25 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
     if (captureRangeTrace) appendStrategyRange(engine, tsNs, trace);
     if (captureSpreadDiagnostics) recordStrategySpread(engine, tsNs, trace, captureSpreadRows);
   }
+  if (ctx.executionTrace) recordExecutionQualityActions(engine, tsNs, executionTrace);
   if (!ok) return false;
-  applyIntentsToSingleLeg(engine, ctx.io, tsNs, engine.latency, request, freshness.tradableLegMask);
+  if (commandSequenceBlocked) return true;
+  const std::size_t firstCycleOrderRecord = engine.orders.size();
+  std::array<std::size_t, hft_trader::core::kStrategyRuntimeMaxLegs> firstCycleOrderRecords{};
+  firstCycleOrderRecords[0] = firstCycleOrderRecord;
+  const detail::IntentApplyResult applyResult =
+      applyIntentsToSingleLeg(engine, ctx.io, tsNs, engine.latency, request, freshness.tradableLegMask);
+  if (!applyBacktestTransactionReports(
+          descriptor,
+          state,
+          ctx.io,
+          Span<const detail::EngineState>(&engine, 1u),
+          firstCycleOrderRecords)) return false;
+  if (applyResult.shouldRestoreStrategyState()) {
+    const bool acceptedMarketOrder = acceptedMarketOrderSince(engine, firstCycleOrderRecord);
+    cleanupFailedCycleOrders(engine, firstCycleOrderRecord, tsNs);
+    if (!acceptedMarketOrder && canOrderFailureRollback) descriptor.restoreAfterOrderFailure(state, before);
+  }
   return true;
 }
 
@@ -965,6 +1206,8 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.instrumentSpec = scratch.instruments[0];
   ctx.instrumentSpecs.legs = scratch.instruments.data();
   ctx.instrumentSpecs.count = legCount;
+  ctx.legMarkets.legs = scratch.markets.data();
+  ctx.legMarkets.count = legCount;
   ctx.orderState = scratch.orderViews[0];
   ctx.orderStates.legs = scratch.orderViews.data();
   ctx.orderStates.count = legCount;
@@ -987,6 +1230,9 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.orderPathWarmup = scratch.warmupViews[0];
   ctx.orderPathWarmups.routes = scratch.warmupViews.data();
   ctx.orderPathWarmups.count = legCount;
+  if (userEvent && eventLegIndex < legInstruments.size()) {
+    recordExecutionQualityFill(engines[0], *userEvent, eventLegIndex, tsNs, legInstruments[eventLegIndex]);
+  }
   if (userEvent && userEvent->orderProblem != canon::OrderProblem::None && eventLegIndex < engines.size()) {
     engines[eventLegIndex].pendingProblem = hft_trader::core::StrategyProblemEvent{};
     engines[eventLegIndex].pendingProblem.problem = userEvent->orderProblem;
@@ -1038,9 +1284,12 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.io.orderOut = Span<hft_trader::core::OrderIntent>(scratch.orderBuf.data(), scratch.orderBuf.size());
   ctx.io.cancelOut = Span<hft_trader::core::CancelIntent>(scratch.cancelBuf.data(), scratch.cancelBuf.size());
   ctx.io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(scratch.commandBuf.data(), scratch.commandBuf.size());
+  ctx.io.transactionOut = Span<hft_trader::core::StrategyTransactionIntent>(
+      scratch.transactionBuf.data(), scratch.transactionBuf.size());
   ctx.io.clear();
   recordInputCoverage(engines[0]);
   hft_trader::core::StrategyDecisionTrace trace{};
+  hft_trader::core::StrategyExecutionTraceBatch executionTrace{};
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engines[0]);
   const bool captureRangeTrace = emitsPriceRangeTrace(descriptor);
   const bool captureSpreadDiagnostics = emitsArbSpreadTrace(descriptor);
@@ -1049,19 +1298,37 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
     hft_trader::core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
-  const bool canWarmupRollback = descriptor.captureState && descriptor.restoreAfterOrderFailure;
+  if (captureSpreadDiagnostics) {
+    executionTrace.clear();
+    ctx.executionTrace = &executionTrace;
+  }
+  const bool canOrderFailureRollback = descriptor.captureState && descriptor.restoreAfterOrderFailure;
   hft_trader::runtime::StrategyStateSnapshot before{};
-  if (canWarmupRollback) descriptor.captureState(state, before);
+  if (canOrderFailureRollback) descriptor.captureState(state, before);
   const bool ok = descriptor.runCycle(state, ctx);
   if (ctx.io.requestRateLimitSnapshot) {
     for (detail::EngineState& engine : engines) engine.rateLimitSnapshotRequested = true;
   }
+  bool commandSequenceBlocked =
+      ctx.io.commandSequenceFiltered ||
+      !hft_trader::core::strategyIoCommandSequencesValid(ctx.io) ||
+      !backtestCommandSequencesTradable(request, legCount, ctx.io, freshness.tradableLegMask);
   if (!hft_trader::core::canEmitNewOrder(effectiveControl)) {
+    commandSequenceBlocked = commandSequenceBlocked ||
+        hft_trader::core::strategyIoHasCommandSequenceMetadata(ctx.io);
     ctx.io.orderCount = 0u;
     ctx.io.commandCount = 0u;
   }
-  const bool warmupGateHeldRealOrders = canWarmupRollback && applyBacktestWarmupGate(ctx, engines.data(), legCount, request);
-  if (warmupGateHeldRealOrders) descriptor.restoreAfterOrderFailure(state, before);
+  if (commandSequenceBlocked) {
+    ctx.io.cancelCount = 0u;
+    ctx.io.orderCount = 0u;
+    ctx.io.commandCount = 0u;
+  }
+  const bool warmupGateHeldRealOrders = !commandSequenceBlocked &&
+      canOrderFailureRollback && applyBacktestWarmupGate(ctx, engines.data(), legCount, request);
+  if ((commandSequenceBlocked || warmupGateHeldRealOrders) && canOrderFailureRollback) {
+    descriptor.restoreAfterOrderFailure(state, before);
+  }
   if (captureIndicatorTrace || captureRangeTrace || captureSpreadDiagnostics) {
     std::uint32_t orderedOrderCount = 0u;
     std::uint32_t orderedCancelCount = 0u;
@@ -1076,8 +1343,28 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
     if (captureRangeTrace) appendStrategyRange(engines[0], tsNs, trace);
     if (captureSpreadDiagnostics) recordStrategySpread(engines[0], tsNs, trace, captureSpreadRows);
   }
+  if (ctx.executionTrace) recordExecutionQualityActions(engines[0], tsNs, executionTrace);
   if (!ok) return false;
-  applyIntentsToLegs(engines, ctx.io, tsNs, request, freshness.tradableLegMask);
+  if (commandSequenceBlocked) return true;
+  std::array<std::size_t, hft_trader::core::kStrategyRuntimeMaxLegs> firstCycleOrderRecords{};
+  for (std::size_t i = 0u; i < legCount; ++i) firstCycleOrderRecords[i] = engines[i].orders.size();
+  const detail::IntentApplyResult applyResult =
+      applyIntentsToLegs(engines, ctx.io, tsNs, request, freshness.tradableLegMask);
+  if (!applyBacktestTransactionReports(
+          descriptor,
+          state,
+          ctx.io,
+          Span<const detail::EngineState>(engines.data(), engines.size()),
+          firstCycleOrderRecords)) return false;
+  if (applyResult.shouldRestoreStrategyState()) {
+    bool acceptedMarketOrder = false;
+    for (std::size_t i = 0u; i < legCount; ++i) {
+      acceptedMarketOrder = acceptedMarketOrder ||
+          acceptedMarketOrderSince(engines[i], firstCycleOrderRecords[i]);
+      cleanupFailedCycleOrders(engines[i], firstCycleOrderRecords[i], tsNs);
+    }
+    if (!acceptedMarketOrder && canOrderFailureRollback) descriptor.restoreAfterOrderFailure(state, before);
+  }
   return true;
 }
 

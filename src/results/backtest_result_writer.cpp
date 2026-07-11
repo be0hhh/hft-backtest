@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -26,6 +27,16 @@ constexpr const char* kFillsRowSchema =
 constexpr const char* kRateLimitUsageRowSchema =
     "[ts_ns,leg_index,min_remaining_pct_e4,remaining,limit,bucket_kind,interval_ns,exhausted]";
 
+constexpr const char* kExecutionQualityRowSchema =
+    "[action_id,position_cycle_id,transaction_id,pair_key,decision_ts_ns,completed_ts_ns,phase,anchor,status,"
+    "direction,band_side,decision_edge_after_cost_bps_e8,fill_edge_after_cost_bps_e8,edge_loss_bps_e8,"
+    "required_edge_bps_e8,fair_bps_e8,cost_band_bps_e8,quote_decision_edge_after_cost_bps_e8,"
+    "decision_to_first_fill_ns,decision_to_last_fill_ns,fill_leg_skew_ns,threshold_deadline_ns,zero_edge_deadline_ns,"
+    "pair_index,pair_slot,leg0_index,leg0_client_intent_id,leg0_side,leg0_expected_qty_e8,leg0_filled_qty_e8,"
+    "leg0_decision_price_e8,leg0_fill_vwap_e8,leg0_first_fill_ts_ns,leg0_last_fill_ts_ns,"
+    "leg1_index,leg1_client_intent_id,leg1_side,leg1_expected_qty_e8,leg1_filled_qty_e8,"
+    "leg1_decision_price_e8,leg1_fill_vwap_e8,leg1_first_fill_ts_ns,leg1_last_fill_ts_ns]";
+
 constexpr const char* kStrategyIndicatorBaseRowSchema =
     "[ts_ns,value_raw,aux_raw,event_code,reason_raw,decision_kind,side_raw]";
 constexpr const char* kTrendStrategyIndicatorRowSchema =
@@ -42,6 +53,10 @@ constexpr const char* kToxicFlowStrategyIndicatorRowSchema =
     "toxic_pressure_score,toxic_touch_score,toxic_follow_score,toxic_imbalance_score,"
     "toxic_depth_drop_score,toxic_bid_depth_drop_score,toxic_ask_depth_drop_score,"
     "toxic_buy_pressure_score,toxic_sell_pressure_score,toxic_confidence_pct]";
+constexpr const char* kRecursiveStatArbStrategyIndicatorRowSchema =
+    "[ts_ns,value_raw,aux_raw,event_code,reason_raw,decision_kind,side_raw,"
+    "rls_beta_q32,rls_intercept_q32,residual_mean_bps_e8,residual_sigma_bps_e8,"
+    "cusum_up_bps_e8,cusum_down_bps_e8,flow_leg0_bps,flow_leg1_bps,pair_flow_bps,model_samples]";
 
 constexpr std::int64_t kBpsE8Scale = 100000000ll;
 constexpr std::size_t kMaxDecisionDiagnostics = 8u;
@@ -51,6 +66,7 @@ std::size_t strategyIndicatorFeatureCount(std::string_view profile) noexcept {
   if (profile == "volatility_bps") return 7u;
   if (profile == "toxic_flow") return 10u;
   if (profile == "toxic_flow_pair") return 0u;
+  if (profile == "recursive_stat_arb") return 10u;
   return 0u;
 }
 
@@ -59,6 +75,7 @@ const char* strategyIndicatorRowSchema(std::string_view profile) noexcept {
   if (profile == "volatility_bps") return kVolatilityStrategyIndicatorRowSchema;
   if (profile == "toxic_flow") return kToxicFlowStrategyIndicatorRowSchema;
   if (profile == "toxic_flow_pair") return kStrategyIndicatorBaseRowSchema;
+  if (profile == "recursive_stat_arb") return kRecursiveStatArbStrategyIndicatorRowSchema;
   return kStrategyIndicatorBaseRowSchema;
 }
 
@@ -225,6 +242,27 @@ const char* tradeModeName(BacktestTradeMode mode) noexcept {
     case BacktestTradeMode::PrimaryOnly: return "primary_only";
   }
   return "all_legs";
+}
+
+const char* depthExecutionModeName(BacktestDepthExecutionMode mode) noexcept {
+  switch (mode) {
+    case BacktestDepthExecutionMode::BboNoDepth: return "bbo_no_depth";
+    case BacktestDepthExecutionMode::Depth: return "depth";
+    case BacktestDepthExecutionMode::BboFallback: return "bbo_fallback";
+  }
+  return "bbo_no_depth";
+}
+
+void writeDepthExecutionObject(std::ostream& out,
+                               const BacktestDepthExecutionSummary& depth) {
+  const char q = '"';
+  out << '{'
+      << q << "mode" << q << ": " << quote(depthExecutionModeName(depth.mode)) << ", "
+      << q << "rows_read" << q << ": " << depth.rowsRead << ", "
+      << q << "bbo_fallback_fills" << q << ": " << depth.bboFallbackFills << ", "
+      << q << "first_bbo_fallback_ts_ns" << q << ": " << depth.firstBboFallbackTsNs << ", "
+      << q << "read_ns" << q << ": " << depth.readNs
+      << '}';
 }
 
 void sortAndTrimDecisionCounts(std::vector<DecisionCount>& counts) {
@@ -806,6 +844,65 @@ bool writeStrategySpread(const std::filesystem::path& path, const EngineState& e
   return out.good();
 }
 
+bool writeExecutionQuality(const std::filesystem::path& path, const EngineState& engine) noexcept {
+  if (engine.executionQuality.empty()) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    return true;
+  }
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) return false;
+  for (const JsonExecutionQualityAction& row : engine.executionQuality) {
+    std::uint8_t status = row.statusRaw;
+    if (row.anchorRaw != static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionAnchor::MakerQuote) &&
+        (status == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Proposed) ||
+        status == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Accepted))) {
+      const bool anyFill = row.legs[0].filledQtyE8 > 0 || row.legs[1].filledQtyE8 > 0;
+      status = static_cast<std::uint8_t>(anyFill
+          ? hft_trader::core::StrategyExecutionStatus::Partial
+          : hft_trader::core::StrategyExecutionStatus::Uncertain);
+    }
+    out << '[' << row.actionId
+        << ',' << row.positionCycleId
+        << ',' << row.transactionId
+        << ',' << row.pairKey
+        << ',' << row.decisionTsNs
+        << ',' << row.completedTsNs
+        << ',' << static_cast<unsigned>(row.phaseRaw)
+        << ',' << static_cast<unsigned>(row.anchorRaw)
+        << ',' << static_cast<unsigned>(status)
+        << ',' << static_cast<unsigned>(row.directionRaw)
+        << ',' << static_cast<unsigned>(row.bandSideRaw)
+        << ',' << row.decisionEdgeAfterCostBpsE8
+        << ',' << row.fillEdgeAfterCostBpsE8
+        << ',' << row.edgeLossBpsE8
+        << ',' << row.requiredEdgeBpsE8
+        << ',' << row.fairBpsE8
+        << ',' << row.costBandBpsE8
+        << ',' << row.quoteDecisionEdgeAfterCostBpsE8
+        << ',' << row.decisionToFirstFillNs
+        << ',' << row.decisionToLastFillNs
+        << ',' << row.fillLegSkewNs
+        << ',' << row.thresholdDeadlineNs
+        << ',' << row.zeroEdgeDeadlineNs
+        << ',' << row.pairIndex
+        << ',' << row.pairSlot;
+    for (const JsonExecutionQualityLeg& leg : row.legs) {
+      out << ',' << leg.legIndex
+          << ',' << leg.clientIntentId
+          << ',' << static_cast<unsigned>(leg.sideRaw)
+          << ',' << leg.expectedQtyE8
+          << ',' << leg.filledQtyE8
+          << ',' << leg.decisionPriceE8
+          << ',' << leg.fillVwapE8
+          << ',' << leg.firstFillTsNs
+          << ',' << leg.lastFillTsNs;
+    }
+    out << "]\n";
+  }
+  return out.good();
+}
+
 bool writeRateLimitUsage(const std::filesystem::path& path, const EngineState& engine) noexcept {
   if (engine.rateLimitUsage.empty()) {
     std::error_code ec;
@@ -920,6 +1017,9 @@ void writeLegsArray(std::ostream& out, const BacktestRunResult& result, const ch
         << q << "total_pnl_e8" << q << ": " << leg.totalPnlE8 << ", "
         << q << "wallet_delta_e8" << q << ": " << leg.walletDeltaE8 << ", "
         << q << "open_position_qty_e8" << q << ": " << leg.openPositionQtyE8 << ", "
+        << q << "depth_execution" << q << ": ";
+    writeDepthExecutionObject(out, leg.depthExecution);
+    out << ", "
         << q << "strategy_closed" << q << ": " << (leg.strategyClosed ? "true" : "false") << ", "
         << q << "equity" << q << ": {" << q << "path" << q << ": " << quote("legs/" + std::to_string(i) + "/equity.jsonl")
         << ", " << q << "row_schema" << q << ": "
@@ -993,22 +1093,10 @@ bool writeManifest(const std::filesystem::path& path,
   out << "  " << q << "session_path" << q << ": " << quote(result.sessionPath.generic_string()) << ",\n";
   out << "  " << q << "config_path" << q << ": " << quote("config.ini") << ",\n";
   out << "  " << q << "execution" << q << ": {"
-      << q << "pipeline" << q << ": " << q
-      << (result.twoPhaseRepriceApplied ? "two_phase_reprice_v1" : "inline") << q
-      << ", " << q << "two_phase_reprice_applied" << q << ": " << (result.twoPhaseRepriceApplied ? "true" : "false")
-      << ", " << q << "two_phase_reprice_fallback" << q << ": " << (result.twoPhaseRepriceFallback ? "true" : "false")
+      << q << "pipeline" << q << ": " << q << "inline" << q
       << ", " << q << "trade_mode" << q << ": " << q << tradeModeName(result.tradeMode) << q
       << ", " << q << "primary_leg_index" << q << ": " << result.primaryLegIndex
       << ", " << q << "has_primary_leg_index" << q << ": " << (result.hasPrimaryLegIndex ? "true" : "false")
-      << ", " << q << "phase2_depth_rows" << q << ": " << result.phase2DepthRows
-      << ", " << q << "phase2_fills_repriced" << q << ": " << result.phase2FillsRepriced
-      << ", " << q << "phase2_fills_missing_depth" << q << ": " << result.phase2FillsMissingDepth
-      << ", " << q << "phase2_bbo_repriced" << q << ": " << result.phase2BboRepriced
-      << ", " << q << "phase2_depth_vwap_repriced" << q << ": " << result.phase2DepthVwapRepriced
-      << ", " << q << "phase2_depth_rejected_unseeded" << q << ": " << result.phase2DepthRejectedUnseeded
-      << ", " << q << "phase2_depth_rejected_crossed" << q << ": " << result.phase2DepthRejectedCrossed
-      << ", " << q << "phase2_depth_rejected_stale" << q << ": " << result.phase2DepthRejectedStale
-      << ", " << q << "phase2_missing_bbo" << q << ": " << result.phase2MissingBbo
       << ", " << q << "latency_model" << q << ": " << q << "realistic_tail_v1" << q
       << ", " << q << "latency_seed" << q << ": " << result.latencySeed
       << ", " << q << "market_data" << q << ": {" << q << "base_us" << q << ": " << result.marketDataLatency.baseUs
@@ -1029,6 +1117,18 @@ bool writeManifest(const std::filesystem::path& path,
       << ", " << q << "strict_failure" << q << ": " << (result.rateLimitStrictFailure ? "true" : "false")
       << ", " << q << "mode" << q << ": " << q << rateLimitModeName(result) << q
       << ", " << q << "rejected_commands" << q << ": " << manifestRejectedCommands
+      << "},\n";
+  out << "  " << q << "depth_execution" << q << ": ";
+  writeDepthExecutionObject(out, result.depthExecution);
+  out << ",\n";
+  out << "  " << q << "performance" << q << ": {"
+      << q << "load_ns" << q << ": " << result.performance.loadNs << ", "
+      << q << "timeline_ns" << q << ": " << result.performance.timelineNs << ", "
+      << q << "delivery_ns" << q << ": " << result.performance.deliveryNs << ", "
+      << q << "replay_ns" << q << ": " << result.performance.replayNs << ", "
+      << q << "finalize_ns" << q << ": " << result.performance.finalizeNs << ", "
+      << q << "artifact_write_ns" << q << ": " << result.performance.artifactWriteNs << ", "
+      << q << "total_ns" << q << ": " << result.performance.totalNs
       << "},\n";
   if (result.liveProbe.configured) {
     out << "  " << q << "live_probe" << q << ": {"
@@ -1073,6 +1173,24 @@ bool writeManifest(const std::filesystem::path& path,
         << ", " << q << "unit" << q << ": " << q << "bps_e8" << q
         << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,spread_bps_e8,ema_bps_e8,deviation_bps_e8,cost_band_bps_e8,edge_after_cost_bps_e8,direction,decision_kind,reason_raw]" << q
         << ", " << q << "rows" << q << ": " << engine.strategySpread.size() << "}";
+  }
+  if (!engine.executionQuality.empty()) {
+    std::size_t completedRows = 0u;
+    std::size_t incompleteRows = 0u;
+    std::size_t rejectedRows = 0u;
+    for (const JsonExecutionQualityAction& row : engine.executionQuality) {
+      if (row.anchorRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionAnchor::MakerQuote)) continue;
+      if (row.statusRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Completed)) ++completedRows;
+      else if (row.statusRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Rejected)) ++rejectedRows;
+      else ++incompleteRows;
+    }
+    out << ",\n    " << q << "execution_quality" << q << ": {" << q << "path" << q
+        << ": " << q << "execution_quality.jsonl" << q
+        << ", " << q << "row_schema" << q << ": " << quote(kExecutionQualityRowSchema)
+        << ", " << q << "rows" << q << ": " << engine.executionQuality.size()
+        << ", " << q << "completed_rows" << q << ": " << completedRows
+        << ", " << q << "incomplete_rows" << q << ": " << incompleteRows
+        << ", " << q << "rejected_rows" << q << ": " << rejectedRows << "}";
   }
   if (!engine.rateLimitUsage.empty()) {
     out << ",\n";
@@ -1126,9 +1244,10 @@ bool writeManifest(const std::filesystem::path& path,
 
 }  // namespace
 
-Status writeResult(const BacktestRunResult& result,
+Status writeResult(BacktestRunResult& result,
                    const EngineState& engine,
                    const std::vector<EngineState>* legEngines) noexcept {
+  const auto writeStart = std::chrono::steady_clock::now();
   std::error_code ec;
   std::filesystem::create_directories(result.resultPath, ec);
   if (ec) return Status::IoError;
@@ -1146,7 +1265,14 @@ Status writeResult(const BacktestRunResult& result,
   if (!writeStrategyIndicator(result.resultPath / "strategy_indicator.jsonl", engine)) return Status::IoError;
   if (!writeStrategyRange(result.resultPath / "strategy_range.jsonl", engine)) return Status::IoError;
   if (!writeStrategySpread(result.resultPath / "strategy_spread.jsonl", engine)) return Status::IoError;
+  if (!writeExecutionQuality(result.resultPath / "execution_quality.jsonl", engine)) return Status::IoError;
   if (!writeRateLimitUsage(result.resultPath / "rate_limit_usage.jsonl", engine)) return Status::IoError;
+  const auto writeElapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now() - writeStart).count();
+  if (writeElapsed > 0) {
+    result.performance.artifactWriteNs += static_cast<std::uint64_t>(writeElapsed);
+    result.performance.totalNs += static_cast<std::uint64_t>(writeElapsed);
+  }
   if (!writeManifest(result.resultPath / "manifest.json", result, engine, legEngines, orderLifetimes.size())) return Status::IoError;
   return Status::Ok;
 }

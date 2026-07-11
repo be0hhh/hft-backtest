@@ -29,6 +29,7 @@ struct SingleLegCycleScratch {
   std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
   std::array<hft_trader::core::StrategyCommandIntent, detail::kIntentCapacity> commandBuf{};
+  std::array<hft_trader::core::StrategyTransactionIntent, detail::kIntentCapacity> transactionBuf{};
   std::array<hft_trader::core::StrategyOrderState, detail::kMaxOrderStates> orderStorage{};
   std::array<hft_trader::core::StrategyOrderPathWarmupView, 1> warmupViews{};
 };
@@ -37,6 +38,7 @@ struct MultiLegCycleScratch {
   std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
   std::array<hft_trader::core::StrategyCommandIntent, detail::kIntentCapacity> commandBuf{};
+  std::array<hft_trader::core::StrategyTransactionIntent, detail::kIntentCapacity> transactionBuf{};
   std::array<hft_trader::core::StrategyMarketSnapshot, hft_trader::core::kStrategyRuntimeMaxLegs> snapshots{};
   std::array<hft_trader::core::StrategyCandleSnapshot, hft_trader::core::kStrategyRuntimeMaxLegs> candles{};
   std::array<std::array<hft_trader::core::StrategyOrderState, detail::kMaxOrderStates>, hft_trader::core::kStrategyRuntimeMaxLegs> orderStorage{};
@@ -45,6 +47,7 @@ struct MultiLegCycleScratch {
   std::array<hft_trader::core::StrategyPositionState, hft_trader::core::kStrategyRuntimeMaxLegs> positions{};
   std::array<hft_trader::core::StrategyAccountState, hft_trader::core::kStrategyRuntimeMaxLegs> accounts{};
   std::array<StrategyInstrumentSpec, hft_trader::core::kStrategyRuntimeMaxLegs> instruments{};
+  std::array<canon::MarketType, hft_trader::core::kStrategyRuntimeMaxLegs> markets{};
   std::array<std::uint64_t, hft_trader::core::kStrategyRuntimeMaxLegs> revisions{};
   std::size_t legCount{0u};
 

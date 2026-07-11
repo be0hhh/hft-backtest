@@ -2,15 +2,19 @@
 
 #include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
 
+#include <chrono>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <limits>
 #include <new>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -177,7 +181,11 @@ template<typename Levels>
     if (line[pos] != '[') break;
     PriceLevelRow level{};
     if (!parseLevel(line, pos, level)) return false;
-    levels.push_back(level);
+    try {
+      levels.push_back(level);
+    } catch (...) {
+      return false;
+    }
     if (!consume(line, pos, ',')) return false;
   }
   if (!parseI64(line, pos, tsNs)) return false;
@@ -213,7 +221,11 @@ template<typename Levels>
       return false;
     }
     if (level.priceE8 < 0 || level.qtyE8 < 0) return false;
-    row.levels.push_back(level);
+    try {
+      row.levels.push_back(level);
+    } catch (...) {
+      return false;
+    }
   }
 }
 
@@ -394,69 +406,195 @@ struct ExecutionDepthProviderImpl {
   cxet::composite::OrderBookTapeSidesRuntimeV1 sideScratch{};
   bool pendingValid{false};
   bool eof{false};
+  std::uint64_t sourceRows{0u};
   DepthSource source{DepthSource::None};
 };
+
+namespace {
+
+constexpr std::uint64_t kDepthCheckpointRows = 65536u;
+
+struct ExecutionDepthCheckpoint {
+  std::int64_t tsNs{0};
+  std::size_t legacyPos{0u};
+  std::size_t tapePos{0u};
+  std::size_t sidecarPos{0u};
+  std::uint64_t sourceRows{0u};
+  hft_trader::core::LocalOrderBookState book{};
+};
+
+}  // namespace
+
+class ExecutionDepthCheckpointCache {
+ public:
+  bool restore(std::int64_t tsNs,
+               ExecutionDepthProviderImpl& impl,
+               hft_trader::core::LocalOrderBookState& book) const noexcept {
+    std::lock_guard lock{mutex_};
+    const auto it = std::upper_bound(
+        checkpoints_.begin(), checkpoints_.end(), tsNs,
+        [](std::int64_t value, const ExecutionDepthCheckpoint& checkpoint) noexcept {
+          return value < checkpoint.tsNs;
+        });
+    if (it == checkpoints_.begin()) return false;
+    const ExecutionDepthCheckpoint& checkpoint = *(it - 1);
+    impl.legacyPos = checkpoint.legacyPos;
+    impl.tapePos = checkpoint.tapePos;
+    impl.sidecarPos = checkpoint.sidecarPos;
+    impl.sourceRows = checkpoint.sourceRows;
+    impl.pendingValid = false;
+    impl.eof = false;
+    book = checkpoint.book;
+    return true;
+  }
+
+  void publish(const ExecutionDepthProviderImpl& impl,
+               std::int64_t tsNs,
+               const hft_trader::core::LocalOrderBookState& book) noexcept {
+    if (impl.sourceRows == 0u || (impl.sourceRows % kDepthCheckpointRows) != 0u) return;
+    try {
+      std::lock_guard lock{mutex_};
+      if (!checkpoints_.empty() && checkpoints_.back().sourceRows >= impl.sourceRows) return;
+      if (!checkpoints_.empty() && checkpoints_.back().tsNs > tsNs) return;
+      checkpoints_.push_back(ExecutionDepthCheckpoint{
+          tsNs, impl.legacyPos, impl.tapePos, impl.sidecarPos, impl.sourceRows, book});
+    } catch (...) {
+    }
+  }
+
+  void markFailed(const char* reason) noexcept {
+    std::lock_guard lock{mutex_};
+    failed_ = true;
+    failureReason_ = reason;
+  }
+
+  bool failed(const char*& reason) const noexcept {
+    std::lock_guard lock{mutex_};
+    reason = failureReason_;
+    return failed_;
+  }
+
+ private:
+  mutable std::mutex mutex_{};
+  std::vector<ExecutionDepthCheckpoint> checkpoints_{};
+  bool failed_{false};
+  const char* failureReason_{""};
+};
+
+std::shared_ptr<ExecutionDepthCheckpointCache> makeExecutionDepthCheckpointCache() {
+  return std::make_shared<ExecutionDepthCheckpointCache>();
+}
 
 ExecutionDepthProvider::~ExecutionDepthProvider() {
   delete impl_;
 }
 
-bool ExecutionDepthProvider::open(const std::filesystem::path& sessionPath,
-                                  const Symbol& symbol,
-                                  const hft_trader::core::LocalOrderBookConfig& config,
-                                  const hft_trader::core::LocalOrderBookState& initialBook) noexcept {
+ExecutionDepthOpenStatus ExecutionDepthProvider::open(
+    const std::filesystem::path& sessionPath,
+    const Symbol& symbol,
+    const hft_trader::core::LocalOrderBookConfig& config,
+    const hft_trader::core::LocalOrderBookState& initialBook,
+    std::shared_ptr<ExecutionDepthCheckpointCache> cache) noexcept {
   delete impl_;
   impl_ = nullptr;
   book_ = initialBook;
   symbol_ = symbol;
   config_ = config;
   rowsRead_ = 0;
+  readNs_ = 0;
   available_ = false;
+  failed_ = false;
+  failureReason_ = "";
+  cache_ = std::move(cache);
+  try {
+    if (cache_) {
+      const char* cachedFailure = "";
+      if (cache_->failed(cachedFailure)) {
+        failed_ = true;
+        failureReason_ = cachedFailure;
+        return ExecutionDepthOpenStatus::Failed;
+      }
+    }
 
   std::string manifest;
   (void)readText(sessionPath / "manifest.json", manifest);
   const std::string depthPath = extractChannelPath(manifest, "depth");
   const std::string depthSidecarPath = extractChannelSidecarPath(manifest, "depth");
+  const bool depthDeclared = !depthPath.empty() || !depthSidecarPath.empty();
 
   const std::filesystem::path declaredDepth = !depthPath.empty()
       ? sessionPath / std::filesystem::path{depthPath}
       : std::filesystem::path{};
   const bool declaredTape = !declaredDepth.empty() && declaredDepth.filename() == "depth_tape.jsonl";
-  std::filesystem::path tapePath = declaredTape
-      ? existingPath(sessionPath, depthPath, "depth_tape.jsonl")
-      : existingPath(sessionPath, std::string_view{}, "depth_tape.jsonl");
-  std::filesystem::path sidecarPath = !depthSidecarPath.empty()
-      ? existingPath(sessionPath, depthSidecarPath, "depth_sidecar.jsonl")
-      : existingPath(sessionPath, std::string_view{}, "depth_sidecar.jsonl");
-  const bool hasTape = std::filesystem::exists(tapePath) && std::filesystem::exists(sidecarPath);
+  const bool declaredTapePair = declaredTape || !depthSidecarPath.empty();
+  std::filesystem::path tapePath{};
+  std::filesystem::path sidecarPath{};
+  std::filesystem::path legacyPath{};
+  if (depthDeclared) {
+    if (declaredTapePair) {
+      tapePath = !depthPath.empty()
+          ? sessionPath / std::filesystem::path{depthPath}
+          : existingPath(sessionPath, std::string_view{}, "depth_tape.jsonl");
+      sidecarPath = !depthSidecarPath.empty()
+          ? sessionPath / std::filesystem::path{depthSidecarPath}
+          : existingPath(sessionPath, std::string_view{}, "depth_sidecar.jsonl");
+    } else {
+      legacyPath = declaredDepth;
+    }
+  } else {
+    tapePath = existingPath(sessionPath, std::string_view{}, "depth_tape.jsonl");
+    sidecarPath = existingPath(sessionPath, std::string_view{}, "depth_sidecar.jsonl");
+    legacyPath = existingPath(sessionPath, std::string_view{}, "depth.jsonl");
+  }
+  const bool hasTape = !tapePath.empty() && !sidecarPath.empty() &&
+                       std::filesystem::exists(tapePath) && std::filesystem::exists(sidecarPath);
+  const bool hasLegacy = !legacyPath.empty() && std::filesystem::exists(legacyPath);
+  if (!hasTape && !hasLegacy) {
+    if (depthDeclared) {
+      failed_ = true;
+      failureReason_ = "declared_files_missing";
+      return ExecutionDepthOpenStatus::Failed;
+    }
+    return ExecutionDepthOpenStatus::Absent;
+  }
 
-  std::filesystem::path legacyPath = existingPath(sessionPath, depthPath, "depth.jsonl");
-  const bool hasLegacy = std::filesystem::exists(legacyPath);
-  if (!hasTape && !hasLegacy) return false;
-
-  ExecutionDepthProviderImpl* next = new (std::nothrow) ExecutionDepthProviderImpl{};
-  if (next == nullptr) return false;
+  std::unique_ptr<ExecutionDepthProviderImpl> next{new (std::nothrow) ExecutionDepthProviderImpl{}};
+  if (next == nullptr) {
+    failed_ = true;
+    failureReason_ = "allocation_failed";
+    return ExecutionDepthOpenStatus::Failed;
+  }
 
   if (hasTape) {
     if (!next->tapeFile.open(tapePath) || !next->sidecarFile.open(sidecarPath)) {
-      delete next;
-      return false;
+      failed_ = true;
+      failureReason_ = "open_failed";
+      return ExecutionDepthOpenStatus::Failed;
     }
     next->tapeText = next->tapeFile.view();
     next->sidecarText = next->sidecarFile.view();
     next->source = DepthSource::TapeSidecar;
   } else {
     if (!next->legacyFile.open(legacyPath)) {
-      delete next;
-      return false;
+      failed_ = true;
+      failureReason_ = "open_failed";
+      return ExecutionDepthOpenStatus::Failed;
     }
     next->legacyText = next->legacyFile.view();
     next->source = DepthSource::LegacySnapshot;
   }
 
-  impl_ = next;
+  impl_ = next.release();
   available_ = true;
-  return true;
+  return ExecutionDepthOpenStatus::Ready;
+  } catch (...) {
+    delete impl_;
+    impl_ = nullptr;
+    available_ = false;
+    failed_ = true;
+    failureReason_ = "allocation_failed";
+    return ExecutionDepthOpenStatus::Failed;
+  }
 }
 
 bool ExecutionDepthProvider::ready() const noexcept {
@@ -528,9 +666,20 @@ bool applyDepthRow(DepthSource source,
 bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
   if (!available_ || impl_ == nullptr) return false;
   if (tsNs <= 0) return ready();
+  if (cache_ && impl_->sourceRows == 0u && !impl_->pendingValid) {
+    (void)cache_->restore(tsNs, *impl_, book_);
+  }
+  if (impl_->eof || (impl_->pendingValid && impl_->pending.tsNs > tsNs)) return ready();
+  const auto readStart = std::chrono::steady_clock::now();
+  auto finishRead = [&]() noexcept {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - readStart).count();
+    if (elapsed > 0) readNs_ += static_cast<std::uint64_t>(elapsed);
+  };
   while (!impl_->eof) {
     if (impl_->pendingValid) {
       if (impl_->pending.tsNs > tsNs) break;
+      const std::int64_t appliedTsNs = impl_->pending.tsNs;
       if (!applyDepthRow(impl_->source,
                          book_,
                          symbol_,
@@ -540,11 +689,17 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
                          impl_->tapeScratch,
                          impl_->sideScratch)) {
         available_ = false;
+        failed_ = true;
+        failureReason_ = "apply_failed";
+        if (cache_) cache_->markFailed(failureReason_);
+        finishRead();
         return false;
       }
       impl_->pending.clear();
       impl_->pendingValid = false;
       ++rowsRead_;
+      ++impl_->sourceRows;
+      if (cache_) cache_->publish(*impl_, appliedTsNs, book_);
       continue;
     }
     impl_->scratch.clear();
@@ -555,10 +710,23 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
     }
     if (status == ReadDepthRowResult::Corrupt) {
       available_ = false;
+      failed_ = true;
+      failureReason_ = "parse_failed";
+      if (cache_) cache_->markFailed(failureReason_);
+      finishRead();
       return false;
     }
     if (impl_->scratch.tsNs > tsNs) {
-      impl_->pending = impl_->scratch;
+      try {
+        impl_->pending = impl_->scratch;
+      } catch (...) {
+        available_ = false;
+        failed_ = true;
+        failureReason_ = "allocation_failed";
+        if (cache_) cache_->markFailed(failureReason_);
+        finishRead();
+        return false;
+      }
       impl_->pendingValid = true;
       break;
     }
@@ -571,10 +739,17 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
                        impl_->tapeScratch,
                        impl_->sideScratch)) {
       available_ = false;
+      failed_ = true;
+      failureReason_ = "apply_failed";
+      if (cache_) cache_->markFailed(failureReason_);
+      finishRead();
       return false;
     }
     ++rowsRead_;
+    ++impl_->sourceRows;
+    if (cache_) cache_->publish(*impl_, impl_->scratch.tsNs, book_);
   }
+  finishRead();
   return ready();
 }
 

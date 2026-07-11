@@ -127,6 +127,9 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
          expect(manifest.find("\"curves\"") != std::string::npos, "manifest declares compact curve artifact") &&
          expect(manifest.find("\"legs\"") != std::string::npos, "manifest declares leg container") &&
          expect(manifest.find("\"session_path\"") != std::string::npos, "manifest declares leg session path") &&
+         expect(manifest.find("\"performance\"") != std::string::npos, "manifest declares sweep performance") &&
+         expect(manifest.find("\"worker_count\"") != std::string::npos, "manifest declares automatic worker count") &&
+         expect(manifest.find("\"fallback_points\"") != std::string::npos, "manifest declares depth fallback point count") &&
          expect(rows.find("\"distance_bps\"") != std::string::npos, "rows include distance_bps") &&
          expect(rows.find("\"trigger_bps\"") != std::string::npos, "rows include trigger_bps") &&
          expect(rows.find("\"legs\"") != std::string::npos, "rows include per-leg pnl container") &&
@@ -134,6 +137,10 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
          expect(rows.find("\"fills\"") != std::string::npos, "rows include fill count") &&
          expect(rows.find("\"risk_stopped\"") != std::string::npos, "rows include risk stop flag") &&
          expect(rows.find("\"liquidated\"") != std::string::npos, "rows include liquidation flag") &&
+         expect(rows.find("\"performance\"") != std::string::npos, "rows include per-point stage timings") &&
+         expect(rows.find("\"depth_execution\"") != std::string::npos, "rows include per-point depth telemetry") &&
+         expect(rows.find("\"point_id\":0") < rows.find("\"point_id\":1"),
+                "parallel sweep rows remain ordered by point id") &&
          expect(rows.find("\"score_e8\"") == std::string::npos, "rows omit score metric") &&
          expect(rows.find("\"random_seed\"") == std::string::npos, "rows omit random seed") &&
          expect(curves.find("\"curve_e8\"") != std::string::npos, "curves include compact pnl series") &&

@@ -41,6 +41,12 @@ struct BacktestSweepResult {
   std::filesystem::path manifestPath{};
   std::uint64_t pointsEvaluated{0};
   std::uint64_t zonesFound{0};
+  std::uint32_t workerCount{1u};
+  std::uint64_t prepareNs{0};
+  std::uint64_t pointsWallNs{0};
+  std::uint64_t pointsCpuSumNs{0};
+  std::uint64_t artifactWriteNs{0};
+  std::uint64_t totalNs{0};
   std::string error{};
 };
 

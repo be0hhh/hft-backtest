@@ -78,10 +78,12 @@ std::int64_t addMs(std::int64_t tsNs, std::uint32_t ms) noexcept {
 }
 
 bool pendingEarlier(const PendingAction& lhs, const PendingAction& rhs) noexcept {
-  return lhs.activeTsNs > rhs.activeTsNs;
+  if (lhs.activeTsNs != rhs.activeTsNs) return lhs.activeTsNs > rhs.activeTsNs;
+  return lhs.submitSequence > rhs.submitSequence;
 }
 
 void pushPendingAction(EngineState& engine, PendingAction action) {
+  action.submitSequence = engine.nextPendingSubmitSequence++;
   engine.pending.push_back(std::move(action));
   std::push_heap(engine.pending.begin(), engine.pending.end(), pendingEarlier);
 }
@@ -426,6 +428,12 @@ const hft_trader::core::LocalOrderBookState* executionDepthBook(EngineState& eng
     if (engine.executionDepthProvider->advanceTo(tsNs) && engine.executionDepthProvider->ready()) {
       return &engine.executionDepthProvider->book();
     }
+    if (engine.executionDepthProvider->failed()) {
+      engine.depthExecutionMode = BacktestDepthExecutionMode::BboFallback;
+      if (engine.depthFallbackReason.empty()) {
+        engine.depthFallbackReason = engine.executionDepthProvider->failureReason();
+      }
+    }
     return nullptr;
   }
   return engine.venueOrderBookExecutionEnabled && hft_trader::core::orderBook(engine.venueOrderBook).initialized()
@@ -599,13 +607,13 @@ bool submitCancelIntent(EngineState& engine,
   return true;
 }
 
-void submitOrderIntent(EngineState& engine,
-                       const hft_trader::core::OrderIntent& intent,
-                       std::int64_t tsNs,
-                       std::int64_t activeTs,
-                       bool warmup = false,
-                       std::uint32_t warmupCancelTimeoutMs = 0u,
-                       bool warmupCancelAfterAck = false) {
+[[nodiscard]] bool submitOrderIntent(EngineState& engine,
+                                     const hft_trader::core::OrderIntent& intent,
+                                     std::int64_t tsNs,
+                                     std::int64_t activeTs,
+                                     bool warmup = false,
+                                     std::uint32_t warmupCancelTimeoutMs = 0u,
+                                     bool warmupCancelAfterAck = false) {
   const bool postOnly = intent.orderType == canon::OrderType::Limit && isPostOnlyPolicy(intent.limitTimeInForcePolicy);
   const bool service = intent.service || warmup;
   const std::size_t recordIndex = engine.orders.size();
@@ -643,7 +651,7 @@ void submitOrderIntent(EngineState& engine,
     rejected.warmup = warmup;
     if (!serviceOrder(rejected)) pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs), tsNs);
     engine.orders[recordIndex].status = kRecordStatusRejected;
-    return;
+    return false;
   }
   const std::size_t slotIndex = findFreeIndex(engine);
   if (slotIndex == kNoRecordIndex) {
@@ -675,7 +683,7 @@ void submitOrderIntent(EngineState& engine,
     rejected.warmup = warmup;
     if (!serviceOrder(rejected)) pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs), tsNs);
     engine.orders[recordIndex].status = kRecordStatusRejected;
-    return;
+    return false;
   }
   const hft_trader::core::RateLimitDecision rateLimitDecision =
       engine.rateLimits.consumeDecision(hft_trader::core::rateLimitActionForOrderIntent(intent), timeNsFromI64Local(tsNs));
@@ -716,7 +724,7 @@ void submitOrderIntent(EngineState& engine,
       publishProblem(engine, canon::OrderProblem::RateLimited, 1u, intent.clientIntentId, Id{});
     }
     engine.orders[recordIndex].status = kRecordStatusRejected;
-    return;
+    return false;
   }
   appendRateLimitUsageSnapshot(engine, tsNs);
   if (intent.reduceOnly) ++engine.reduceOnlyOrders;
@@ -776,6 +784,7 @@ void submitOrderIntent(EngineState& engine,
   action.targetClientIntentId = intent.clientIntentId;
   action.commandClientIntentId = intent.clientIntentId;
   pushPendingAction(engine, std::move(action));
+  return true;
 }
 
 }  // namespace
@@ -1085,6 +1094,7 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
       continue;
     }
     if (bid <= 0 || ask <= 0) continue;
+    const std::size_t fillsBeforeBbo = engine.fills.size();
     FillExecutionMetadata metadata{};
     metadata.fillReason = kFillReasonTop;
     if (triggeredStopLimitOrder(order)) {
@@ -1095,6 +1105,11 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
       (void)fillOrder(engine, order, ask, tsNs, true, metadata);
     } else if (!order.postOnly && order.state.side.raw == Side::Sell().raw && order.state.price.raw <= bid) {
       (void)fillOrder(engine, order, bid, tsNs, true, metadata);
+    }
+    if (engine.depthExecutionMode == BacktestDepthExecutionMode::BboFallback &&
+        engine.fills.size() > fillsBeforeBbo) {
+      engine.depthFallbackFills += engine.fills.size() - fillsBeforeBbo;
+      if (engine.firstDepthFallbackTsNs == 0) engine.firstDepthFallbackTsNs = tsNs;
     }
   }
 }
@@ -1262,91 +1277,137 @@ void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, BacktestLatencyRun
   applyDueActions(engine, delayedTs(tsNs, maxCancelLatencyUs));
 }
 
-void applyIntents(EngineState& engine,
-                  const hft_trader::core::StrategyIo& io,
-                  std::int64_t tsNs,
-                  std::uint64_t orderLatencyUs,
-                  std::uint64_t cancelLatencyUs) {
-  if (engine.liquidated || engine.riskStopped) return;
+namespace {
+
+template<typename OrderActiveTsFn, typename CancelActiveTsFn>
+IntentApplyResult applyIntentsImpl(EngineState& engine,
+                                   const hft_trader::core::StrategyIo& io,
+                                   std::int64_t tsNs,
+                                   OrderActiveTsFn orderActiveTs,
+                                   CancelActiveTsFn cancelActiveTs) {
+  IntentApplyResult result{};
+  if (engine.liquidated || engine.riskStopped) return result;
+  if (io.commandSequenceFiltered || !hft_trader::core::strategyIoCommandSequencesValid(io)) {
+    result.disposition = IntentApplyDisposition::RestoreStrategyState;
+    return result;
+  }
+
   const bool hasIntents = io.cancelCount != 0u || io.orderCount != 0u || io.commandCount != 0u;
-  for (std::size_t i = 0; i < io.commandCount; ++i) {
-    const auto& command = io.commandOut[i];
-    if (command.kind == hft_trader::core::StrategyCommandIntentKind::Cancel) {
-      const std::int64_t activeTs = delayedTs(tsNs, cancelLatencyUs);
-      (void)submitCancelIntent(engine, command.cancel, tsNs, activeTs);
-    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::Order) {
-      const std::int64_t activeTs = delayedTs(tsNs, orderLatencyUs);
-      submitOrderIntent(engine, command.order, tsNs, activeTs);
-    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::WarmupOrder) {
-      const std::int64_t activeTs = delayedTs(tsNs, orderLatencyUs);
-      submitOrderIntent(engine,
-                        command.warmup.order,
-                        tsNs,
-                        activeTs,
-                        true,
-                        command.warmup.cancelTimeoutMs,
-                        command.warmup.cancelAfterAck);
+  auto submitCommandOrder = [&](const hft_trader::core::StrategyCommandIntent& command) {
+    if (command.kind == hft_trader::core::StrategyCommandIntentKind::WarmupOrder) {
+      return submitOrderIntent(engine,
+                               command.warmup.order,
+                               tsNs,
+                               orderActiveTs(command.warmup.order),
+                               true,
+                               command.warmup.cancelTimeoutMs,
+                               command.warmup.cancelAfterAck);
     }
+    return submitOrderIntent(engine,
+                             command.order,
+                             tsNs,
+                             orderActiveTs(command.order));
+  };
+
+  for (std::size_t i = 0u; i < io.commandCount;) {
+    const hft_trader::core::StrategyCommandIntent& command = io.commandOut[i];
+    if (command.sequenceKind != hft_trader::core::StrategyCommandSequenceKind::None) {
+      const bool cancelThenNew =
+          command.sequenceKind == hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew;
+      const hft_trader::core::StrategyCommandIntent& first = command;
+      const hft_trader::core::StrategyCommandIntent& second = io.commandOut[i + 1u];
+      const hft_trader::core::StrategyCommandIntent& cancelCommand = cancelThenNew ? first : second;
+      const hft_trader::core::StrategyCommandIntent& orderCommand = cancelThenNew ? second : first;
+      if (cancelThenNew) {
+        if (!submitCancelIntent(engine,
+                                cancelCommand.cancel,
+                                tsNs,
+                                cancelActiveTs(cancelCommand.cancel))) {
+          result.disposition = IntentApplyDisposition::RestoreStrategyState;
+          break;
+        }
+        if (!submitCommandOrder(orderCommand)) {
+          result.disposition = IntentApplyDisposition::RestoreStrategyState;
+          break;
+        }
+      } else {
+        if (!submitCommandOrder(orderCommand)) {
+          result.disposition = IntentApplyDisposition::RestoreStrategyState;
+          break;
+        }
+        if (!submitCancelIntent(engine,
+                                cancelCommand.cancel,
+                                tsNs,
+                                cancelActiveTs(cancelCommand.cancel))) {
+          result.disposition = IntentApplyDisposition::PreserveAcceptedSequence;
+          break;
+        }
+      }
+      i += 2u;
+      continue;
+    }
+
+    if (command.kind == hft_trader::core::StrategyCommandIntentKind::Cancel) {
+      (void)submitCancelIntent(engine, command.cancel, tsNs, cancelActiveTs(command.cancel));
+    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::Order ||
+               command.kind == hft_trader::core::StrategyCommandIntentKind::WarmupOrder) {
+      (void)submitCommandOrder(command);
+    }
+    ++i;
   }
-  for (std::size_t i = 0; i < io.cancelCount; ++i) {
-    const auto& intent = io.cancelOut[i];
-    const std::int64_t activeTs = delayedTs(tsNs, cancelLatencyUs);
-    (void)submitCancelIntent(engine, intent, tsNs, activeTs);
-  }
-  for (std::size_t i = 0; i < io.orderCount; ++i) {
-    const auto& intent = io.orderOut[i];
-    const std::int64_t activeTs = delayedTs(tsNs, orderLatencyUs);
-    submitOrderIntent(engine, intent, tsNs, activeTs);
+
+  if (result.disposition == IntentApplyDisposition::Applied) {
+    for (std::size_t i = 0u; i < io.cancelCount; ++i) {
+      const hft_trader::core::CancelIntent& intent = io.cancelOut[i];
+      (void)submitCancelIntent(engine, intent, tsNs, cancelActiveTs(intent));
+    }
+    for (std::size_t i = 0u; i < io.orderCount; ++i) {
+      const hft_trader::core::OrderIntent& intent = io.orderOut[i];
+      (void)submitOrderIntent(engine, intent, tsNs, orderActiveTs(intent));
+    }
   }
   if (hasIntents) bumpContextRevision(engine);
   applyDueActions(engine, tsNs);
+  return result;
 }
 
-void applyIntents(EngineState& engine,
-                  const hft_trader::core::StrategyIo& io,
-                  std::int64_t tsNs,
-                  BacktestLatencyRuntime& latency) {
-  if (engine.liquidated || engine.riskStopped) return;
-  const bool hasIntents = io.cancelCount != 0u || io.orderCount != 0u || io.commandCount != 0u;
-  for (std::size_t i = 0; i < io.commandCount; ++i) {
-    const auto& command = io.commandOut[i];
-    if (command.kind == hft_trader::core::StrategyCommandIntentKind::Cancel) {
-      const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::CancelOrder));
-      (void)submitCancelIntent(engine, command.cancel, tsNs, activeTs);
-    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::Order) {
-      const BacktestLatencyChannel channel =
-          (command.order.orderType == canon::OrderType::Market || command.order.orderType == canon::OrderType::Stop)
-          ? BacktestLatencyChannel::MarketOrder
-          : BacktestLatencyChannel::LimitOrder;
-      const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, channel));
-      submitOrderIntent(engine, command.order, tsNs, activeTs);
-    } else if (command.kind == hft_trader::core::StrategyCommandIntentKind::WarmupOrder) {
-      const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::LimitOrder));
-      submitOrderIntent(engine,
-                        command.warmup.order,
-                        tsNs,
-                        activeTs,
-                        true,
-                        command.warmup.cancelTimeoutMs,
-                        command.warmup.cancelAfterAck);
-    }
-  }
-  for (std::size_t i = 0; i < io.cancelCount; ++i) {
-    const auto& intent = io.cancelOut[i];
-    const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::CancelOrder));
-    (void)submitCancelIntent(engine, intent, tsNs, activeTs);
-  }
-  for (std::size_t i = 0; i < io.orderCount; ++i) {
-    const auto& intent = io.orderOut[i];
-    const BacktestLatencyChannel channel =
-        (intent.orderType == canon::OrderType::Market || intent.orderType == canon::OrderType::Stop)
-        ? BacktestLatencyChannel::MarketOrder
-        : BacktestLatencyChannel::LimitOrder;
-    const std::int64_t activeTs = delayedTs(tsNs, sampleLatencyUs(latency, channel));
-    submitOrderIntent(engine, intent, tsNs, activeTs);
-  }
-  if (hasIntents) bumpContextRevision(engine);
-  applyDueActions(engine, tsNs);
+}  // namespace
+
+IntentApplyResult applyIntents(EngineState& engine,
+                               const hft_trader::core::StrategyIo& io,
+                               std::int64_t tsNs,
+                               std::uint64_t orderLatencyUs,
+                               std::uint64_t cancelLatencyUs) {
+  return applyIntentsImpl(
+      engine,
+      io,
+      tsNs,
+      [tsNs, orderLatencyUs](const hft_trader::core::OrderIntent&) noexcept {
+        return delayedTs(tsNs, orderLatencyUs);
+      },
+      [tsNs, cancelLatencyUs](const hft_trader::core::CancelIntent&) noexcept {
+        return delayedTs(tsNs, cancelLatencyUs);
+      });
+}
+
+IntentApplyResult applyIntents(EngineState& engine,
+                               const hft_trader::core::StrategyIo& io,
+                               std::int64_t tsNs,
+                               BacktestLatencyRuntime& latency) {
+  return applyIntentsImpl(
+      engine,
+      io,
+      tsNs,
+      [tsNs, &latency](const hft_trader::core::OrderIntent& intent) noexcept {
+        const BacktestLatencyChannel channel =
+            (intent.orderType == canon::OrderType::Market || intent.orderType == canon::OrderType::Stop)
+            ? BacktestLatencyChannel::MarketOrder
+            : BacktestLatencyChannel::LimitOrder;
+        return delayedTs(tsNs, sampleLatencyUs(latency, channel));
+      },
+      [tsNs, &latency](const hft_trader::core::CancelIntent&) noexcept {
+        return delayedTs(tsNs, sampleLatencyUs(latency, BacktestLatencyChannel::CancelOrder));
+      });
 }
 
 }  // namespace hft_backtest::detail

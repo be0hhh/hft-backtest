@@ -2,7 +2,6 @@
 
 #include "accounting/backtest_result_aggregation.hpp"
 #include "execution/backtest_execution_depth.hpp"
-#include "execution/backtest_execution_reprice.hpp"
 #include "execution/backtest_latency.hpp"
 #include "config/backtest_run_config.hpp"
 #include "strategy/backtest_strategy_runtime.hpp"
@@ -119,6 +118,37 @@ hft_trader::core::CancelIntent cancelIntent(std::uint64_t commandId, std::uint64
   out.clientIntentId = id(commandId);
   out.targetClientIntentId = id(targetId);
   out.targetOrderType = canon::OrderType::Limit;
+  return out;
+}
+
+std::array<hft_trader::core::StrategyCommandIntent, 2> amendCommands(
+    hft_trader::core::StrategyCommandSequenceKind kind,
+    const hft_trader::core::OrderIntent& replacement,
+    const hft_trader::core::CancelIntent& cancel) noexcept {
+  std::array<hft_trader::core::StrategyCommandIntent, 2> out{};
+  const bool cancelThenNew =
+      kind == hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew;
+  hft_trader::core::StrategyCommandIntent& first = out[0];
+  hft_trader::core::StrategyCommandIntent& second = out[1];
+  first.kind = cancelThenNew
+      ? hft_trader::core::StrategyCommandIntentKind::Cancel
+      : hft_trader::core::StrategyCommandIntentKind::Order;
+  second.kind = cancelThenNew
+      ? hft_trader::core::StrategyCommandIntentKind::Order
+      : hft_trader::core::StrategyCommandIntentKind::Cancel;
+  if (cancelThenNew) {
+    first.cancel = cancel;
+    second.order = replacement;
+  } else {
+    first.order = replacement;
+    second.cancel = cancel;
+  }
+  first.sequenceKind = kind;
+  second.sequenceKind = kind;
+  first.sequenceStep = hft_trader::core::StrategyCommandSequenceStep::First;
+  second.sequenceStep = hft_trader::core::StrategyCommandSequenceStep::Second;
+  first.sequenceId = replacement.clientIntentId;
+  second.sequenceId = replacement.clientIntentId;
   return out;
 }
 
@@ -328,6 +358,152 @@ bool testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() {
          expect(!engine.orders.back().service && !engine.orders.back().warmup, "final order is real strategy order");
 }
 
+bool amendFilterProbeRunCycle(void* rawState, hft_trader::core::StrategyContext& ctx) noexcept {
+  auto* state = static_cast<WarmupGateProbeState*>(rawState);
+  if (!state || ctx.io.commandOut.size() < 2u) return false;
+  hft_trader::core::OrderIntent replacement =
+      postOnlyOrderIntent(state->nextClientId, Side::Buy(), kPx100 - 200000000ll);
+  replacement.routeHandle.raw = 2u;
+  replacement.quoteSlotId.raw = 7u;
+  hft_trader::core::CancelIntent cancel = cancelIntent(state->nextClientId + 1u, 900u);
+  cancel.routeHandle = replacement.routeHandle;
+  cancel.quoteSlotId = replacement.quoteSlotId;
+  const auto commands = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
+      replacement,
+      cancel);
+  ctx.io.commandOut[0] = commands[0];
+  ctx.io.commandOut[1] = commands[1];
+  ctx.io.commandCount = commands.size();
+  ctx.io.hasCommandSequence = true;
+  state->nextClientId += 2u;
+  ++state->cycles;
+  return true;
+}
+
+bool testBacktestTradabilityFilterDropsWholeAmendAndRestoresState() {
+  hft_trader::runtime::StrategyDescriptor descriptor{};
+  descriptor.name = "amend_filter_probe";
+  descriptor.streamCount = 0u;
+  descriptor.runCycle = amendFilterProbeRunCycle;
+  descriptor.captureState = warmupGateProbeCaptureState;
+  descriptor.restoreAfterOrderFailure = warmupGateProbeRestoreState;
+
+  std::vector<EngineState> engines(2u);
+  for (std::size_t i = 0u; i < engines.size(); ++i) {
+    engines[i].exchange = canon::kExchangeIdBinance;
+    engines[i].market = canon::kMarketTypeFutures;
+    engines[i].legIndex = static_cast<std::uint32_t>(i);
+    setTop(engines[i], kPx100 - 100000000ll, kPx100 + 100000000ll);
+  }
+  std::vector<StrategyInstrumentSpec> instruments(2u);
+  for (StrategyInstrumentSpec& instrument : instruments) {
+    instrument.tickSizeRaw = 100000000ll;
+    instrument.stepSizeRaw = 100000000ll;
+    instrument.tickGrid = hft_trader::core::prepareFastStepGrid(instrument.tickSizeRaw);
+    instrument.qtyStepGrid = hft_trader::core::prepareFastStepGrid(instrument.stepSizeRaw);
+  }
+  auto scratch = std::make_unique<MultiLegCycleScratch>();
+  scratch->reset(engines.size());
+  WarmupGateProbeState state{};
+  hft_trader::core::SymbolShardConfig shard{};
+  hft_trader::core::ShardControlState control{};
+  BacktestRunRequest request{};
+  request.tradeMode = BacktestTradeMode::PrimaryOnly;
+  request.hasPrimaryLegIndex = true;
+  request.primaryLegIndex = 0u;
+
+  const bool ok = hft_backtest::runCycleMulti(
+      descriptor, &state, engines, instruments, *scratch, shard, control, 0u, 1000ll, request, nullptr);
+
+  return expect(ok, "tradability-filtered amend does not abort replay") &&
+         expect(state.cycles == 0u, "tradability-filtered amend restores strategy cycle state") &&
+         expect(state.nextClientId == 1u, "tradability-filtered amend restores client id allocation") &&
+         expect(engines[0].orders.empty() && engines[1].orders.empty(),
+                "tradability filter emits neither half of amend pair");
+}
+
+bool twoAmendFailureProbeRunCycle(void* rawState, hft_trader::core::StrategyContext& ctx) noexcept {
+  auto* state = static_cast<WarmupGateProbeState*>(rawState);
+  if (!state || ctx.io.commandOut.size() < 4u) return false;
+  const auto first = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
+      postOnlyOrderIntent(state->nextClientId, Side::Buy(), kPx100 - 200000000ll),
+      cancelIntent(1000u + state->nextClientId, 100u));
+  const auto second = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
+      postOnlyOrderIntent(state->nextClientId + 1u, Side::Sell(), kPx100 + 200000000ll),
+      cancelIntent(1001u + state->nextClientId, 101u));
+  ctx.io.commandOut[0] = first[0];
+  ctx.io.commandOut[1] = first[1];
+  ctx.io.commandOut[2] = second[0];
+  ctx.io.commandOut[3] = second[1];
+  ctx.io.commandCount = 4u;
+  ctx.io.hasCommandSequence = true;
+  state->nextClientId += 2u;
+  ++state->cycles;
+  return true;
+}
+
+bool testBacktestFailedLaterAmendCleansEarlierAcceptedReplacement() {
+  hft_trader::runtime::StrategyDescriptor descriptor{};
+  descriptor.name = "two_amend_failure_probe";
+  descriptor.streamCount = 0u;
+  descriptor.runCycle = twoAmendFailureProbeRunCycle;
+  descriptor.captureState = warmupGateProbeCaptureState;
+  descriptor.restoreAfterOrderFailure = warmupGateProbeRestoreState;
+
+  EngineState engine{};
+  engine.exchange = canon::kExchangeIdBinance;
+  engine.market = canon::kMarketTypeFutures;
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 2> initial{
+      postOnlyOrderIntent(100u, Side::Buy(), kPx100 - 300000000ll),
+      postOnlyOrderIntent(101u, Side::Sell(), kPx100 + 300000000ll)};
+  hft_trader::core::StrategyIo seed{};
+  seed.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
+  seed.orderCount = initial.size();
+  (void)applyIntents(engine, seed, 1000ll, 0u, 0u);
+  engine.lastOrderPathHotMono.raw = 1000u;
+
+  hft_trader::core::RateLimitBucketConfig orders{};
+  orders.kind = hft_trader::core::RateLimitBucketKind::Orders;
+  orders.limit = 1;
+  orders.intervalNs = 1000000000ll;
+  orders.enabled = true;
+  engine.rateLimits.configureBucket(orders);
+  hft_trader::core::RateLimitActionConfig orderAction{};
+  orderAction.action = hft_trader::core::RateLimitActionKind::LimitOrder;
+  orderAction.costCount = 1u;
+  orderAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::Orders;
+  orderAction.costs[0].cost = 1;
+  engine.rateLimits.configureAction(orderAction);
+
+  StrategyInstrumentSpec instrument{};
+  instrument.tickSizeRaw = 100000000ll;
+  instrument.stepSizeRaw = 100000000ll;
+  instrument.tickGrid = hft_trader::core::prepareFastStepGrid(instrument.tickSizeRaw);
+  instrument.qtyStepGrid = hft_trader::core::prepareFastStepGrid(instrument.stepSizeRaw);
+  auto scratch = std::make_unique<SingleLegCycleScratch>();
+  WarmupGateProbeState state{};
+  hft_trader::core::SymbolShardConfig shard{};
+  hft_trader::core::ShardControlState control{};
+  BacktestRunRequest request{};
+
+  const bool ok = hft_backtest::runCycle(
+      descriptor, &state, engine, instrument, *scratch, shard, control, 2000ll, request, nullptr);
+  std::array<hft_trader::core::StrategyOrderState, 8> visible{};
+  const std::size_t visibleCount = visibleOrders(engine, visible.data(), visible.size());
+
+  return expect(ok, "later amend send failure does not abort replay") &&
+         expect(state.cycles == 0u && state.nextClientId == 1u,
+                "later amend failure restores full strategy cycle state") &&
+         expect(visibleCount == 0u,
+                "rollback cleanup removes earlier replacement accepted in the failed cycle") &&
+         expect(engine.orders.back().action == kRecordActionCancel,
+                "rollback emits cleanup cancel for earlier accepted replacement");
+}
+
 bool testBacktestFeeScheduleOverridesExchangePreset() {
   BacktestRunRequest request{};
   BacktestFeeSchedule overrideSchedule{};
@@ -411,56 +587,6 @@ Symbol btcUsdtSymbol() {
   Symbol symbol{};
   symbol.copyFrom("BTC_USDT");
   return symbol;
-}
-
-JsonOrder phase2OrderRecord(std::uint64_t id,
-                            std::uint8_t type,
-                            std::uint8_t side,
-                            std::int64_t qtyE8,
-                            std::int64_t activeTsNs,
-                            bool reduceOnly = false,
-                            std::int64_t triggerTsNs = 0) noexcept {
-  JsonOrder order{};
-  order.id = id;
-  order.submitTsNs = activeTsNs;
-  order.activeTsNs = activeTsNs;
-  order.tsNs = triggerTsNs > 0 ? triggerTsNs : activeTsNs;
-  order.action = kRecordActionOrder;
-  order.side = side;
-  order.type = type;
-  order.status = kRecordStatusFilled;
-  order.qtyE8 = qtyE8;
-  order.reduceOnly = reduceOnly;
-  order.triggerTsNs = triggerTsNs;
-  return order;
-}
-
-JsonFill phase2TakerFillRecord(std::uint64_t orderId,
-                               std::uint8_t side,
-                               std::int64_t priceE8,
-                               std::int64_t qtyE8,
-                               std::int64_t orderQtyE8,
-                               std::int64_t entryTsNs,
-                               std::int64_t exitTsNs,
-                               bool reduceOnly = false) noexcept {
-  JsonFill fill{};
-  fill.orderId = orderId;
-  fill.entryTsNs = entryTsNs;
-  fill.exitTsNs = exitTsNs;
-  fill.side = side;
-  fill.priceE8 = priceE8;
-  fill.qtyE8 = qtyE8;
-  fill.reduceOnly = reduceOnly;
-  fill.fillReason = kFillReasonTop;
-  fill.liquidity = kFillLiquidityTaker;
-  fill.orderQtyE8 = orderQtyE8;
-  fill.cumulativeFilledQtyE8 = qtyE8;
-  fill.remainingQtyE8 = orderQtyE8 > qtyE8 ? orderQtyE8 - qtyE8 : 0;
-  fill.avgPriceE8 = priceE8;
-  fill.executionQtyE8 = qtyE8;
-  fill.executionAvgPriceE8 = priceE8;
-  fill.referencePriceE8 = priceE8;
-  return fill;
 }
 
 bool testStaleCancelDoesNotCancelReusedSlot() {
@@ -593,168 +719,6 @@ bool testRepeatedRateLimitRejectsShareCooldownWindow() {
          expect(engine.orders[2].status == kRecordStatusRejected, "second blocked order is rejected") &&
          expect(rateLimitedEvents == 2u, "each rate-limited order publishes terminal rejected user event") &&
          expect(engine.rateLimitCooldownUntilTsNs == 1000000000ll, "rate-limit cooldown resumes at bucket reset");
-}
-
-bool testRepriceFillFromBookAnnotatesDepthMetadataWithoutChangingCausality() {
-  EngineState engine{};
-  seedVenueBook(engine,
-                {{kPx100 - 100000000ll, kQty1}},
-                {{kPx100 + 100000000ll, kQty1}, {kPx100 + 200000000ll, kQty1}});
-  JsonFill fill{};
-  fill.legIndex = 0u;
-  fill.orderId = 42u;
-  fill.entryTsNs = 1000;
-  fill.exitTsNs = 2000;
-  fill.side = kRecordSideBuy;
-  fill.priceE8 = kPx100 + 200000000ll;
-  fill.qtyE8 = kQty1 * 2;
-  fill.fillReason = kFillReasonTop;
-  fill.liquidity = kFillLiquidityTaker;
-  const std::uint64_t orderIdBefore = fill.orderId;
-  const std::int64_t exitBefore = fill.exitTsNs;
-  const std::int64_t qtyBefore = fill.qtyE8;
-  const std::int64_t expectedExecutionPrice = kPx100 + 150000000ll;
-
-  const bool ok = repriceFillFromBook(fill, engine.venueOrderBook);
-
-  return expect(ok, "phase2 reprice annotates fill from depth book") &&
-         expect(fill.orderId == orderIdBefore, "phase2 reprice preserves order id") &&
-         expect(fill.exitTsNs == exitBefore, "phase2 reprice preserves fill timestamp") &&
-         expect(fill.qtyE8 == qtyBefore, "phase2 reprice preserves fill quantity") &&
-         expect(fill.referencePriceE8 == kPx100 + 100000000ll, "phase2 reprice captures depth reference price") &&
-         expect(fill.priceE8 == expectedExecutionPrice, "phase2 reprice applies weighted execution price") &&
-         expect(fill.executionAvgPriceE8 == expectedExecutionPrice, "phase2 reprice stores weighted execution price") &&
-         expect(fill.slippageE8 == 50000000ll, "phase2 reprice computes buy slippage") &&
-         expect(fill.bookVisibleExecutableQtyE8 == kQty1 * 2, "phase2 reprice captures visible executable depth") &&
-         expect(fill.fillReason == kFillReasonAggressiveBook, "phase2 reprice marks depth-priced metadata");
-}
-
-bool testRepriceRebuildAccountingUsesRepricedFillPrices() {
-  EngineState engine{};
-  engine.initialBalanceE8 = 100000000000ll;
-  engine.walletBalanceE8 = engine.initialBalanceE8;
-  JsonFill buy{};
-  buy.orderId = 1;
-  buy.exitTsNs = 100;
-  buy.side = kRecordSideBuy;
-  buy.priceE8 = kPx100;
-  buy.qtyE8 = kQty1;
-  buy.liquidity = kFillLiquidityTaker;
-  JsonFill sell{};
-  sell.orderId = 2;
-  sell.exitTsNs = 200;
-  sell.side = kRecordSideSell;
-  sell.priceE8 = kPx100 - 100000000ll;
-  sell.qtyE8 = kQty1;
-  sell.liquidity = kFillLiquidityTaker;
-  engine.fills.push_back(buy);
-  engine.fills.push_back(sell);
-
-  rebuildAccountingFromFills(engine, 50, 0);
-
-  return expect(engine.netQtyRaw == 0, "phase2 accounting closes repriced round trip") &&
-         expect(engine.netRealizedPnlE8 == -100000000ll, "phase2 accounting applies repriced realized pnl") &&
-         expect(engine.walletBalanceE8 == engine.initialBalanceE8 - 100000000ll, "phase2 accounting updates wallet") &&
-         expect(engine.fills[1].realizedPnlE8 == -100000000ll, "phase2 accounting rewrites fill realized pnl") &&
-         expect(engine.equityPoints.size() == 3u, "phase2 accounting rebuilds start and fill equity points");
-}
-
-bool testPhase2MarketBurstFillsResidualAtLastKnownTradePrice() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_phase2_market_burst_" + std::to_string(std::rand()));
-  writeText(dir / "jsonl" / "bookticker.jsonl",
-            "[9900000000,100000000,10100000000,30000000,1000]\n");
-  writeText(dir / "jsonl" / "trades.jsonl",
-            "[10100000000,30000000,1,1100]\n"
-            "[10300000000,20000000,1,1200]\n"
-            "[10000000000,10000000,0,1300]\n");
-
-  EngineState engine{};
-  engine.symbol = btcUsdtSymbol();
-  engine.orders.push_back(phase2OrderRecord(501, kRecordTypeMarket, kRecordSideBuy, kQty1, 1000));
-  engine.fills.push_back(phase2TakerFillRecord(501,
-                                               kRecordSideBuy,
-                                               10100000000ll,
-                                               kQty1,
-                                               kQty1,
-                                               1000,
-                                               1000));
-
-  ExecutionRepriceStats stats{};
-  const bool ok = repriceFillsWithDepth(dir, engine.symbol, 1000000ll, engine, stats);
-
-  return expect(ok, "phase2 market burst repricer opens BBO/trades") &&
-         expect(engine.fills.size() == 1u, "phase2 market burst replaces original taker fill") &&
-         expect(engine.fills[0].orderId == 501u, "phase2 market burst preserves order id") &&
-         expect(engine.fills[0].priceE8 == 10300000000ll, "phase2 market burst fills residual at last known sweep price") &&
-         expect(engine.fills[0].qtyE8 == kQty1, "phase2 market burst preserves filled quantity") &&
-         expect(engine.fills[0].exitTsNs == 1200, "phase2 market burst exits at same-side burst end before opposite print") &&
-         expect(engine.fills[0].fillReason == kFillReasonAggressiveBook, "phase2 market burst marks aggressive-book fill") &&
-         expect(stats.fillsRepriced == 1u, "phase2 market burst counts replacement fill");
-}
-
-bool testPhase2StopMarketBurstUsesTriggerTimestamp() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_phase2_stop_burst_" + std::to_string(std::rand()));
-  writeText(dir / "jsonl" / "bookticker.jsonl",
-            "[9900000000,100000000,10100000000,20000000,5000]\n");
-  writeText(dir / "jsonl" / "trades.jsonl",
-            "[10400000000,100000000,1,5100]\n"
-            "[10000000000,10000000,0,5200]\n");
-
-  EngineState engine{};
-  engine.symbol = btcUsdtSymbol();
-  engine.orders.push_back(phase2OrderRecord(502, kRecordTypeStopMarket, kRecordSideBuy, 60000000ll, 1000, false, 5000));
-  engine.fills.push_back(phase2TakerFillRecord(502,
-                                               kRecordSideBuy,
-                                               10100000000ll,
-                                               60000000ll,
-                                               60000000ll,
-                                               5000,
-                                               5000));
-
-  ExecutionRepriceStats stats{};
-  const bool ok = repriceFillsWithDepth(dir, engine.symbol, 1000000ll, engine, stats);
-
-  return expect(ok, "phase2 stop-market burst repricer opens BBO/trades") &&
-         expect(engine.fills.size() == 1u, "phase2 stop-market burst replaces original taker fill") &&
-         expect(engine.fills[0].entryTsNs == 5000, "phase2 stop-market burst uses trigger timestamp as queue arrival") &&
-         expect(engine.fills[0].exitTsNs == 5100, "phase2 stop-market burst exits at burst trade timestamp") &&
-         expect(engine.fills[0].priceE8 == 10400000000ll, "phase2 stop-market burst applies trade-through last known price") &&
-         expect(engine.fills[0].executionAvgPriceE8 == 10400000000ll, "phase2 stop-market burst stores execution average");
-}
-
-bool testPhase2ReduceOnlyMarketBurstPreservesPhase1FilledQtyCap() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_phase2_reduce_burst_" + std::to_string(std::rand()));
-  writeText(dir / "jsonl" / "bookticker.jsonl",
-            "[9900000000,100000000,10100000000,10000000,1000]\n");
-  writeText(dir / "jsonl" / "trades.jsonl",
-            "[10500000000,100000000,1,1100]\n"
-            "[10000000000,10000000,0,1200]\n");
-
-  EngineState engine{};
-  engine.symbol = btcUsdtSymbol();
-  engine.orders.push_back(phase2OrderRecord(503, kRecordTypeMarket, kRecordSideBuy, kQty1, 1000, true));
-  engine.fills.push_back(phase2TakerFillRecord(503,
-                                               kRecordSideBuy,
-                                               10100000000ll,
-                                               40000000ll,
-                                               kQty1,
-                                               1000,
-                                               1000,
-                                               true));
-
-  ExecutionRepriceStats stats{};
-  const bool ok = repriceFillsWithDepth(dir, engine.symbol, 1000000ll, engine, stats);
-
-  return expect(ok, "phase2 reduce-only market burst repricer opens BBO/trades") &&
-         expect(engine.fills.size() == 1u, "phase2 reduce-only burst replaces original fill") &&
-         expect(engine.fills[0].qtyE8 == 40000000ll, "phase2 reduce-only burst preserves phase1 capped fill qty") &&
-         expect(engine.fills[0].orderQtyE8 == kQty1, "phase2 reduce-only burst preserves original order quantity") &&
-         expect(engine.fills[0].remainingQtyE8 == 60000000ll, "phase2 reduce-only burst keeps remaining against original order qty") &&
-         expect(engine.fills[0].reduceOnly, "phase2 reduce-only burst preserves reduce-only flag") &&
-         expect(engine.fills[0].priceE8 == 10500000000ll, "phase2 reduce-only burst reprices capped qty at last known sweep price");
 }
 
 bool testRateLimitRejectAddsRunWarningWithoutFailingRun() {
@@ -920,6 +884,263 @@ bool testOrderedCommandNewBeforeCancelKeepsReplacementLive() {
          expect(engine.orders[0].status == kRecordStatusCancelled, "ordered cancel removes original order") &&
          expect(visibleCount == 1u, "only replacement remains visible") &&
          expect(visible[0].clientIntentId.raw == 2u, "visible order is ordered replacement");
+}
+
+bool testTaggedAmendEqualLatencyPreservesCommandOrder() {
+  EngineState cancelThenNew{};
+  setTop(cancelThenNew, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> initial{
+      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
+  io.orderCount = initial.size();
+  (void)applyIntents(cancelThenNew, io, 1000ll, 0u, 0u);
+
+  auto cancelFirstCommands = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
+      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
+      cancelIntent(3u, 1u));
+  io.clear();
+  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(
+      cancelFirstCommands.data(), cancelFirstCommands.size());
+  io.commandCount = cancelFirstCommands.size();
+  io.hasCommandSequence = true;
+  const IntentApplyResult cancelFirstResult = applyIntents(cancelThenNew, io, 2000ll, 100u, 100u);
+
+  EngineState newThenCancel{};
+  setTop(newThenCancel, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  io.clear();
+  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
+  io.orderCount = initial.size();
+  (void)applyIntents(newThenCancel, io, 1000ll, 0u, 0u);
+  auto newFirstCommands = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendNewThenCancel,
+      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
+      cancelIntent(3u, 1u));
+  io.clear();
+  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(
+      newFirstCommands.data(), newFirstCommands.size());
+  io.commandCount = newFirstCommands.size();
+  io.hasCommandSequence = true;
+  const IntentApplyResult newFirstResult = applyIntents(newThenCancel, io, 2000ll, 100u, 100u);
+
+  return expect(cancelFirstResult.disposition == IntentApplyDisposition::Applied,
+                "cancel-then-new equal-latency amend is accepted") &&
+         expect(cancelThenNew.pending.size() == 2u,
+                "cancel-then-new schedules both effects without waiting for ack") &&
+         expect(cancelThenNew.pending.front().kind == PendingActionKind::CancelAck,
+                "cancel-then-new equal-latency tie exposes cancel first") &&
+         expect(newFirstResult.disposition == IntentApplyDisposition::Applied,
+                "new-then-cancel equal-latency amend is accepted") &&
+         expect(newThenCancel.pending.size() == 2u,
+                "new-then-cancel schedules both effects without waiting for ack") &&
+         expect(newThenCancel.pending.front().kind == PendingActionKind::OrderAck,
+                "new-then-cancel equal-latency tie exposes new first");
+}
+
+bool testTaggedCancelThenNewStopsWhenCancelSubmissionFails() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  auto commands = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
+      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
+      cancelIntent(3u, 999u));
+  hft_trader::core::StrategyIo io{};
+  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
+  io.commandCount = commands.size();
+  io.hasCommandSequence = true;
+
+  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 0u, 0u);
+
+  return expect(result.disposition == IntentApplyDisposition::RestoreStrategyState,
+                "failed cancel-then-new asks runtime to restore strategy state") &&
+         expect(engine.orders.size() == 1u, "failed cancel records only cancel attempt") &&
+         expect(engine.orders[0].action == kRecordActionCancel, "failed first amend step is cancel") &&
+         expect(engine.orders[0].status == kRecordStatusMissing, "missing cancel target is explicit") &&
+         expect(engine.pending.empty(), "failed cancel does not schedule replacement") &&
+         expect(!engine.open[0].state.valid, "failed cancel does not create replacement order");
+}
+
+bool testTaggedNewThenCancelStopsWhenNewSubmissionFails() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> initial{
+      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
+  io.orderCount = initial.size();
+  (void)applyIntents(engine, io, 1000ll, 0u, 0u);
+
+  hft_trader::core::RateLimitBucketConfig orders{};
+  orders.kind = hft_trader::core::RateLimitBucketKind::Orders;
+  orders.limit = 0;
+  orders.intervalNs = 1000000000ll;
+  orders.enabled = true;
+  engine.rateLimits.configureBucket(orders);
+  hft_trader::core::RateLimitActionConfig orderAction{};
+  orderAction.action = hft_trader::core::RateLimitActionKind::LimitOrder;
+  orderAction.costCount = 1u;
+  orderAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::Orders;
+  orderAction.costs[0].cost = 1;
+  engine.rateLimits.configureAction(orderAction);
+
+  auto commands = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendNewThenCancel,
+      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
+      cancelIntent(3u, 1u));
+  io.clear();
+  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
+  io.commandCount = commands.size();
+  io.hasCommandSequence = true;
+  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 0u, 0u);
+
+  return expect(result.disposition == IntentApplyDisposition::RestoreStrategyState,
+                "failed new-then-cancel asks runtime to restore strategy state") &&
+         expect(engine.orders.size() == 2u, "failed new records no cancel attempt") &&
+         expect(engine.orders[1].action == kRecordActionOrder, "failed first amend step is new") &&
+         expect(engine.orders[1].status == kRecordStatusRejected, "rate-limited new is rejected") &&
+         expect(engine.orders[0].status == kRecordStatusActive, "failed new leaves old order live");
+}
+
+bool testTaggedCancelThenNewRestoresAfterAcceptedCancelAndFailedNew() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> initial{
+      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
+  io.orderCount = initial.size();
+  (void)applyIntents(engine, io, 1000ll, 0u, 0u);
+
+  hft_trader::core::RateLimitBucketConfig orders{};
+  orders.kind = hft_trader::core::RateLimitBucketKind::Orders;
+  orders.limit = 0;
+  orders.intervalNs = 1000000000ll;
+  orders.enabled = true;
+  engine.rateLimits.configureBucket(orders);
+  hft_trader::core::RateLimitActionConfig orderAction{};
+  orderAction.action = hft_trader::core::RateLimitActionKind::LimitOrder;
+  orderAction.costCount = 1u;
+  orderAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::Orders;
+  orderAction.costs[0].cost = 1;
+  engine.rateLimits.configureAction(orderAction);
+
+  auto commands = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
+      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
+      cancelIntent(3u, 1u));
+  io.clear();
+  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
+  io.commandCount = commands.size();
+  io.hasCommandSequence = true;
+  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 0u, 0u);
+
+  return expect(result.disposition == IntentApplyDisposition::RestoreStrategyState,
+                "accepted cancel plus failed new requests strategy rollback") &&
+         expect(engine.orders.size() == 3u, "partial cancel-then-new records both attempts") &&
+         expect(engine.orders[0].status == kRecordStatusCancelled,
+                "already accepted cancel still reaches exchange") &&
+         expect(engine.orders[1].status == kRecordStatusAcked, "cancel command remains accepted") &&
+         expect(engine.orders[2].status == kRecordStatusRejected, "replacement new is rejected") &&
+         expect(!engine.open[0].state.valid, "failed replacement does not resurrect canceled order");
+}
+
+bool testTaggedNewThenCancelPreservesAcceptedNewWhenCancelFails() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> initial{
+      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
+  io.orderCount = initial.size();
+  (void)applyIntents(engine, io, 1000ll, 0u, 0u);
+
+  hft_trader::core::RateLimitBucketConfig cancels{};
+  cancels.kind = hft_trader::core::RateLimitBucketKind::CancelOrders;
+  cancels.limit = 0;
+  cancels.intervalNs = 1000000000ll;
+  cancels.enabled = true;
+  engine.rateLimits.configureBucket(cancels);
+  hft_trader::core::RateLimitActionConfig cancelAction{};
+  cancelAction.action = hft_trader::core::RateLimitActionKind::CancelOrder;
+  cancelAction.costCount = 1u;
+  cancelAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::CancelOrders;
+  cancelAction.costs[0].cost = 1;
+  engine.rateLimits.configureAction(cancelAction);
+
+  auto commands = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendNewThenCancel,
+      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
+      cancelIntent(3u, 1u));
+  io.clear();
+  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
+  io.commandCount = commands.size();
+  io.hasCommandSequence = true;
+  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 0u, 0u);
+  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
+  const std::size_t visibleCount = visibleOrders(engine, visible.data(), visible.size());
+
+  return expect(result.disposition == IntentApplyDisposition::PreserveAcceptedSequence,
+                "failed second step preserves accepted new-then-cancel sequence") &&
+         expect(engine.orders.size() == 3u, "partial new-then-cancel records new and failed cancel") &&
+         expect(engine.orders[1].status == kRecordStatusActive, "accepted replacement stays live") &&
+         expect(engine.orders[2].status == kRecordStatusRejected, "second-step cancel is rejected") &&
+         expect(visibleCount == 2u, "old and accepted replacement remain visible after cancel failure");
+}
+
+bool testTaggedCancelThenNewAllowsLatencyOverlap() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<hft_trader::core::OrderIntent, 1> initial{
+      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
+  hft_trader::core::StrategyIo io{};
+  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
+  io.orderCount = initial.size();
+  (void)applyIntents(engine, io, 1000ll, 0u, 0u);
+
+  auto commands = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
+      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
+      cancelIntent(3u, 1u));
+  io.clear();
+  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
+  io.commandCount = commands.size();
+  io.hasCommandSequence = true;
+  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 50u, 200u);
+  applyDueActions(engine, 52000ll);
+  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
+  const std::size_t visibleCount = visibleOrders(engine, visible.data(), visible.size());
+
+  return expect(result.disposition == IntentApplyDisposition::Applied,
+                "overlapping cancel-then-new amend is accepted") &&
+         expect(engine.orders[2].status == kRecordStatusActive,
+                "replacement activates before slower cancel effect") &&
+         expect(engine.orders[0].status == kRecordStatusActive,
+                "old order remains exchange-live until cancel effect") &&
+         expect(engine.open[0].state.cancelPending,
+                "old order remains cancel-pending during overlap") &&
+         expect(visibleCount == 2u, "strategy order book exposes both orders during overlap");
+}
+
+bool testMalformedTaggedAmendFailsClosed() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  auto commands = amendCommands(
+      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
+      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
+      cancelIntent(3u, 1u));
+  commands[1].sequenceStep = hft_trader::core::StrategyCommandSequenceStep::First;
+  hft_trader::core::StrategyIo io{};
+  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
+  io.commandCount = commands.size();
+  io.hasCommandSequence = true;
+
+  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 0u, 0u);
+
+  return expect(result.disposition == IntentApplyDisposition::RestoreStrategyState,
+                "malformed amend requests strategy rollback") &&
+         expect(engine.orders.empty(), "malformed amend emits no partial command") &&
+         expect(engine.pending.empty(), "malformed amend schedules no exchange effect");
 }
 
 bool testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() {
@@ -1356,7 +1577,7 @@ bool testLazyExecutionDepthProviderMarketBuyConsumesLegacyDepth() {
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
-  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
   std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(172, Side::Buy())};
@@ -1372,6 +1593,43 @@ bool testLazyExecutionDepthProviderMarketBuyConsumesLegacyDepth() {
          expect(engine.fills[1].priceE8 == 10200000000ll, "lazy execution depth walks second ask level") &&
          expect(engine.fills[0].chunkCount == 2u, "lazy execution depth carries chunk count") &&
          expect(engine.fills[0].executionAvgPriceE8 == 10160000000ll, "lazy execution depth carries execution avg");
+}
+
+bool testDeclaredMissingExecutionDepthReportsFallbackStatus() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_execution_depth_missing_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json",
+            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
+
+  EngineState engine{};
+  engine.symbol.copyFrom("BTC_USDT");
+  hft_trader::core::LocalOrderBookConfig config{};
+  config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+  ExecutionDepthProvider provider{};
+  const ExecutionDepthOpenStatus status = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+
+  return expect(status == ExecutionDepthOpenStatus::Failed,
+                "declared missing execution depth requests BBO fallback") &&
+         expect(provider.failed(), "declared missing execution depth records failure") &&
+         expect(std::string_view{provider.failureReason()} == "declared_files_missing",
+                "declared missing execution depth exposes structured reason");
+}
+
+bool testUndeclaredExecutionDepthUsesPlainBboMode() {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                    ("hft_backtest_execution_no_depth_" + std::to_string(std::rand()));
+  writeText(dir / "manifest.json", "{\"channels\":{}}\n");
+
+  EngineState engine{};
+  engine.symbol.copyFrom("BTC_USDT");
+  hft_trader::core::LocalOrderBookConfig config{};
+  config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
+  ExecutionDepthProvider provider{};
+  const ExecutionDepthOpenStatus status = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+
+  return expect(status == ExecutionDepthOpenStatus::Absent,
+                "undeclared execution depth keeps normal BBO execution") &&
+         expect(!provider.failed(), "undeclared execution depth is not a warning-worthy failure");
 }
 
 bool testLazyExecutionDepthProviderMarketBuyConsumesTapeDepth() {
@@ -1393,7 +1651,7 @@ bool testLazyExecutionDepthProviderMarketBuyConsumesTapeDepth() {
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
-  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
   std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(174, Side::Buy())};
@@ -1430,7 +1688,7 @@ bool testStaleLazyExecutionDepthMarketBuyFallsBackToBbo() {
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
-  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
   std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(175, Side::Buy())};
@@ -1461,7 +1719,7 @@ bool testFreshLazyExecutionDepthMarketBuyMayUseSlightlyOlderDepth() {
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
-  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
   std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(176, Side::Buy())};
@@ -1492,7 +1750,7 @@ bool testStaleLazyExecutionDepthMarketSellFallsBackToBboBid() {
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
-  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
   std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(177, Side::Sell())};
@@ -1524,7 +1782,7 @@ bool testLazyExecutionDepthProviderDoesNotAdvanceWithoutExecutionCandidate() {
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
-  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
   tryFillOnTop(engine, 2000);
@@ -1548,7 +1806,7 @@ bool testLazyExecutionDepthProviderInitializesPassiveQueueAtActivation() {
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
-  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
   std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(146, Side::Buy(), 9900000000ll)};
@@ -2246,7 +2504,7 @@ bool testForceCloseOpenLongPositionUsesLazyExecutionDepth() {
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
-  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
+  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
   const bool closed = forceClosePosition(engine, 2000, 0);
@@ -2589,6 +2847,11 @@ bool testWriterCreatesV2RunDirectory() {
   result.initialBalanceE8 = 100000000000ll;
   result.walletBalanceE8 = 100100000000ll;
   result.totalPnlE8 = 100000000ll;
+  result.depthExecution.mode = hft_backtest::BacktestDepthExecutionMode::BboFallback;
+  result.depthExecution.bboFallbackFills = 2u;
+  result.depthExecution.firstBboFallbackTsNs = 150;
+  result.performance.loadNs = 11u;
+  result.performance.replayNs = 22u;
   result.warnings.push_back("partial depth replay: dropped 1 unpaired depth_tape rows; exact replay lost");
   result.liveProbe.configured = true;
   result.liveProbe.enabled = true;
@@ -2662,6 +2925,12 @@ bool testWriterCreatesV2RunDirectory() {
   return expect(status == hft_backtest::Status::Ok, "v2 writer reports ok") &&
          expect(std::filesystem::is_directory(dir), "result path is a directory") &&
          expect(manifest.find("\"type\": \"run.result.v2\"") != std::string::npos, "manifest declares v2 result") &&
+         expect(manifest.find("\"pipeline\": \"inline\"") != std::string::npos, "manifest declares inline execution pipeline") &&
+         expect(manifest.find("\"depth_execution\": {") != std::string::npos, "manifest declares depth execution telemetry") &&
+         expect(manifest.find("\"mode\": \"bbo_fallback\"") != std::string::npos, "manifest records BBO fallback mode") &&
+         expect(manifest.find("\"bbo_fallback_fills\": 2") != std::string::npos, "manifest records BBO fallback fills") &&
+         expect(manifest.find("\"performance\": {") != std::string::npos, "manifest declares stage timings") &&
+         expect(manifest.find("\"load_ns\": 11") != std::string::npos, "manifest records load timing") &&
          expect(manifest.find("\"orders\": 3") != std::string::npos, "manifest summary includes order count") &&
          expect(manifest.find("\"order_lifetimes\": {") != std::string::npos, "manifest declares order lifetimes stream") &&
          expect(manifest.find("leg_index,order_type") != std::string::npos, "manifest declares order lifetime type") &&
@@ -3112,22 +3381,26 @@ int main() {
   ok = testBacktestRateLimitScheduleCanDisablePresets() && ok;
   ok = testWarmupOrderIsServiceHiddenAndMarksHot() && ok;
   ok = testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() && ok;
+  ok = testBacktestTradabilityFilterDropsWholeAmendAndRestoresState() && ok;
+  ok = testBacktestFailedLaterAmendCleansEarlierAcceptedReplacement() && ok;
   ok = testBacktestFeeScheduleOverridesExchangePreset() && ok;
   ok = testBacktestGlobalFeeOverrideFillsPresetSides() && ok;
   ok = testRateLimitDecisionAllowsAfterReset() && ok;
   ok = testStaleCancelDoesNotCancelReusedSlot() && ok;
   ok = testRateLimitRejectsOrderButAllowsSeparateCancelBucket() && ok;
   ok = testRepeatedRateLimitRejectsShareCooldownWindow() && ok;
-  ok = testRepriceFillFromBookAnnotatesDepthMetadataWithoutChangingCausality() && ok;
-  ok = testRepriceRebuildAccountingUsesRepricedFillPrices() && ok;
-  ok = testPhase2MarketBurstFillsResidualAtLastKnownTradePrice() && ok;
-  ok = testPhase2StopMarketBurstUsesTriggerTimestamp() && ok;
-  ok = testPhase2ReduceOnlyMarketBurstPreservesPhase1FilledQtyCap() && ok;
   ok = testRateLimitRejectAddsRunWarningWithoutFailingRun() && ok;
   ok = testPendingDrainActivatesLateOrder() && ok;
   ok = testCancelThenReplacementLimitMaterializesReplace() && ok;
   ok = testCancelAckPublishesCanceledUserEventWithCumulativeFill() && ok;
   ok = testOrderedCommandNewBeforeCancelKeepsReplacementLive() && ok;
+  ok = testTaggedAmendEqualLatencyPreservesCommandOrder() && ok;
+  ok = testTaggedCancelThenNewStopsWhenCancelSubmissionFails() && ok;
+  ok = testTaggedNewThenCancelStopsWhenNewSubmissionFails() && ok;
+  ok = testTaggedCancelThenNewRestoresAfterAcceptedCancelAndFailedNew() && ok;
+  ok = testTaggedNewThenCancelPreservesAcceptedNewWhenCancelFails() && ok;
+  ok = testTaggedCancelThenNewAllowsLatencyOverlap() && ok;
+  ok = testMalformedTaggedAmendFailsClosed() && ok;
   ok = testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() && ok;
   ok = testLatencyRuntimeSplitsMarketAndLimitOrderActivation() && ok;
   ok = testLatencyRuntimeTreatsStopMarketAsMarketOrderActivation() && ok;
@@ -3154,6 +3427,8 @@ int main() {
   ok = testLimitBuyBelowBboAskIgnoresStaleDepthAsk() && ok;
   ok = testCrossingLimitBuyOverlaysBboBeforeWalkingVisibleDepth() && ok;
   ok = testLazyExecutionDepthProviderMarketBuyConsumesLegacyDepth() && ok;
+  ok = testDeclaredMissingExecutionDepthReportsFallbackStatus() && ok;
+  ok = testUndeclaredExecutionDepthUsesPlainBboMode() && ok;
   ok = testLazyExecutionDepthProviderMarketBuyConsumesTapeDepth() && ok;
   ok = testStaleLazyExecutionDepthMarketBuyFallsBackToBbo() && ok;
   ok = testFreshLazyExecutionDepthMarketBuyMayUseSlightlyOlderDepth() && ok;

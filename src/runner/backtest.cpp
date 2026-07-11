@@ -3,7 +3,6 @@
 #include "engine/backtest_engine.hpp"
 #include "engine/backtest_engine_setup.hpp"
 #include "execution/backtest_execution_depth.hpp"
-#include "execution/backtest_execution_reprice.hpp"
 #include "accounting/backtest_result_aggregation.hpp"
 #include "config/backtest_run_config.hpp"
 #include "strategy/backtest_strategy_warmup.hpp"
@@ -38,6 +37,12 @@ namespace {
 
 using hft_trader::runtime::StrategyDescriptor;
 using hft_trader::runtime::StrategyParamStorage;
+
+std::uint64_t elapsedNs(std::chrono::steady_clock::time_point start) noexcept {
+  const auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now() - start).count();
+  return value > 0 ? static_cast<std::uint64_t>(value) : 0u;
+}
 
 BacktestLiveProbeSummary summarizeLiveProbeConfig(const hft_trader::runtime::HftRuntimeConfig& cfg) noexcept {
   BacktestLiveProbeSummary summary{};
@@ -161,6 +166,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
                               BacktestProgressCallback progressCallback,
                               void* userData) noexcept {
   BacktestRunResult result{};
+  const auto totalStart = std::chrono::steady_clock::now();
+  auto markTotalTime = [&]() noexcept { result.performance.totalNs = elapsedNs(totalStart); };
   result.runId = request.runId.empty() ? makeRunId() : request.runId;
   result.requestId = request.requestId.empty() ? result.runId : request.requestId;
   result.sessionPath = request.sessionPath;
@@ -195,6 +202,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   };
   auto writeArtifacts = [&](const detail::EngineState& engine) noexcept -> Status {
     refreshArtifactCounters(engine);
+    markTotalTime();
     if (!request.writeArtifacts) return Status::Ok;
     return detail::writeResult(result, engine);
   };
@@ -284,9 +292,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)writeEmptyArtifacts();
     return result;
   }
-  (void)request.executionPipeline;
-
   detail::PreparedBacktestInput* preparedInput = detail::activePreparedBacktestInput();
+  const auto loadStart = std::chrono::steady_clock::now();
   const bool usePreparedSessions = preparedInput != nullptr &&
                                    preparedMatches(*preparedInput, request, hasExplicitSessions, loadPlan);
   std::vector<detail::SessionData> loadedSessions{};
@@ -318,6 +325,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
   }
   if (sessionsView != nullptr) appendSessionWarnings(result, *sessionsView);
+  result.performance.loadNs = elapsedNs(loadStart);
   if (!isOk(result.status)) {
     result.error = error;
     (void)writeEmptyArtifacts();
@@ -504,14 +512,22 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (hasExplicitSessions) {
       for (std::size_t leg = 0; leg < sessions.size() && leg < legEngines.size(); ++leg) {
         legEngines[leg].venueOrderBookExecutionEnabled = !sessions[leg].depths.empty();
+        if (legEngines[leg].venueOrderBookExecutionEnabled) {
+          legEngines[leg].depthExecutionMode = BacktestDepthExecutionMode::Depth;
+        }
       }
       if (!legEngines.empty()) engine = legEngines[0];
     } else {
       engine.venueOrderBookExecutionEnabled = !session.depths.empty();
+      if (engine.venueOrderBookExecutionEnabled) engine.depthExecutionMode = BacktestDepthExecutionMode::Depth;
     }
   }
 
   std::vector<std::unique_ptr<detail::ExecutionDepthProvider>> executionDepthProviders{};
+  auto depthCacheForLeg = [&](std::size_t leg) -> std::shared_ptr<detail::ExecutionDepthCheckpointCache> {
+    if (preparedInput == nullptr || leg >= preparedInput->depthCaches.size()) return {};
+    return preparedInput->depthCaches[leg];
+  };
   if (!loadPlan.loadDepths) {
     if (hasExplicitSessions) {
       executionDepthProviders.reserve(legEngines.size());
@@ -522,9 +538,19 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
         Symbol legSymbol{};
         legSymbol.copyFrom(sessions[leg].symbol.c_str());
         auto provider = std::make_unique<detail::ExecutionDepthProvider>();
-        if (provider->open(sessions[leg].sessionPath, legSymbol, bookConfig, legEngines[leg].venueOrderBook)) {
+        const detail::ExecutionDepthOpenStatus depthStatus =
+            provider->open(sessions[leg].sessionPath,
+                           legSymbol,
+                           bookConfig,
+                           legEngines[leg].venueOrderBook,
+                           depthCacheForLeg(leg));
+        if (depthStatus == detail::ExecutionDepthOpenStatus::Ready) {
           legEngines[leg].executionDepthProvider = provider.get();
+          legEngines[leg].depthExecutionMode = BacktestDepthExecutionMode::Depth;
           executionDepthProviders.push_back(std::move(provider));
+        } else if (depthStatus == detail::ExecutionDepthOpenStatus::Failed) {
+          legEngines[leg].depthExecutionMode = BacktestDepthExecutionMode::BboFallback;
+          legEngines[leg].depthFallbackReason = provider->failureReason();
         }
       }
       if (!legEngines.empty()) engine = legEngines[0];
@@ -533,9 +559,19 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
       bookConfig.tickSizeRaw = instrument.tickSizeRaw;
       auto provider = std::make_unique<detail::ExecutionDepthProvider>();
-      if (provider->open(session.sessionPath, selectedSymbol, bookConfig, engine.venueOrderBook)) {
+      const detail::ExecutionDepthOpenStatus depthStatus =
+          provider->open(session.sessionPath,
+                         selectedSymbol,
+                         bookConfig,
+                         engine.venueOrderBook,
+                         depthCacheForLeg(0u));
+      if (depthStatus == detail::ExecutionDepthOpenStatus::Ready) {
         engine.executionDepthProvider = provider.get();
+        engine.depthExecutionMode = BacktestDepthExecutionMode::Depth;
         executionDepthProviders.push_back(std::move(provider));
+      } else if (depthStatus == detail::ExecutionDepthOpenStatus::Failed) {
+        engine.depthExecutionMode = BacktestDepthExecutionMode::BboFallback;
+        engine.depthFallbackReason = provider->failureReason();
       }
     }
   }
@@ -548,6 +584,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   control.shardId = shard.shardId;
 
   std::vector<detail::TimelineEvent> loadedTimeline;
+  const auto timelineStart = std::chrono::steady_clock::now();
   const std::vector<detail::TimelineEvent>* timelineView = nullptr;
   if (usePreparedSessions && preparedInput != nullptr && preparedInput->timelineValid) {
     timelineView = &preparedInput->timeline;
@@ -562,38 +599,42 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     timelineView = &loadedTimeline;
   }
   const std::vector<detail::TimelineEvent>& timeline = *timelineView;
-  std::vector<detail::TimelineEvent> loadedDeliveryTimeline;
-  const std::vector<detail::TimelineEvent>* deliveryTimelineView = nullptr;
-  if (!hasMarketDataLatency(effectiveRequest, latencyConfig)) {
-    deliveryTimelineView = &timeline;
-  } else {
-    loadedDeliveryTimeline.clear();
-    loadedDeliveryTimeline.reserve(timeline.size());
-    for (const detail::TimelineEvent& rawEvent : timeline) {
-      loadedDeliveryTimeline.push_back(rawEvent);
-    }
-    for (detail::TimelineEvent& event : loadedDeliveryTimeline) {
-      if (hasExplicitSessions && event.legIndex < legEngines.size()) {
-        event.deliveryTsNs = detail::delayedTs(
-            event.tsNs,
-            detail::sampleLatencyUs(legEngines[event.legIndex].latency, detail::BacktestLatencyChannel::MarketData));
-      } else {
-        event.deliveryTsNs = detail::delayedTs(
-            event.tsNs,
-            detail::sampleLatencyUs(engine.latency, detail::BacktestLatencyChannel::MarketData));
-      }
+  result.performance.timelineNs = elapsedNs(timelineStart);
+  const auto deliveryStart = std::chrono::steady_clock::now();
+  struct DeliveryEventRef {
+    std::int64_t deliveryTsNs{0};
+    std::size_t rawIndex{0u};
+  };
+  const bool directDeliveryTimeline = !hasMarketDataLatency(effectiveRequest, latencyConfig);
+  std::vector<DeliveryEventRef> deliveryRefs{};
+  if (!directDeliveryTimeline) {
+    deliveryRefs.reserve(timeline.size());
+    for (std::size_t rawIndex = 0u; rawIndex < timeline.size(); ++rawIndex) {
+      const detail::TimelineEvent& event = timeline[rawIndex];
+      const std::uint64_t latencyUs = hasExplicitSessions && event.legIndex < legEngines.size()
+          ? detail::sampleLatencyUs(legEngines[event.legIndex].latency, detail::BacktestLatencyChannel::MarketData)
+          : detail::sampleLatencyUs(engine.latency, detail::BacktestLatencyChannel::MarketData);
+      deliveryRefs.push_back(DeliveryEventRef{detail::delayedTs(event.tsNs, latencyUs), rawIndex});
     }
     if (!marketDataLatencyKeepsOrder(effectiveRequest, latencyConfig)) {
-      std::stable_sort(loadedDeliveryTimeline.begin(), loadedDeliveryTimeline.end(), [](const detail::TimelineEvent& lhs, const detail::TimelineEvent& rhs) noexcept {
+      std::stable_sort(deliveryRefs.begin(), deliveryRefs.end(), [&](const DeliveryEventRef& lhs, const DeliveryEventRef& rhs) noexcept {
         if (lhs.deliveryTsNs != rhs.deliveryTsNs) return lhs.deliveryTsNs < rhs.deliveryTsNs;
-        if (lhs.tsNs != rhs.tsNs) return lhs.tsNs < rhs.tsNs;
-        if (lhs.ingestSeq != rhs.ingestSeq) return lhs.ingestSeq < rhs.ingestSeq;
-        return lhs.kind < rhs.kind;
+        const detail::TimelineEvent& lhsRaw = timeline[lhs.rawIndex];
+        const detail::TimelineEvent& rhsRaw = timeline[rhs.rawIndex];
+        if (lhsRaw.tsNs != rhsRaw.tsNs) return lhsRaw.tsNs < rhsRaw.tsNs;
+        if (lhsRaw.ingestSeq != rhsRaw.ingestSeq) return lhsRaw.ingestSeq < rhsRaw.ingestSeq;
+        return lhsRaw.kind < rhsRaw.kind;
       });
     }
-    deliveryTimelineView = &loadedDeliveryTimeline;
   }
-  const std::vector<detail::TimelineEvent>& deliveryTimeline = *deliveryTimelineView;
+  const std::size_t deliveryEventCount = directDeliveryTimeline ? timeline.size() : deliveryRefs.size();
+  auto deliveryEventAt = [&](std::size_t index) noexcept {
+    if (directDeliveryTimeline) return timeline[index];
+    detail::TimelineEvent out = timeline[deliveryRefs[index].rawIndex];
+    out.deliveryTsNs = deliveryRefs[index].deliveryTsNs;
+    return out;
+  };
+  result.performance.deliveryNs = elapsedNs(deliveryStart);
   result.trades = 0;
   result.bookTickers = 0;
   result.priceLimits = 0;
@@ -622,13 +663,28 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.events = timeline.size();
   const bool captureIndicatorTrace = !result.indicatorProfile.empty();
   const bool captureRangeTrace = emitsPriceRangeTrace(*descriptor);
-  const bool captureSpreadRows = request.captureStrategySpread && emitsArbSpreadTrace(*descriptor);
+  const bool captureSpreadDiagnostics = emitsArbSpreadTrace(*descriptor);
+  const bool captureSpreadRows = request.captureStrategySpread && captureSpreadDiagnostics;
+  const std::uint64_t replayDurationNs = result.lastTsNs > result.firstTsNs && result.firstTsNs >= 0
+      ? static_cast<std::uint64_t>(result.lastTsNs) - static_cast<std::uint64_t>(result.firstTsNs)
+      : 0u;
   if (hasExplicitSessions) {
-    for (detail::EngineState& legEngine : legEngines) {
-      reserveEngineStorage(legEngine, timeline.size(), captureIndicatorTrace, captureRangeTrace, captureSpreadRows);
+    for (std::size_t leg = 0u; leg < legEngines.size(); ++leg) {
+      const bool traceOwner = leg == 0u;
+      reserveEngineStorage(legEngines[leg],
+                           timeline.size(),
+                           replayDurationNs,
+                           traceOwner && captureIndicatorTrace,
+                           traceOwner && captureRangeTrace,
+                           traceOwner && captureSpreadDiagnostics);
     }
   } else {
-    reserveEngineStorage(engine, timeline.size(), captureIndicatorTrace, captureRangeTrace, captureSpreadRows);
+    reserveEngineStorage(engine,
+                         timeline.size(),
+                         replayDurationNs,
+                         captureIndicatorTrace,
+                         captureRangeTrace,
+                         captureSpreadDiagnostics);
   }
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
@@ -652,6 +708,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   hft_trader::runtime::PortfolioRiskRuntimeState traderRiskState =
       hft_trader::runtime::makePortfolioRiskRuntimeState(cfg.risk, riskAccounts.data(), riskAccountCount, riskVenues.data());
   auto writeCurrentArtifacts = [&]() noexcept -> Status {
+    markTotalTime();
     if (hasExplicitSessions) {
       const std::int64_t tsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
       try {
@@ -660,6 +717,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       }
       populatePortfolioResultPnl(result, sessions, legEngines, portfolioInitialBalance);
       appendRateLimitWarnings(result, engine, &legEngines);
+      appendDepthExecutionWarnings(result, engine, &legEngines);
       result.rateLimitRejectedCommands = rateLimitRejectedCommands(engine, &legEngines);
       try {
         auto aggregate = std::make_unique<detail::EngineState>();
@@ -676,6 +734,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
     populateResultPnl(result, engine);
     appendRateLimitWarnings(result, engine);
+    appendDepthExecutionWarnings(result, engine);
     result.rateLimitRejectedCommands = rateLimitRejectedCommands(engine);
     result.orders = engine.orders.size();
     result.fills = engine.fills.size();
@@ -773,6 +832,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     return reportProgress(done, total, "running", progressCallback, userData);
   };
 
+  const auto replayStart = std::chrono::steady_clock::now();
   if (!reportReplayProgress(0, timeline.size())) {
     result.status = Status::Cancelled;
     result.error = "cancelled";
@@ -813,7 +873,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   std::size_t i = 0u;
   while (i < timeline.size()) {
     if (i + 1u < timeline.size()) prefetchRead(&timeline[i + 1u]);
-    if (deliveryCursor < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor]);
+    if (!directDeliveryTimeline && deliveryCursor < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor]);
     const std::int64_t eventTsNs = timeline[i].tsNs;
     // Same-timestamp venue updates win the tie: orders due at raw ts activate after the raw BBO is applied.
     const bool beforeOk = hasExplicitSessions
@@ -830,9 +890,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       replayStopped = true;
       break;
     }
-    while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs < eventTsNs) {
-      if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
-      const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
+    while (deliveryCursor < deliveryEventCount && deliveryEventAt(deliveryCursor).deliveryTsNs < eventTsNs) {
+      if (!directDeliveryTimeline && deliveryCursor + 1u < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor + 1u]);
+      const detail::TimelineEvent delivered = deliveryEventAt(deliveryCursor++);
       if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, delivered, legSymbols, legInstruments, true);
       else applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
       const bool deliveredOk = hasExplicitSessions
@@ -886,9 +946,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       }
     }
     if (replayStopped) break;
-    while (deliveryCursor < deliveryTimeline.size() && deliveryTimeline[deliveryCursor].deliveryTsNs <= eventTsNs) {
-      if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
-      const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
+    while (deliveryCursor < deliveryEventCount && deliveryEventAt(deliveryCursor).deliveryTsNs <= eventTsNs) {
+      if (!directDeliveryTimeline && deliveryCursor + 1u < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor + 1u]);
+      const detail::TimelineEvent delivered = deliveryEventAt(deliveryCursor++);
       if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, delivered, legSymbols, legInstruments, true);
       else applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
       const bool deliveredOk = hasExplicitSessions
@@ -937,9 +997,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       return result;
     }
   }
-  while (!replayStopped && deliveryCursor < deliveryTimeline.size()) {
-    if (deliveryCursor + 1u < deliveryTimeline.size()) prefetchRead(&deliveryTimeline[deliveryCursor + 1u]);
-    const detail::TimelineEvent& delivered = deliveryTimeline[deliveryCursor++];
+  while (!replayStopped && deliveryCursor < deliveryEventCount) {
+    if (!directDeliveryTimeline && deliveryCursor + 1u < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor + 1u]);
+    const detail::TimelineEvent delivered = deliveryEventAt(deliveryCursor++);
     const bool beforeDelayedOk = hasExplicitSessions
         ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, delivered.deliveryTsNs, request)
         : runUntil(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, delivered.deliveryTsNs, request);
@@ -992,9 +1052,16 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     const std::int64_t stopCheckTsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
     (void)(tripHardLiquidation(stopCheckTsNs) || tripTraderRiskStop(stopCheckTsNs, true));
   }
+  result.performance.replayNs = elapsedNs(replayStart);
+  const auto finalizeStart = std::chrono::steady_clock::now();
   const std::int64_t finalTsNs = result.lastTsNs > 0 ? result.lastTsNs + 1 : result.lastTsNs;
   if (hasExplicitSessions) {
+    if (!legEngines.empty()) {
+      calculateExecutionQualityDeadlines(
+          legEngines[0], sessions.data(), legInstruments.data(), legInstruments.size());
+    }
     for (detail::EngineState& legEngine : legEngines) {
+      finalizeExecutionQuality(legEngine);
       detail::appendRateLimitUsageSnapshot(legEngine, finalTsNs);
       detail::appendEquityPoint(legEngine, finalTsNs);
       detail::appendRiskSnapshot(legEngine, finalTsNs, detail::kRiskSnapshotReasonFinal);
@@ -1011,6 +1078,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       return result;
     }
   } else {
+    calculateExecutionQualityDeadlines(engine, &session, &instrument, 1u);
+    finalizeExecutionQuality(engine);
     detail::appendRateLimitUsageSnapshot(engine, finalTsNs);
     detail::appendEquityPoint(engine, finalTsNs);
     detail::appendRiskSnapshot(engine, finalTsNs, detail::kRiskSnapshotReasonFinal);
@@ -1019,7 +1088,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.fills = engine.fills.size();
   }
   appendRateLimitWarnings(result, engine, hasExplicitSessions ? &legEngines : nullptr);
+  appendDepthExecutionWarnings(result, engine, hasExplicitSessions ? &legEngines : nullptr);
   result.rateLimitRejectedCommands = rateLimitRejectedCommands(engine, hasExplicitSessions ? &legEngines : nullptr);
+  result.performance.finalizeNs = elapsedNs(finalizeStart);
+  markTotalTime();
   if (legLiquidationProblem) {
     result.status = Status::Ok;
     result.warnings.push_back(result.error.empty() ? std::string{"leg liquidated"} : result.error);

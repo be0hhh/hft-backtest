@@ -117,6 +117,11 @@ void storePreparedSessions(detail::PreparedBacktestInput& prepared,
   prepared.sessionPaths = sessionPathsFor(request, hasExplicitSessions);
   prepared.sessions = std::move(sessions);
   prepared.timeline.clear();
+  prepared.depthCaches.clear();
+  prepared.depthCaches.reserve(prepared.sessions.size());
+  for (std::size_t i = 0u; i < prepared.sessions.size(); ++i) {
+    prepared.depthCaches.push_back(detail::makeExecutionDepthCheckpointCache());
+  }
 }
 
 void appendSessionWarnings(BacktestRunResult& result, const std::vector<detail::SessionData>& sessions) {

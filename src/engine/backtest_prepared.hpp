@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/backtest_engine.hpp"
+#include "execution/backtest_execution_depth.hpp"
 
 #include <filesystem>
 #include <vector>
@@ -15,6 +16,7 @@ struct PreparedBacktestInput {
   std::vector<std::filesystem::path> sessionPaths{};
   std::vector<SessionData> sessions{};
   std::vector<TimelineEvent> timeline{};
+  std::vector<std::shared_ptr<ExecutionDepthCheckpointCache>> depthCaches{};
 };
 
 class PreparedBacktestScope {

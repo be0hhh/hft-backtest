@@ -271,6 +271,48 @@ struct JsonStrategySpreadDiagnostics {
              hft_trader::core::kStrategyDecisionKindCount> decisionCounts{};
 };
 
+struct JsonExecutionQualityLeg {
+  std::uint64_t clientIntentId{0u};
+  std::uint32_t legIndex{0u};
+  std::uint8_t sideRaw{0u};
+  std::int64_t expectedQtyE8{0};
+  std::int64_t filledQtyE8{0};
+  std::int64_t decisionPriceE8{0};
+  std::int64_t fillVwapE8{0};
+  std::int64_t firstFillTsNs{0};
+  std::int64_t lastFillTsNs{0};
+};
+
+struct JsonExecutionQualityAction {
+  std::uint64_t actionId{0u};
+  std::uint64_t positionCycleId{0u};
+  std::uint64_t transactionId{0u};
+  std::uint64_t pairKey{0u};
+  std::int64_t decisionTsNs{0};
+  std::int64_t completedTsNs{0};
+  std::int64_t decisionEdgeAfterCostBpsE8{0};
+  std::int64_t fillEdgeAfterCostBpsE8{0};
+  std::int64_t edgeLossBpsE8{0};
+  std::int64_t requiredEdgeBpsE8{0};
+  std::int64_t fairBpsE8{0};
+  std::int64_t costBandBpsE8{0};
+  std::int64_t quoteDecisionEdgeAfterCostBpsE8{0};
+  std::int64_t decisionToFirstFillNs{0};
+  std::int64_t decisionToLastFillNs{0};
+  std::int64_t fillLegSkewNs{0};
+  std::int64_t thresholdDeadlineNs{-1};
+  std::int64_t zeroEdgeDeadlineNs{-1};
+  JsonExecutionQualityLeg legs[2]{};
+  std::uint32_t pairIndex{0u};
+  std::uint32_t pairSlot{0u};
+  std::uint8_t phaseRaw{0u};
+  std::uint8_t anchorRaw{0u};
+  std::uint8_t statusRaw{0u};
+  std::uint8_t directionRaw{0u};
+  std::uint8_t bandSideRaw{0u};
+  std::uint8_t legCount{0u};
+};
+
 struct JsonRateLimitUsagePoint {
   std::uint32_t legIndex{0u};
   std::int64_t tsNs{0};
@@ -312,8 +354,23 @@ struct PendingAction {
   std::size_t slotIndex{kNoRecordIndex};
   std::size_t recordIndex{kNoRecordIndex};
   std::int64_t activeTsNs{0};
+  std::uint64_t submitSequence{0u};
   Id targetClientIntentId{};
   Id commandClientIntentId{};
+};
+
+enum class IntentApplyDisposition : std::uint8_t {
+  Applied = 0,
+  RestoreStrategyState = 1,
+  PreserveAcceptedSequence = 2,
+};
+
+struct IntentApplyResult {
+  IntentApplyDisposition disposition{IntentApplyDisposition::Applied};
+
+  [[nodiscard]] bool shouldRestoreStrategyState() const noexcept {
+    return disposition == IntentApplyDisposition::RestoreStrategyState;
+  }
 };
 
 struct EngineState {
@@ -325,6 +382,7 @@ struct EngineState {
   std::vector<JsonStrategyRangePoint> strategyRange{};
   std::vector<JsonStrategySpreadPoint> strategySpread{};
   JsonStrategySpreadDiagnostics strategySpreadDiagnostics{};
+  std::vector<JsonExecutionQualityAction> executionQuality{};
   std::vector<JsonRateLimitUsagePoint> rateLimitUsage{};
   std::string strategyIndicatorProfile{};
   std::string strategyIndicatorTitle{};
@@ -332,6 +390,7 @@ struct EngineState {
   std::string strategyIndicatorAuxLabel{};
   std::string strategyIndicatorUnit{};
   std::vector<PendingAction> pending{};
+  std::uint64_t nextPendingSubmitSequence{1u};
   std::array<OpenOrder, kMaxOrderStates> open{};
   hft_trader::core::StrategyPositionState position{};
   hft_trader::core::StrategyMarketSnapshot snapshot{};
@@ -344,6 +403,10 @@ struct EngineState {
   std::vector<AggressiveFillPlan> topExecutionFillPlanScratch{};
   ExecutionDepthProvider* executionDepthProvider{nullptr};
   bool venueOrderBookExecutionEnabled{false};
+  BacktestDepthExecutionMode depthExecutionMode{BacktestDepthExecutionMode::BboNoDepth};
+  std::uint64_t depthFallbackFills{0};
+  std::int64_t firstDepthFallbackTsNs{0};
+  std::string depthFallbackReason{};
   hft_trader::core::BboReconstructionState bboReconstruction{};
   hft_trader::core::BboReconstructionState venueBboReconstruction{};
   std::uint64_t contextRevision{1u};
@@ -486,20 +549,20 @@ bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t or
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency);
 void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, std::uint64_t cancelLatencyUs);
 void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency);
-void applyIntents(EngineState& engine,
-                  const hft_trader::core::StrategyIo& io,
-                  std::int64_t tsNs,
-                  std::uint64_t orderLatencyUs,
-                  std::uint64_t cancelLatencyUs);
-void applyIntents(EngineState& engine,
-                  const hft_trader::core::StrategyIo& io,
-                  std::int64_t tsNs,
-                  BacktestLatencyRuntime& latency);
+IntentApplyResult applyIntents(EngineState& engine,
+                               const hft_trader::core::StrategyIo& io,
+                               std::int64_t tsNs,
+                               std::uint64_t orderLatencyUs,
+                               std::uint64_t cancelLatencyUs);
+IntentApplyResult applyIntents(EngineState& engine,
+                               const hft_trader::core::StrategyIo& io,
+                               std::int64_t tsNs,
+                               BacktestLatencyRuntime& latency);
 void appendRateLimitUsageSnapshot(EngineState& engine, std::int64_t tsNs);
 
 void buildTimeline(const SessionData& session, std::vector<TimelineEvent>& out);
 void buildTimeline(const std::vector<SessionData>& sessions, std::vector<TimelineEvent>& out);
-Status writeResult(const BacktestRunResult& result,
+Status writeResult(BacktestRunResult& result,
                    const EngineState& engine,
                    const std::vector<EngineState>* legEngines = nullptr) noexcept;
 

@@ -17,6 +17,30 @@ struct BacktestLatencyProfile {
   std::uint64_t jitterUs{0};
 };
 
+enum class BacktestDepthExecutionMode : std::uint8_t {
+  BboNoDepth = 0,
+  Depth = 1,
+  BboFallback = 2,
+};
+
+struct BacktestDepthExecutionSummary {
+  BacktestDepthExecutionMode mode{BacktestDepthExecutionMode::BboNoDepth};
+  std::uint64_t rowsRead{0};
+  std::uint64_t bboFallbackFills{0};
+  std::int64_t firstBboFallbackTsNs{0};
+  std::uint64_t readNs{0};
+};
+
+struct BacktestStageTimings {
+  std::uint64_t loadNs{0};
+  std::uint64_t timelineNs{0};
+  std::uint64_t deliveryNs{0};
+  std::uint64_t replayNs{0};
+  std::uint64_t finalizeNs{0};
+  std::uint64_t artifactWriteNs{0};
+  std::uint64_t totalNs{0};
+};
+
 struct BacktestSessionRequest {
   std::filesystem::path path{};
   std::string venue{};
@@ -45,10 +69,6 @@ struct BacktestRateLimitSchedule {
   std::string market{};
   std::vector<hft_trader::core::RateLimitBucketConfig> buckets{};
   std::vector<hft_trader::core::RateLimitActionConfig> actions{};
-};
-
-enum class BacktestExecutionPipeline : std::uint8_t {
-  Inline = 0,
 };
 
 enum class BacktestTradeMode : std::uint8_t {
@@ -81,7 +101,6 @@ struct BacktestRunRequest {
   std::vector<BacktestFeeSchedule> feeSchedules{};
   std::vector<BacktestLatencySchedule> latencySchedules{};
   std::vector<BacktestRateLimitSchedule> rateLimitSchedules{};
-  BacktestExecutionPipeline executionPipeline{BacktestExecutionPipeline::Inline};
   BacktestTradeMode tradeMode{BacktestTradeMode::AllLegs};
   std::uint32_t primaryLegIndex{0u};
   bool hasMakerFeeBps{false};
@@ -147,6 +166,7 @@ struct BacktestLegSummary {
   std::int64_t walletDeltaE8{0};
   std::int64_t openPositionQtyE8{0};
   std::vector<std::int64_t> totalPnlCurveE8{};
+  BacktestDepthExecutionSummary depthExecution{};
   bool strategyClosed{false};
 };
 
@@ -186,17 +206,6 @@ struct BacktestRunResult {
   std::uint64_t timerWakeEvents{0};
   std::uint64_t reduceOnlyOrders{0};
   std::uint64_t reduceOnlyFills{0};
-  std::uint64_t phase2DepthRows{0};
-  std::uint64_t phase2FillsRepriced{0};
-  std::uint64_t phase2FillsMissingDepth{0};
-  std::uint64_t phase2BboRepriced{0};
-  std::uint64_t phase2DepthVwapRepriced{0};
-  std::uint64_t phase2DepthRejectedUnseeded{0};
-  std::uint64_t phase2DepthRejectedCrossed{0};
-  std::uint64_t phase2DepthRejectedStale{0};
-  std::uint64_t phase2MissingBbo{0};
-  bool twoPhaseRepriceApplied{false};
-  bool twoPhaseRepriceFallback{false};
   std::int64_t firstTsNs{0};
   std::int64_t lastTsNs{0};
   std::int64_t realizedPnlE8{0};
@@ -218,6 +227,8 @@ struct BacktestRunResult {
   std::int64_t riskStopThresholdEquityE8{0};
   std::vector<std::int64_t> totalPnlCurveE8{};
   std::vector<BacktestLegSummary> legs{};
+  BacktestDepthExecutionSummary depthExecution{};
+  BacktestStageTimings performance{};
   BacktestInputCoverage inputCoverage{};
   BacktestLiveProbeSummary liveProbe{};
   std::uint64_t rateLimitRejectedCommands{0};

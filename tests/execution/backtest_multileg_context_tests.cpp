@@ -139,6 +139,7 @@ struct MultiLegContextProbeState {
   std::size_t marketDataCount{0u};
   std::size_t candleCount{0u};
   std::size_t instrumentCount{0u};
+  std::size_t legMarketCount{0u};
   std::size_t orderStateCount{0u};
   std::size_t positionCount{0u};
   std::size_t accountCount{0u};
@@ -153,9 +154,11 @@ struct MultiLegContextProbeState {
   bool sawLastLegBookTicker{false};
   bool sawLastLegAccount{false};
   bool sawLastLegInstrument{false};
+  bool sawLastLegMarket{false};
 };
 
 struct SingleLegContextProbeState {
+  std::size_t legMarketCount{0u};
   std::size_t orderStateCount{0u};
   std::size_t positionCount{0u};
   std::uint32_t primaryLegIndex{0u};
@@ -163,6 +166,7 @@ struct SingleLegContextProbeState {
   bool contextPolicyExposed{false};
   bool sawRouteOrderState{false};
   bool sawRoutePosition{false};
+  bool sawRouteMarket{false};
 };
 
 template<typename Context>
@@ -195,12 +199,16 @@ void captureContextTradePolicy(const Context& ctx, SingleLegContextProbeState& s
 
 bool singleLegContextProbeRunCycle(void* rawState, hft_trader::core::StrategyContext& ctx) noexcept {
   auto& state = *static_cast<SingleLegContextProbeState*>(rawState);
+  state.legMarketCount = ctx.legMarkets.count;
   state.orderStateCount = ctx.orderStates.count;
   state.positionCount = ctx.positionStates.count;
   captureContextTradePolicy(ctx, state);
   state.sawRouteOrderState = ctx.orderStates.get(0u) != nullptr;
   if (const hft_trader::core::StrategyPositionState* position = ctx.positionStates.get(0u)) {
     state.sawRoutePosition = position->valid && position->netQty.raw == 123000000ll;
+  }
+  if (const canon::MarketType* market = ctx.legMarkets.get(0u)) {
+    state.sawRouteMarket = market->raw == canon::kMarketTypeSpot.raw;
   }
   return true;
 }
@@ -210,6 +218,7 @@ bool multiLegContextProbeRunCycle(void* rawState, hft_trader::core::StrategyCont
   state.marketDataCount = ctx.marketData.count;
   state.candleCount = ctx.candles.count;
   state.instrumentCount = ctx.instrumentSpecs.count;
+  state.legMarketCount = ctx.legMarkets.count;
   state.orderStateCount = ctx.orderStates.count;
   state.positionCount = ctx.positionStates.count;
   state.accountCount = ctx.accountStates.count;
@@ -228,6 +237,9 @@ bool multiLegContextProbeRunCycle(void* rawState, hft_trader::core::StrategyCont
   }
   if (const StrategyInstrumentSpec* instrument = ctx.instrumentSpecs.get(8u)) {
     state.sawLastLegInstrument = instrument->tickSizeRaw == 900000000ll;
+  }
+  if (const canon::MarketType* market = ctx.legMarkets.get(8u)) {
+    state.sawLastLegMarket = market->raw == canon::kMarketTypeSpot.raw;
   }
   return true;
 }
@@ -265,12 +277,70 @@ bool nonPrimaryRouteOrderRunCycle(void* rawState, hft_trader::core::StrategyCont
   return true;
 }
 
+struct TransactionEmitProbeState {
+  bool reportApplied{false};
+  bool allAccepted{false};
+  std::uint8_t reportLegCount{0u};
+};
+
+bool transactionEmitProbeRunCycle(void*, hft_trader::core::StrategyContext& ctx) noexcept {
+  if (ctx.io.transactionOut.empty() || ctx.io.orderOut.size() < 2u) return false;
+
+  hft_trader::core::StrategyTransactionIntent transaction{};
+  transaction.transactionId.raw = 9100u;
+  transaction.touchedLegMask = 0x3u;
+  transaction.semantic = hft_trader::core::StrategyOrderSemantic::EntryAdd;
+  transaction.legCount = 2u;
+  transaction.legs[0].routeHandle = hft_trader::core::ExecutionRouteHandle{1u};
+  transaction.legs[0].clientIntentId.raw = 9101u;
+  transaction.legs[0].signedDeltaRaw = 100000000ll;
+  transaction.legs[0].expectedFillQty.raw = 100000000ll;
+  transaction.legs[1].routeHandle = hft_trader::core::ExecutionRouteHandle{2u};
+  transaction.legs[1].clientIntentId.raw = 9102u;
+  transaction.legs[1].signedDeltaRaw = -100000000ll;
+  transaction.legs[1].expectedFillQty.raw = 100000000ll;
+  if (!ctx.io.pushTransaction(transaction)) return false;
+
+  hft_trader::core::OrderIntent buy{};
+  buy.routeHandle = hft_trader::core::ExecutionRouteHandle{1u};
+  buy.transactionId = transaction.transactionId;
+  buy.clientIntentId = transaction.legs[0].clientIntentId;
+  buy.semantic = transaction.semantic;
+  buy.side = Side::Buy();
+  buy.orderType = canon::OrderType::Market;
+  buy.qty = transaction.legs[0].expectedFillQty;
+  if (!ctx.io.pushOrder(buy)) return false;
+
+  hft_trader::core::OrderIntent sell{};
+  sell.routeHandle = hft_trader::core::ExecutionRouteHandle{2u};
+  sell.transactionId = transaction.transactionId;
+  sell.clientIntentId = transaction.legs[1].clientIntentId;
+  sell.semantic = transaction.semantic;
+  sell.side = Side::Sell();
+  sell.orderType = canon::OrderType::Market;
+  sell.qty = transaction.legs[1].expectedFillQty;
+  return ctx.io.pushOrder(sell);
+}
+
+bool transactionEmitProbeApplyReport(void* rawState,
+                                     const hft_trader::core::StrategyEmitReport& report) noexcept {
+  auto& state = *static_cast<TransactionEmitProbeState*>(rawState);
+  state.reportApplied = report.transactionId.raw == 9100u &&
+      report.legCount == 2u &&
+      report.legs[0].clientIntentId.raw == 9101u && report.legs[0].accepted &&
+      report.legs[1].clientIntentId.raw == 9102u && report.legs[1].accepted;
+  state.allAccepted = report.allAccepted;
+  state.reportLegCount = report.legCount;
+  return state.reportApplied;
+}
+
 bool testRunCycleSinglePassesRouteContext() {
   EngineState engine{};
   StrategyInstrumentSpec instrument{};
   setTop(engine, kPx100, kPx100 + 100000000ll);
   engine.position.valid = true;
   engine.position.netQty.raw = 123000000ll;
+  engine.market = canon::kMarketTypeSpot;
   instrument.tickSizeRaw = 100000000ll;
   instrument.stepSizeRaw = 100000000ll;
   instrument.tickGrid = hft_trader::core::prepareFastStepGrid(instrument.tickSizeRaw);
@@ -295,12 +365,14 @@ bool testRunCycleSinglePassesRouteContext() {
 
   return expect(ok, "single-leg cycle runs") &&
          expect(state.orderStateCount == 1u, "single-leg orderStates exposes route 0") &&
+         expect(state.legMarketCount == 1u, "single-leg context exposes one market type") &&
          expect(state.positionCount == 1u, "single-leg positionStates exposes route 0") &&
          expect(state.contextPolicyExposed, "single-leg context exposes primary/tradable policy") &&
          expect(state.primaryLegIndex == 0u, "single-leg context clamps primary to leg 0") &&
          expect(state.tradableLegMask == 1ull, "single-leg context marks only leg 0 tradable") &&
          expect(state.sawRouteOrderState, "strategy can read single-leg route order state") &&
-         expect(state.sawRoutePosition, "strategy can read single-leg route position");
+         expect(state.sawRoutePosition, "strategy can read single-leg route position") &&
+         expect(state.sawRouteMarket, "strategy can read single-leg market type");
 }
 
 bool testRunCycleMultiPassesNineLegContextWithoutTruncation() {
@@ -311,6 +383,7 @@ bool testRunCycleMultiPassesNineLegContextWithoutTruncation() {
     setTop(engines[i], kPx100 + static_cast<std::int64_t>(i) * 100000000ll, kPx100 + 1000000000ll);
     engines[i].initialBalanceE8 = static_cast<std::int64_t>(i + 1u) * 100000000ll;
     engines[i].walletBalanceE8 = engines[i].initialBalanceE8;
+    engines[i].market = i == 8u ? canon::kMarketTypeSpot : canon::kMarketTypeFutures;
     instruments[i].tickSizeRaw = static_cast<std::int64_t>(i + 1u) * 100000000ll;
     instruments[i].stepSizeRaw = 100000000ll;
     instruments[i].tickGrid = hft_trader::core::prepareFastStepGrid(instruments[i].tickSizeRaw);
@@ -339,6 +412,7 @@ bool testRunCycleMultiPassesNineLegContextWithoutTruncation() {
          expect(state.marketDataCount == kLegs, "marketData exposes all 9 legs") &&
          expect(state.candleCount == kLegs, "candles exposes all 9 legs") &&
          expect(state.instrumentCount == kLegs, "instrumentSpecs exposes all 9 legs") &&
+         expect(state.legMarketCount == kLegs, "legMarkets exposes all 9 legs") &&
          expect(state.orderStateCount == kLegs, "orderStates exposes all 9 legs") &&
          expect(state.positionCount == kLegs, "positionStates exposes all 9 legs") &&
          expect(state.accountCount == kLegs, "accountStates exposes all 9 legs") &&
@@ -349,7 +423,8 @@ bool testRunCycleMultiPassesNineLegContextWithoutTruncation() {
          expect(state.tradableLegMask == 2ull, "strategy context marks only the primary leg tradable") &&
          expect(state.sawLastLegBookTicker, "strategy can read the ninth leg market data") &&
          expect(state.sawLastLegAccount, "strategy can read the ninth leg account") &&
-         expect(state.sawLastLegInstrument, "strategy can read the ninth leg instrument");
+         expect(state.sawLastLegInstrument, "strategy can read the ninth leg instrument") &&
+         expect(state.sawLastLegMarket, "strategy can read the ninth leg market type");
 }
 
 bool testRunCycleMultiMasksStaleSourceLegWithoutGlobalHalt() {
@@ -460,6 +535,43 @@ bool testRunCycleMultiPrimaryOnlyDropsNonPrimaryRouteOrder() {
          expect(engines[1].orders.empty(), "non-primary route order is not executed");
 }
 
+bool testRunCycleMultiBridgesTransactionOutputToEmitReport() {
+  constexpr std::size_t kLegs = 2u;
+  std::vector<EngineState> engines(kLegs);
+  std::vector<StrategyInstrumentSpec> instruments(kLegs);
+  for (std::size_t i = 0u; i < kLegs; ++i) {
+    setTop(engines[i], kPx100, kPx100 + 100000000ll);
+    engines[i].legIndex = static_cast<std::uint32_t>(i);
+    instruments[i].tickSizeRaw = 100000000ll;
+    instruments[i].stepSizeRaw = 100000000ll;
+    instruments[i].tickGrid = hft_trader::core::prepareFastStepGrid(instruments[i].tickSizeRaw);
+    instruments[i].qtyStepGrid = hft_trader::core::prepareFastStepGrid(instruments[i].stepSizeRaw);
+  }
+
+  hft_trader::runtime::StrategyDescriptor descriptor{};
+  descriptor.name = "transaction_emit_probe";
+  descriptor.streamCount = 1u;
+  descriptor.streams[0] = cxet::api::market::PublicMarketDataStream::BookTicker;
+  descriptor.runCycle = transactionEmitProbeRunCycle;
+  descriptor.applyEmitReport = transactionEmitProbeApplyReport;
+
+  auto scratch = std::make_unique<MultiLegCycleScratch>();
+  TransactionEmitProbeState state{};
+  hft_trader::core::SymbolShardConfig shard{};
+  hft_trader::core::ShardControlState control{};
+  BacktestRunRequest request{};
+
+  const bool ok = runCycleMulti(
+      descriptor, &state, engines, instruments, *scratch, shard, control, 0u, 1000ll, request, nullptr);
+
+  return expect(ok, "multi-leg transaction bridge cycle runs") &&
+         expect(state.reportApplied, "multi-leg transaction bridge applies accepted emit report") &&
+         expect(state.allAccepted, "multi-leg transaction bridge marks both legs accepted") &&
+         expect(state.reportLegCount == 2u, "multi-leg transaction bridge preserves both transaction legs") &&
+         expect(engines[0].orders.size() == 1u, "multi-leg transaction bridge submits first leg order") &&
+         expect(engines[1].orders.size() == 1u, "multi-leg transaction bridge submits second leg order");
+}
+
 bool testBacktestRejectsExplicitInvalidPrimaryBeforeLoad() {
   BacktestRunRequest request = makeExplicitSessionLimitRequest(2u);
   request.hasPrimaryLegIndex = true;
@@ -558,6 +670,7 @@ int main() {
   ok = testRunCycleMultiMasksStaleSourceLegWithoutGlobalHalt() && ok;
   ok = testRunCycleMultiGlobalHaltsWhenFewerThanTwoSourcesRemain() && ok;
   ok = testRunCycleMultiPrimaryOnlyDropsNonPrimaryRouteOrder() && ok;
+  ok = testRunCycleMultiBridgesTransactionOutputToEmitReport() && ok;
   ok = testBacktestRejectsExplicitInvalidPrimaryBeforeLoad() && ok;
   ok = testStrategyRunCycleErrorIncludesRejectReasonContext() && ok;
   ok = testPairwiseTakerMultiLegReplayRunsCycleForEveryDeliveredBookTicker() && ok;

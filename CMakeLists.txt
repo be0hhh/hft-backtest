@@ -93,7 +93,6 @@ add_library(hft_backtest_core SHARED
   src/engine/backtest_timeline.cpp
   src/execution/backtest_execution.cpp
   src/execution/backtest_execution_depth.cpp
-  src/execution/backtest_execution_reprice.cpp
   src/execution/backtest_fill_model.cpp
   src/execution/backtest_latency.cpp
   src/input/session_loader.cpp

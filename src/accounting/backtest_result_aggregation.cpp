@@ -1,11 +1,13 @@
 #include "accounting/backtest_result_aggregation.hpp"
 
 #include "accounting/backtest_metrics.hpp"
+#include "execution/backtest_execution_depth.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 namespace hft_backtest {
 namespace {
@@ -53,6 +55,57 @@ void appendRateLimitWarningForEngine(BacktestRunResult& result,
     if (!warningAlreadyPresent(result, warning)) result.warnings.push_back(warning);
   } catch (...) {
     // Warning emission is best-effort; it must not change replay status.
+  }
+}
+
+BacktestDepthExecutionSummary depthSummary(const detail::EngineState& engine) noexcept {
+  BacktestDepthExecutionSummary out{};
+  out.mode = engine.depthExecutionMode;
+  out.bboFallbackFills = engine.depthFallbackFills;
+  out.firstBboFallbackTsNs = engine.firstDepthFallbackTsNs;
+  if (engine.executionDepthProvider != nullptr) {
+    out.rowsRead = engine.executionDepthProvider->rowsRead();
+    out.readNs = engine.executionDepthProvider->readNs();
+  }
+  return out;
+}
+
+void addDepthSummary(BacktestDepthExecutionSummary& out,
+                     const BacktestDepthExecutionSummary& in) noexcept {
+  out.rowsRead += in.rowsRead;
+  out.bboFallbackFills += in.bboFallbackFills;
+  out.readNs += in.readNs;
+  if (in.firstBboFallbackTsNs > 0 &&
+      (out.firstBboFallbackTsNs == 0 || in.firstBboFallbackTsNs < out.firstBboFallbackTsNs)) {
+    out.firstBboFallbackTsNs = in.firstBboFallbackTsNs;
+  }
+  if (in.mode == BacktestDepthExecutionMode::BboFallback) {
+    out.mode = BacktestDepthExecutionMode::BboFallback;
+  } else if (in.mode == BacktestDepthExecutionMode::Depth &&
+             out.mode == BacktestDepthExecutionMode::BboNoDepth) {
+    out.mode = BacktestDepthExecutionMode::Depth;
+  }
+}
+
+void appendDepthWarningForEngine(BacktestRunResult& result,
+                                 const detail::EngineState& engine,
+                                 std::size_t legIndex) noexcept {
+  if (engine.depthExecutionMode != BacktestDepthExecutionMode::BboFallback) return;
+  try {
+    std::string warning{};
+    if (legIndex != static_cast<std::size_t>(-1)) {
+      warning += "leg ";
+      warning += std::to_string(legIndex);
+      warning += ": ";
+    }
+    warning += "declared execution depth failed; continuing with BBO fills";
+    if (!engine.depthFallbackReason.empty()) {
+      warning += " (reason=";
+      warning += engine.depthFallbackReason;
+      warning += ")";
+    }
+    if (!warningAlreadyPresent(result, warning)) result.warnings.push_back(std::move(warning));
+  } catch (...) {
   }
 }
 
@@ -122,6 +175,7 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
   out.openPositionQtyE8 = engine.netQtyRaw;
   out.totalPnlCurveE8.reserve(engine.equityPoints.size());
   for (const detail::JsonEquityPoint& point : engine.equityPoints) out.totalPnlCurveE8.push_back(point.totalPnlE8);
+  out.depthExecution = depthSummary(engine);
   out.strategyClosed = engine.netQtyRaw == 0 && engine.pending.empty();
   return out;
 }
@@ -138,6 +192,7 @@ void populateAggregateArtifactEngine(const std::vector<detail::EngineState>& eng
     out.strategyIndicator.insert(out.strategyIndicator.end(), engine.strategyIndicator.begin(), engine.strategyIndicator.end());
     out.strategyRange.insert(out.strategyRange.end(), engine.strategyRange.begin(), engine.strategyRange.end());
     out.strategySpread.insert(out.strategySpread.end(), engine.strategySpread.begin(), engine.strategySpread.end());
+    out.executionQuality.insert(out.executionQuality.end(), engine.executionQuality.begin(), engine.executionQuality.end());
     mergeStrategySpreadDiagnostics(out.strategySpreadDiagnostics, engine.strategySpreadDiagnostics);
     out.rateLimitUsage.insert(out.rateLimitUsage.end(), engine.rateLimitUsage.begin(), engine.rateLimitUsage.end());
     out.userEvents.insert(out.userEvents.end(), engine.userEvents.begin(), engine.userEvents.end());
@@ -207,6 +262,7 @@ void populateResultPnl(BacktestRunResult& result, const detail::EngineState& eng
   result.reduceOnlyOrders = engine.reduceOnlyOrders;
   result.reduceOnlyFills = engine.reduceOnlyFills;
   result.inputCoverage = engine.inputCoverage;
+  result.depthExecution = depthSummary(engine);
   result.totalPnlCurveE8.clear();
   result.totalPnlCurveE8.reserve(engine.equityPoints.size());
   for (const detail::JsonEquityPoint& point : engine.equityPoints) {
@@ -234,6 +290,7 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
   result.reduceOnlyOrders = 0;
   result.reduceOnlyFills = 0;
   result.inputCoverage = BacktestInputCoverage{};
+  result.depthExecution = BacktestDepthExecutionSummary{};
   result.legs.clear();
   bool closed = true;
   bool liquidated = false;
@@ -257,6 +314,7 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
     result.reduceOnlyOrders += engine.reduceOnlyOrders;
     result.reduceOnlyFills += engine.reduceOnlyFills;
     result.inputCoverage = addCoverage(result.inputCoverage, engine.inputCoverage);
+    addDepthSummary(result.depthExecution, depthSummary(engine));
     if (engine.netQtyRaw != 0 || !engine.pending.empty()) closed = false;
     if (engine.liquidated) {
       liquidated = true;
@@ -309,6 +367,18 @@ void appendRateLimitWarnings(BacktestRunResult& result,
     return;
   }
   appendRateLimitWarningForEngine(result, engine, static_cast<std::size_t>(-1));
+}
+
+void appendDepthExecutionWarnings(BacktestRunResult& result,
+                                  const detail::EngineState& engine,
+                                  const std::vector<detail::EngineState>* legEngines) noexcept {
+  if (legEngines && !legEngines->empty()) {
+    for (std::size_t i = 0u; i < legEngines->size(); ++i) {
+      appendDepthWarningForEngine(result, (*legEngines)[i], i);
+    }
+    return;
+  }
+  appendDepthWarningForEngine(result, engine, static_cast<std::size_t>(-1));
 }
 
 std::uint64_t rateLimitRejectedCommands(const detail::EngineState& engine,
