@@ -398,7 +398,7 @@ bool acceptedMarketOrderSince(const detail::EngineState& engine,
 bool transactionOrderAccepted(Span<const detail::EngineState> engines,
                               const std::array<std::size_t, hft_trader::core::kStrategyRuntimeMaxLegs>& firstRecords,
                               std::size_t leg,
-                              hft_trader::core::Id clientIntentId) noexcept {
+                              Id clientIntentId) noexcept {
   if (leg >= engines.size() || clientIntentId.raw == 0u) return false;
   const std::vector<detail::JsonOrder>& orders = engines[leg].orders;
   const std::size_t first = firstRecords[leg] < orders.size() ? firstRecords[leg] : orders.size();
