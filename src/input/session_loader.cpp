@@ -84,7 +84,7 @@ bool equalsNoCase(std::string_view lhs, std::string_view rhs) noexcept {
 bool cryptoRecorderExchange(std::string_view exchange) noexcept {
   static constexpr std::string_view kExchanges[] = {
       "aster",       "backpack", "binance",  "bingx",   "bitget",
-      "bitmart",     "bitunix",  "bybit",    "coinbase", "coinex",
+      "bitunix",     "bybit",    "coinbase", "coinex",
       "gate",        "htx",      "hyperliquid", "kraken", "kucoin",
       "mexc",        "okx",      "phemex",   "poloniex", "toobit",
       "xt",

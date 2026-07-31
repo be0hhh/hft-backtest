@@ -450,6 +450,40 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     return result;
   }
   detail::EngineState& engine = *engineStorage;
+  const auto prepareEngineOrderBookStorage =
+      [&](detail::EngineState& target) noexcept {
+        if (descriptor->orderBookViewLevelsPerSide != 0u) {
+          CountVal strategyDepth{};
+          strategyDepth.raw =
+              descriptor->orderBookViewLevelsPerSide;
+          if (!target.orderBook.reserveLevelsPerSide(
+                  strategyDepth)) {
+            return false;
+          }
+          target.orderBook.config.maxStoredLevelsPerSide =
+              strategyDepth;
+        }
+        if (loadPlan.loadDepths) {
+          CountVal executionDepth{};
+          executionDepth.raw = static_cast<std::uint32_t>(
+              rawdata::kMaxOrderbookLevels);
+          if (!target.venueOrderBook.reserveLevelsPerSide(
+                  executionDepth) ||
+              !target.topExecutionOverlayScratch
+                   .reserveLevelsPerSide(executionDepth)) {
+            return false;
+          }
+          target.venueOrderBook.config.maxStoredLevelsPerSide =
+              executionDepth;
+        }
+        return true;
+      };
+  if (!prepareEngineOrderBookStorage(engine)) {
+    result.status = Status::IoError;
+    result.error = "failed to allocate exact backtest order-book storage";
+    (void)writeEmptyArtifacts();
+    return result;
+  }
   configureStrategyIndicator(engine, indicatorProfile);
   detail::initLatencyRuntime(engine.latency, resolveLatencyConfig(effectiveRequest, session.exchange, session.market));
   engine.inputCoverage = seedCoverage;
@@ -478,6 +512,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     legEngines.resize(sessions.size());
     for (std::size_t leg = 0; leg < sessions.size(); ++leg) {
       detail::EngineState& legEngine = legEngines[leg];
+      if (!prepareEngineOrderBookStorage(legEngine)) {
+        result.status = Status::IoError;
+        result.error =
+            "failed to allocate exact leg order-book storage";
+        (void)writeEmptyArtifacts();
+        return result;
+      }
       configureStrategyIndicator(legEngine, indicatorProfile);
       const detail::BacktestLatencyConfig legLatency =
           latencyConfigForLeg(effectiveRequest, sessions[leg].exchange, sessions[leg].market, leg);

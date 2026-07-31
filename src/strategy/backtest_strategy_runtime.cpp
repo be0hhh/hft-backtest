@@ -914,15 +914,18 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     cxet::composite::OrderBookTapeRuntimeV1 tape{};
     cxet::composite::OrderBookTapeSidesRuntimeV1 sides{};
     detail::toRuntime(session.depths[event.index], tape, sides);
-    hft_trader::core::copyDepthSnapshot(snapshot, tape, sides);
+    hft_trader::core::copyDepthTimestamp(
+        snapshot, cxet::composite::orderBookTapeTimestamp(tape));
     if (orderBook.initialized.raw != hft_trader::core::kAlgoFlagTrue.raw) {
-      hft_trader::core::LocalOrderBookConfig bookConfig{};
-      bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
-      bookConfig.tickSizeRaw = instrument.tickSizeRaw;
-      hft_trader::core::applySnapshot(orderBook, detail::toRuntimeSnapshot(session.depths[event.index]), selectedSymbol, bookConfig);
-    } else {
-      (void)hft_trader::core::applyTapeDelta(orderBook, tape, sides);
+      orderBook.symbol = selectedSymbol;
+      if (orderBook.config.maxStoredLevelsPerSide.raw == 0u) {
+        orderBook.config.maxStoredLevelsPerSide =
+            orderBook.capacityLevelsPerSide();
+      }
+      orderBook.config.tickSizeRaw = instrument.tickSizeRaw;
     }
+    (void)hft_trader::core::applyTapeDelta(
+        orderBook, tape, sides);
     applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
     hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
     changed = true;

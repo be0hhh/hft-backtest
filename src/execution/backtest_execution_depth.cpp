@@ -444,8 +444,7 @@ class ExecutionDepthCheckpointCache {
     impl.sourceRows = checkpoint.sourceRows;
     impl.pendingValid = false;
     impl.eof = false;
-    book = checkpoint.book;
-    return true;
+    return book.copyFromBounded(checkpoint.book);
   }
 
   void publish(const ExecutionDepthProviderImpl& impl,
@@ -497,7 +496,22 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
     std::shared_ptr<ExecutionDepthCheckpointCache> cache) noexcept {
   delete impl_;
   impl_ = nullptr;
-  book_ = initialBook;
+  CountVal bookCapacity =
+      hft_trader::core::boundedMaxStoredLevels(
+          config.maxStoredLevelsPerSide);
+  if (config.maxStoredLevelsPerSide.raw == 0u &&
+      initialBook.capacityLevelsPerSide().raw != 0u) {
+    bookCapacity = initialBook.capacityLevelsPerSide();
+  }
+  if (!book_.reserveLevelsPerSide(bookCapacity) ||
+      (initialBook.initialized.raw ==
+           hft_trader::core::kAlgoFlagTrue.raw &&
+       !book_.copyFromBounded(initialBook))) {
+    available_ = false;
+    failed_ = true;
+    failureReason_ = "allocation_failed";
+    return ExecutionDepthOpenStatus::Failed;
+  }
   symbol_ = symbol;
   config_ = config;
   rowsRead_ = 0;
@@ -648,14 +662,17 @@ bool applyDepthRow(DepthSource source,
                    cxet::composite::OrderBookTapeSidesRuntimeV1& sideScratch) noexcept {
   if (source == DepthSource::LegacySnapshot) {
     toRuntimeSnapshot(row, snapshotScratch);
-    hft_trader::core::applySnapshot(book, snapshotScratch, symbol, config);
-    return true;
+    return hft_trader::core::applySnapshot(
+        book, snapshotScratch, symbol, config);
   }
   if (source == DepthSource::TapeSidecar) {
     if (!hft_trader::core::orderBook(book).initialized()) {
-      toRuntimeSnapshot(row, snapshotScratch);
-      hft_trader::core::applySnapshot(book, snapshotScratch, symbol, config);
-      return true;
+      book.symbol = symbol;
+      book.config = config;
+      if (book.config.maxStoredLevelsPerSide.raw == 0u) {
+        book.config.maxStoredLevelsPerSide =
+            book.capacityLevelsPerSide();
+      }
     }
     toRuntime(row, tapeScratch, sideScratch);
     return hft_trader::core::applyTapeDelta(book, tapeScratch, sideScratch);

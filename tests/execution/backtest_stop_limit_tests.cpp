@@ -90,8 +90,14 @@ void seedVenueBook(EngineState& engine,
     (void)cxet::composite::appendOrderBookLevel(snapshot, price(level.first), amount(level.second), Side::Sell());
   }
   hft_trader::core::LocalOrderBookConfig config{};
-  config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
-  hft_trader::core::applySnapshot(engine.venueOrderBook, snapshot, engine.symbol, config);
+  config.maxStoredLevelsPerSide.raw = static_cast<std::uint32_t>(
+      std::max(bids.size(), asks.size()));
+  if (!engine.venueOrderBook.reserveLevelsPerSide(
+          config.maxStoredLevelsPerSide) ||
+      !hft_trader::core::applySnapshot(
+          engine.venueOrderBook, snapshot, engine.symbol, config)) {
+    return;
+  }
   hft_trader::core::bindOrderBookSnapshot(engine.venueSnapshot, engine.venueOrderBook);
   engine.venueOrderBookExecutionEnabled = true;
   if (!bids.size() || !asks.size()) return;

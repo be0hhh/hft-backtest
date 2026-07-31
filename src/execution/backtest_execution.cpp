@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <new>
 #include <utility>
 
 namespace hft_backtest::detail {
@@ -493,7 +494,7 @@ const hft_trader::core::LocalOrderBookState& overlayedTakerExecutionBook(
     const hft_trader::core::LocalOrderBookState& rawBook,
     hft_trader::core::LocalOrderBookState& scratch) noexcept {
   if (!bboOverlayCandidate(top)) return rawBook;
-  scratch = rawBook;
+  if (!scratch.copyFromBounded(rawBook)) return rawBook;
   const hft_trader::core::AlgoFlag bidQtyKnown = effectiveBidQtyKnown(snapshot, top);
   const hft_trader::core::AlgoFlag askQtyKnown = effectiveAskQtyKnown(snapshot, top);
   return hft_trader::core::applyBboOverlay(scratch, top, bidQtyKnown, askQtyKnown) ? scratch : rawBook;
@@ -506,9 +507,17 @@ bool marketDepthFreshEnough(const hft_trader::core::LocalOrderBookState& book,
   return top.ts.raw - book.ts.raw <= static_cast<std::uint64_t>(kMarketDepthMaxAgeNs);
 }
 
-hft_trader::core::LocalOrderBookState& topExecutionOverlayScratch(EngineState& engine) {
-  if (engine.topExecutionOverlayScratch.empty()) engine.topExecutionOverlayScratch.resize(1u);
-  return engine.topExecutionOverlayScratch.front();
+hft_trader::core::LocalOrderBookState& topExecutionOverlayScratch(
+    EngineState& engine,
+    const hft_trader::core::LocalOrderBookState& source) {
+  if (engine.topExecutionOverlayScratch.capacityLevelsPerSide().raw !=
+      source.capacityLevelsPerSide().raw) {
+    if (!engine.topExecutionOverlayScratch.reserveLevelsPerSide(
+            source.capacityLevelsPerSide())) {
+      throw std::bad_alloc{};
+    }
+  }
+  return engine.topExecutionOverlayScratch;
 }
 
 AggressiveFillPlan& topExecutionFillPlanScratch(EngineState& engine) {
@@ -1031,7 +1040,8 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
           : nullptr;
   const hft_trader::core::LocalOrderBookState* fillBook = rawBook;
   if (rawBook != nullptr && bboOverlayCandidate(top)) {
-    hft_trader::core::LocalOrderBookState& overlayBook = topExecutionOverlayScratch(engine);
+    hft_trader::core::LocalOrderBookState& overlayBook =
+        topExecutionOverlayScratch(engine, *rawBook);
     fillBook = &overlayedTakerExecutionBook(engine.venueSnapshot, top, *rawBook, overlayBook);
   }
   for (OpenOrder& order : engine.open) {

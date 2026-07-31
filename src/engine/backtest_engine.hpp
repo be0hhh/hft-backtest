@@ -399,7 +399,7 @@ struct EngineState {
   hft_trader::core::StrategyCandleSnapshot venueCandle{};
   hft_trader::core::LocalOrderBookState orderBook{};
   hft_trader::core::LocalOrderBookState venueOrderBook{};
-  std::vector<hft_trader::core::LocalOrderBookState> topExecutionOverlayScratch{};
+  hft_trader::core::LocalOrderBookState topExecutionOverlayScratch{};
   std::vector<AggressiveFillPlan> topExecutionFillPlanScratch{};
   ExecutionDepthProvider* executionDepthProvider{nullptr};
   bool venueOrderBookExecutionEnabled{false};
