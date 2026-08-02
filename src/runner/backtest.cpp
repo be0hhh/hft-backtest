@@ -249,7 +249,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
 
   hft_trader::runtime::HftRuntimeConfig cfg{};
-  if (!hft_trader::runtime::loadRuntimeConfig(request.configPath.string().c_str(), cfg, error)) {
+  hft_trader::runtime::HftRuntimeConfigLoadOptions loadOptions{};
+  loadOptions.requireCpuTopology = false;
+  if (!hft_trader::runtime::loadRuntimeConfig(
+          request.configPath.string().c_str(), cfg, error, loadOptions)) {
     result.status = Status::InvalidArgument;
     result.error = error;
     (void)writeEmptyArtifacts();

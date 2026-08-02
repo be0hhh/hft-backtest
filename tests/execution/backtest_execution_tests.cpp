@@ -3329,9 +3329,7 @@ bool testStatArbPairwiseTakerMetadataSupportsAllPairs() {
          expect(metadata->maxSessionCount == 50u, "stat_arb_pairwise_taker allows the GUI multileg cap") &&
          expect(metadataHasParam(*metadata, "ema_window_ms"), "pairwise metadata contains ema_window_ms") &&
          expect(metadataHasParam(*metadata, "entry_edge_bps"), "pairwise metadata contains entry_edge_bps") &&
-         expect(metadataHasParam(*metadata, "ladder_step_bps"), "pairwise metadata contains ladder_step_bps") &&
          expect(metadataHasParam(*metadata, "exit_edge_bps"), "pairwise metadata contains exit_edge_bps") &&
-         expect(metadataHasParam(*metadata, "max_ladder_levels"), "pairwise metadata contains max_ladder_levels") &&
          expect(metadataHasParam(*metadata, "max_quote_age_ms"), "pairwise metadata contains max_quote_age_ms") &&
          expect(!metadataHasParam(*metadata, "max_active_pairs"), "pairwise metadata hides old max_active_pairs") &&
          expect(!metadataHasParam(*metadata, "max_pair_entries_per_cycle"),
@@ -3345,10 +3343,6 @@ bool testStatArbPairwiseTakerMetadataSupportsAllPairs() {
                 "pairwise amount_qty is active sizing default from ini") &&
          expect(metadataParamGroupIs(*metadata, "order_qty", 1u, false),
                 "pairwise order_qty is inactive sizing option from ini") &&
-         expect(metadataParamDefaultIs(*metadata, "ladder_step_bps", "2"),
-                "pairwise ladder step default comes from ini") &&
-         expect(metadataParamDefaultIs(*metadata, "max_ladder_levels", "3"),
-                "pairwise ladder levels default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "max_quote_age_ms", "5000"),
                 "pairwise max quote age default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "amount_qty", "10"), "pairwise amount_qty default comes from ini") &&

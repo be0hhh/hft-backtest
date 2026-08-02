@@ -60,9 +60,8 @@ bool testStatArbPairwiseTakerDiscoversAllPairsProfile() {
          expect(metadata->maxSessionCount == 50u, "stat_arb_pairwise_taker allows the GUI multileg cap") &&
          expect(metadataHasParam(*metadata, "ema_window_ms"), "pairwise metadata contains ema_window_ms") &&
          expect(metadataHasParam(*metadata, "entry_edge_bps"), "pairwise metadata contains entry_edge_bps") &&
-         expect(metadataHasParam(*metadata, "ladder_step_bps"), "pairwise metadata contains ladder_step_bps") &&
          expect(metadataHasParam(*metadata, "exit_edge_bps"), "pairwise metadata contains exit_edge_bps") &&
-         expect(metadataHasParam(*metadata, "max_ladder_levels"), "pairwise metadata contains max_ladder_levels") &&
+         expect(metadataHasParam(*metadata, "max_quote_age_ms"), "pairwise metadata contains max_quote_age_ms") &&
          expect(!metadataHasParam(*metadata, "max_active_pairs"), "pairwise metadata hides old max_active_pairs") &&
          expect(!metadataHasParam(*metadata, "max_pair_entries_per_cycle"),
                 "pairwise metadata hides old max_pair_entries_per_cycle") &&
@@ -76,10 +75,9 @@ bool testStatArbPairwiseTakerDiscoversAllPairsProfile() {
          expect(metadataHasParam(*metadata, "order_qty"), "pairwise metadata contains order_qty") &&
          expect(metadataParamDefaultIs(*metadata, "ema_window_ms", "5000"), "pairwise ema window default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "entry_edge_bps", "10"), "pairwise entry edge default comes from ini") &&
-         expect(metadataParamDefaultIs(*metadata, "ladder_step_bps", "2"), "pairwise ladder step default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "exit_edge_bps", "5"), "pairwise exit edge default comes from ini") &&
-         expect(metadataParamDefaultIs(*metadata, "max_ladder_levels", "3"),
-                "pairwise ladder levels default comes from ini") &&
+         expect(metadataParamDefaultIs(*metadata, "max_quote_age_ms", "5000"),
+                "pairwise quote age default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "amount_qty", "10"), "pairwise amount_qty default comes from ini") &&
          expect(metadataParamDefaultIs(*metadata, "order_qty", "0.001"),
                 "pairwise order_qty default comes from commented ini") &&

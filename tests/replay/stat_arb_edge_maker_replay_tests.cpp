@@ -109,8 +109,6 @@ void writeConfigWithEdges(const std::filesystem::path& path,
   text +=
       "\n"
       "trigger_edge_bps=0\n"
-      "ladder_step_bps=1\n"
-      "max_ladder_levels=3\n"
       "order_qty=1\n"
       "\n"
       "[venue.binance_futures]\n"
