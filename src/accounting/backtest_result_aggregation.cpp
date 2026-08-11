@@ -153,7 +153,6 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
   out.symbol = session.symbol;
   out.makerFeeBpsE8 = engine.makerFeeBpsE8;
   out.takerFeeBpsE8 = engine.takerFeeBpsE8;
-  out.marketDataLatency = engine.latency.config.marketData;
   out.marketOrderLatency = engine.latency.config.marketOrder;
   out.limitOrderLatency = engine.latency.config.limitOrder;
   out.cancelOrderLatency = engine.latency.config.cancelOrder;
@@ -176,6 +175,19 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
   out.totalPnlCurveE8.reserve(engine.equityPoints.size());
   for (const detail::JsonEquityPoint& point : engine.equityPoints) out.totalPnlCurveE8.push_back(point.totalPnlE8);
   out.depthExecution = depthSummary(engine);
+  out.replayClock.firstReceiveMonotonicNs = session.firstReceiveMonotonicNs;
+  out.replayClock.lastReceiveMonotonicNs = session.lastReceiveMonotonicNs;
+  out.replayClock.firstReceiveRealtimeNs = session.firstReceiveRealtimeNs;
+  out.replayClock.lastReceiveRealtimeNs = session.lastReceiveRealtimeNs;
+  out.replayClock.firstReplayDeliveryNs = engine.firstReplayDeliveryNs;
+  out.replayClock.lastReplayDeliveryNs = engine.lastReplayDeliveryNs;
+  out.replayClock.firstVenueScheduleNs = engine.firstVenueScheduleNs;
+  out.replayClock.lastVenueScheduleNs = engine.lastVenueScheduleNs;
+  out.replayClock.realtimeRegressions = session.realtimeRegressionCount;
+  out.replayClock.monotonicNonIncreasing = session.monotonicNonIncreasingCount;
+  out.replayClock.exchangeAheadOfReceive = session.exchangeAheadOfReceiveCount;
+  out.replayClock.exchangeTimestampMissing = session.exchangeTimestampMissingCount;
+  out.replayClock.venueScheduleAdjustedEvents = engine.venueScheduleAdjustedEvents;
   out.strategyClosed = engine.netQtyRaw == 0 && engine.pending.empty();
   return out;
 }

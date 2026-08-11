@@ -46,7 +46,14 @@ std::int64_t nextPendingTs(const detail::EngineState& engine) noexcept {
 }
 
 std::int64_t userEventFallbackTs(const cxet::composite::UserDataEvent& event) noexcept {
-  return event.updateTime.raw != 0u ? toInt64Time(event.updateTime) : toInt64Time(event.eventTime);
+  if (cxet::composite::userDataFieldPresent(
+          event, cxet::composite::UserDataField::UpdateTime)) {
+    return toInt64Time(event.updateTime);
+  }
+  return cxet::composite::userDataFieldPresent(
+             event, cxet::composite::UserDataField::EventTime)
+      ? toInt64Time(event.eventTime)
+      : 0;
 }
 
 std::int64_t nextUserEventDeliveryTs(const detail::EngineState& engine) noexcept {
@@ -59,13 +66,87 @@ std::int64_t nextUserEventDeliveryTs(const detail::EngineState& engine) noexcept
 
 void applyBacktestReconstructedBbo(hft_trader::core::StrategyMarketSnapshot& snapshot,
                                    hft_trader::core::LocalOrderBookState& orderBook,
-                                   const hft_trader::core::BboReconstructionState& bbo) noexcept {
+                                   const hft_trader::core::BboReconstructionState& bbo,
+                                   std::uint64_t receiveMonotonicNs) noexcept {
   const hft_trader::core::BboReconstructionView view = hft_trader::core::reconstructedBbo(bbo);
-  hft_trader::core::copyReconstructedBboSnapshot(snapshot, view);
+  TimeNs receiveMonotonic{};
+  receiveMonotonic.raw = receiveMonotonicNs;
+  hft_trader::core::copyReconstructedBboSnapshot(
+      snapshot, view, receiveMonotonic);
   if (hft_trader::core::validReconstructedBbo(view) &&
       orderBook.initialized.raw == hft_trader::core::kAlgoFlagTrue.raw) {
     (void)hft_trader::core::applyBboOverlay(orderBook, view.bookTicker, view.bidQtyKnown, view.askQtyKnown);
     hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
+  }
+}
+
+void refreshCapturedBookTicker(
+    hft_trader::core::StrategyMarketSnapshot& snapshot,
+    const detail::TimelineEvent& event) noexcept {
+  TimeNs receiveMonotonic{};
+  receiveMonotonic.raw = static_cast<std::uint64_t>(
+      event.deliveryTsNs > 0 ? event.deliveryTsNs : 0);
+  TimeNs receiveRealtime{};
+  receiveRealtime.raw = static_cast<std::uint64_t>(
+      event.deliveryRealtimeNs > 0 ? event.deliveryRealtimeNs : 0);
+  if (snapshot.hasBookTicker.raw ==
+      hft_trader::core::kAlgoFlagTrue.raw) {
+    snapshot.lastBookTickerRecvMono = receiveMonotonic;
+    snapshot.lastBookTickerRecvUtc = receiveRealtime;
+  }
+  if (snapshot.hasReconstructedBbo.raw ==
+      hft_trader::core::kAlgoFlagTrue.raw) {
+    snapshot.reconstructedBookTickerRecvMono = receiveMonotonic;
+  }
+}
+
+void applyCapturedBookTicker(
+    hft_trader::core::StrategyMarketSnapshot& snapshot,
+    hft_trader::core::BboReconstructionState& bbo,
+    const detail::BookTickerRow& row,
+    const detail::TimelineEvent& event,
+    std::uint64_t replayReceiveMonotonicNs,
+    const cxet::composite::BookTickerRuntimeV1& ticker) noexcept {
+  TimeNs receiveMonotonic{};
+  receiveMonotonic.raw = replayReceiveMonotonicNs;
+  TimeNs receiveRealtime{};
+  receiveRealtime.raw = static_cast<std::uint64_t>(
+      event.deliveryRealtimeNs > 0 ? event.deliveryRealtimeNs : 0);
+  const auto timestampOrigin = ticker.ts.raw != 0u
+      ? hft_trader::core::MarketTimestampOrigin::Exchange
+      : hft_trader::core::MarketTimestampOrigin::Receive;
+  if (row.bidPresent && row.askPresent) {
+    hft_trader::core::copyBookTickerSnapshot(
+        snapshot, ticker, receiveMonotonic, receiveRealtime,
+        timestampOrigin);
+    (void)hft_trader::core::applyBookTicker(bbo, ticker);
+    return;
+  }
+
+  hft_trader::core::BboReconstructionState captured{};
+  captured.bookTicker = ticker;
+  captured.lastBookTickerTs = ticker.ts;
+  captured.source = hft_trader::core::kBboReconstructionSourceBookTicker;
+  captured.bidPresent = row.bidPresent
+      ? hft_trader::core::kAlgoFlagTrue
+      : hft_trader::core::kAlgoFlagFalse;
+  captured.askPresent = row.askPresent
+      ? hft_trader::core::kAlgoFlagTrue
+      : hft_trader::core::kAlgoFlagFalse;
+  captured.bidQtyKnown = row.bidPresent && ticker.bid.qty.raw > 0
+      ? hft_trader::core::kAlgoFlagTrue
+      : hft_trader::core::kAlgoFlagFalse;
+  captured.askQtyKnown = row.askPresent && ticker.ask.qty.raw > 0
+      ? hft_trader::core::kAlgoFlagTrue
+      : hft_trader::core::kAlgoFlagFalse;
+  captured.valid = hft_trader::core::kAlgoFlagFalse;
+  const auto capturedView = hft_trader::core::reconstructedBbo(captured);
+  hft_trader::core::copyPartialBookTickerSnapshot(
+      snapshot, capturedView, receiveMonotonic, receiveRealtime,
+      timestampOrigin);
+  if (!hft_trader::core::bboReconstructionTimestampRollback(
+          bbo, ticker.ts)) {
+    bbo = captured;
   }
 }
 
@@ -899,6 +980,18 @@ TimeNs timeNsFromI64(std::int64_t value) noexcept {
   return out;
 }
 
+TimeNs replayUtcFromMonotonic(std::int64_t monotonicNs,
+                              std::int64_t utcOffsetNs) noexcept {
+  TimeNs out{};
+  const __int128 value = static_cast<__int128>(monotonicNs) +
+      static_cast<__int128>(utcOffsetNs);
+  if (value <= 0) return out;
+  out.raw = value > std::numeric_limits<std::uint64_t>::max()
+      ? std::numeric_limits<std::uint64_t>::max()
+      : static_cast<std::uint64_t>(value);
+  return out;
+}
+
 void applyMarketEventToSnapshots(detail::EngineState& engine,
                                  const detail::SessionData& session,
                                  const detail::TimelineEvent& event,
@@ -909,11 +1002,18 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   hft_trader::core::StrategyCandleSnapshot& candle = strategyVisible ? engine.candle : engine.venueCandle;
   hft_trader::core::LocalOrderBookState& orderBook = strategyVisible ? engine.orderBook : engine.venueOrderBook;
   hft_trader::core::BboReconstructionState& bbo = strategyVisible ? engine.bboReconstruction : engine.venueBboReconstruction;
+  const std::int64_t replayReceiveMonotonic =
+      strategyVisible ? event.deliveryTsNs : event.tsNs;
+  const std::uint64_t replayReceiveMonotonicNs =
+      static_cast<std::uint64_t>(
+          replayReceiveMonotonic > 0 ? replayReceiveMonotonic : 0);
   bool changed = false;
   if (event.kind == detail::kTimelineKindDepth) {
+    const detail::DepthRow& depth = session.depths[event.index];
+    if (depth.resetBookBeforeApply) orderBook.reset();
     cxet::composite::OrderBookTapeRuntimeV1 tape{};
     cxet::composite::OrderBookTapeSidesRuntimeV1 sides{};
-    detail::toRuntime(session.depths[event.index], tape, sides);
+    detail::toRuntime(depth, tape, sides);
     hft_trader::core::copyDepthTimestamp(
         snapshot, cxet::composite::orderBookTapeTimestamp(tape));
     if (orderBook.initialized.raw != hft_trader::core::kAlgoFlagTrue.raw) {
@@ -926,24 +1026,37 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     }
     (void)hft_trader::core::applyTapeDelta(
         orderBook, tape, sides);
-    applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
+    applyBacktestReconstructedBbo(
+        snapshot, orderBook, bbo, replayReceiveMonotonicNs);
     hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
     changed = true;
   } else if (event.kind == detail::kTimelineKindTrade) {
     const auto trade = detail::toRuntime(session.trades[event.index]);
     hft_trader::core::copyTradeSnapshot(snapshot, trade);
     (void)hft_trader::core::applyTrade(bbo, trade);
-    applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
-    if (!strategyVisible) detail::tryFillOnTrade(engine, trade);
+    applyBacktestReconstructedBbo(
+        snapshot, orderBook, bbo, replayReceiveMonotonicNs);
+    if (!strategyVisible) detail::tryFillOnTrade(engine, trade, event.tsNs);
     changed = true;
   } else if (event.kind == detail::kTimelineKindBookTicker) {
-    const auto ticker = detail::toRuntime(session.bookTickers[event.index]);
-    hft_trader::core::copyBookTickerSnapshot(snapshot, ticker);
-    (void)hft_trader::core::applyBookTicker(bbo, ticker);
-    applyBacktestReconstructedBbo(snapshot, orderBook, bbo);
-    hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
-    if (!strategyVisible) detail::tryFillOnTop(engine, event.tsNs);
-    changed = true;
+    const auto& row = session.bookTickers[event.index];
+    if (row.freshnessOnly) {
+      if (strategyVisible) {
+        refreshCapturedBookTicker(snapshot, event);
+        changed = true;
+      }
+    } else {
+      const auto ticker = detail::toRuntime(row);
+      applyCapturedBookTicker(snapshot, bbo, row, event,
+                              replayReceiveMonotonicNs, ticker);
+      applyBacktestReconstructedBbo(
+          snapshot, orderBook, bbo, replayReceiveMonotonicNs);
+      hft_trader::core::bindOrderBookSnapshot(snapshot, orderBook);
+      if (!strategyVisible) {
+        detail::tryFillOnTop(engine, event.tsNs, true);
+      }
+      changed = true;
+    }
   } else if (event.kind == detail::kTimelineKindPriceLimit) {
     const auto priceLimit = detail::toRuntime(session.priceLimits[event.index]);
     hft_trader::core::copyPriceLimitSnapshot(snapshot, priceLimit);
@@ -955,12 +1068,16 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   } else if (event.kind == detail::kTimelineKindMarkPrice) {
     const auto markPrice = detail::toRuntime(session.markPrices[event.index]);
     hft_trader::core::copyMarkPriceSnapshot(snapshot, markPrice);
-    if (!strategyVisible) detail::tryTriggerStopMarketsOnMark(engine, markPrice);
+    if (!strategyVisible) {
+      detail::tryTriggerStopMarketsOnMark(engine, markPrice, event.tsNs);
+    }
     changed = true;
   } else if (event.kind == detail::kTimelineKindIndexPrice) {
     const auto indexPrice = detail::toRuntime(session.indexPrices[event.index]);
     hft_trader::core::copyIndexPriceSnapshot(snapshot, indexPrice);
-    if (!strategyVisible) detail::tryTriggerStopMarketsOnIndex(engine, indexPrice);
+    if (!strategyVisible) {
+      detail::tryTriggerStopMarketsOnIndex(engine, indexPrice, event.tsNs);
+    }
     changed = true;
   } else if (event.kind == detail::kTimelineKindFunding) {
     const auto funding = detail::toRuntime(session.funding[event.index]);
@@ -1051,7 +1168,8 @@ bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.userEvent = userEvent;
   ctx.hasUserEvent = userEvent && userEvent->kind != cxet::composite::UserDataEventKind::Unknown;
   ctx.nowMono.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
-  ctx.nowUtc = ctx.nowMono;
+  ctx.nowUtc = replayUtcFromMonotonic(tsNs, engine.replayUtcOffsetNs);
+  if (tsNs > engine.lastReplayMonotonicNs) engine.lastReplayMonotonicNs = tsNs;
   scratch.warmupViews[0] = backtestWarmupView(engine);
   ctx.orderPathWarmup = scratch.warmupViews[0];
   ctx.orderPathWarmups.routes = scratch.warmupViews.data();
@@ -1226,7 +1344,11 @@ bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
   ctx.eventLegIndex = eventLegIndex;
   ctx.hasEventLeg = eventLegIndex < legCount;
   ctx.nowMono.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
-  ctx.nowUtc = ctx.nowMono;
+  ctx.nowUtc = replayUtcFromMonotonic(tsNs, engines[0].replayUtcOffsetNs);
+  for (std::size_t i = 0u; i < legCount; ++i) {
+    if (tsNs > engines[i].lastReplayMonotonicNs)
+      engines[i].lastReplayMonotonicNs = tsNs;
+  }
   for (std::size_t i = 0u; i < legCount; ++i) {
     scratch.warmupViews[i] = backtestWarmupView(engines[i]);
   }

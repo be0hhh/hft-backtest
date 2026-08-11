@@ -5,6 +5,7 @@
 #include "execution/backtest_latency.hpp"
 #include "config/backtest_run_config.hpp"
 #include "strategy/backtest_strategy_runtime.hpp"
+#include "../support/CapturedSessionFixture.hpp"
 
 #include "hft_trader/api/user/UserDataTools.hpp"
 #include "hft_trader/core/rate_limit/RateLimit.hpp"
@@ -360,6 +361,10 @@ bool testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() {
          expect(realOrderOk, "second cycle runs after warmup") &&
          expect(engine.fills.size() == 1u, "route-hot second cycle sends real market order and fills it") &&
          expect(engine.userEvents.size() == 1u, "real fill publishes strategy user event") &&
+         expect(cxet::composite::userDataEventContractValid(engine.userEvents[0]),
+                "backtest fill satisfies the normalized USER contract") &&
+         expect(engine.userEvents[0].eventId.raw == 1u,
+                "backtest USER sequence starts at one") &&
          expect(engine.orders.size() == 3u, "no second warmup is inserted once route is hot") &&
          expect(!engine.orders.back().service && !engine.orders.back().warmup, "final order is real strategy order");
 }
@@ -587,6 +592,61 @@ void writeText(const std::filesystem::path& path, std::string_view text) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream out(path, std::ios::out | std::ios::trunc | std::ios::binary);
   out << text;
+}
+
+struct CapturedDepthFixtureRow {
+  std::int64_t exchangeTsNs{0};
+  std::uint64_t sequence{0u};
+  std::vector<hft_backtest::test_support::DepthLevel> levels{};
+};
+
+void writeCapturedDepthManifest(const std::filesystem::path& dir,
+                                std::uint64_t depthRows) {
+  writeText(
+      dir / "manifest.json",
+      hft_backtest::test_support::capturedManifestJson(
+          "binance",
+          "futures",
+          "BTC_USDT",
+          hft_backtest::test_support::CapturedChannelCounts{
+              .depth = depthRows}));
+}
+
+void writeCapturedDepthSession(
+    const std::filesystem::path& dir,
+    std::initializer_list<CapturedDepthFixtureRow> rows) {
+  writeCapturedDepthManifest(dir, rows.size());
+  std::string tape{};
+  std::string sidecar{};
+  for (const CapturedDepthFixtureRow& row : rows) {
+    std::string tapeRow = "[" + std::to_string(row.sequence) + "," +
+        std::to_string(hft_backtest::test_support::taggedDepthTimestamp(
+            row.exchangeTsNs)) + "," + std::to_string(row.sequence) + "," +
+        std::to_string(row.sequence) + "," +
+        hft_backtest::test_support::arrivalTail(
+            row.sequence, row.exchangeTsNs);
+    std::string sidecarRow = "[" + std::to_string(row.sequence) + "," +
+        std::to_string(hft_backtest::test_support::taggedDepthTimestamp(
+            row.exchangeTsNs));
+    std::size_t levelIndex = 0u;
+    while (levelIndex < row.levels.size()) {
+      const std::int64_t side = row.levels[levelIndex].side;
+      std::uint64_t count = 0u;
+      while (levelIndex < row.levels.size() &&
+             row.levels[levelIndex].side == side) {
+        tapeRow += "," + std::to_string(row.levels[levelIndex].price) +
+            "," + std::to_string(row.levels[levelIndex].qty);
+        ++levelIndex;
+        ++count;
+      }
+      sidecarRow += "," + std::to_string(side) + "," +
+          std::to_string(count);
+    }
+    tape += tapeRow + "]\n";
+    sidecar += sidecarRow + "]\n";
+  }
+  writeText(dir / "jsonl" / "depth_tape.jsonl", tape);
+  writeText(dir / "jsonl" / "depth_sidecar.jsonl", sidecar);
 }
 
 Symbol btcUsdtSymbol() {
@@ -847,9 +907,19 @@ bool testCancelAckPublishesCanceledUserEventWithCumulativeFill() {
 
   hft_trader::strategy::RuntimeClientOrderId parsed{};
   return expect(engine.userEvents.size() == 2u, "partial fill plus cancel publish two user events") &&
+         expect(cxet::composite::userDataEventContractValid(engine.userEvents[0]) &&
+                    cxet::composite::userDataEventContractValid(engine.userEvents[1]),
+                "fill and cancel both satisfy the normalized USER contract") &&
+         expect(engine.userEvents[0].eventId.raw == 1u &&
+                    engine.userEvents[1].eventId.raw == 2u,
+                "backtest USER sequence is monotonic across event kinds") &&
          expect(engine.userEvents[1].kind == cxet::composite::UserDataEventKind::Order, "cancel user event is order kind") &&
          expect(engine.userEvents[1].orderStatus == canon::OrderStatus::Canceled, "cancel ack publishes canceled status") &&
          expect(engine.userEvents[1].lastFilledQty.raw == 0, "cancel user event has zero last fill") &&
+         expect(cxet::composite::userDataFieldPresent(
+                    engine.userEvents[1],
+                    cxet::composite::UserDataField::LastFilledQty),
+                "cancel preserves explicit zero last-fill presence") &&
          expect(engine.userEvents[1].filledQty.raw == 25000000, "cancel user event carries cumulative filled qty") &&
          expect(hft_trader::strategy::parseRuntimeClientOrderId(engine.userEvents[1].clientOrderId, parsed),
                 "cancel client order id parses") &&
@@ -1152,8 +1222,8 @@ bool testMalformedTaggedAmendFailsClosed() {
 bool testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() {
   BacktestLatencyConfig config{};
   config.seed = 77u;
-  config.marketData.baseUs = 2500u;
-  config.marketData.jitterUs = 1000u;
+  config.userData.baseUs = 2500u;
+  config.userData.jitterUs = 1000u;
   config.marketOrder.baseUs = 3100u;
   config.marketOrder.jitterUs = 0u;
 
@@ -1166,8 +1236,8 @@ bool testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() {
   bool varied = false;
   std::uint64_t previous = 0u;
   for (std::uint32_t i = 0u; i < 64u; ++i) {
-    const std::uint64_t a = sampleLatencyUs(first, BacktestLatencyChannel::MarketData);
-    const std::uint64_t b = sampleLatencyUs(second, BacktestLatencyChannel::MarketData);
+    const std::uint64_t a = sampleLatencyUs(first, BacktestLatencyChannel::UserData);
+    const std::uint64_t b = sampleLatencyUs(second, BacktestLatencyChannel::UserData);
     same = same && a == b;
     if (i != 0u && a != previous) varied = true;
     previous = a;
@@ -1177,7 +1247,7 @@ bool testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() {
          expect(varied, "jittered latency sequence varies") &&
          expect(sampleLatencyUs(first, BacktestLatencyChannel::MarketOrder) == 3100u,
                 "zero jitter market order latency returns base") &&
-         expect(latencyProfileMaxUs(config.marketData) == 10000u, "market data latency cap uses built-in spike bound");
+         expect(latencyProfileMaxUs(config.userData) == 10000u, "user data latency cap uses built-in spike bound");
 }
 
 bool testLatencyRuntimeSplitsMarketAndLimitOrderActivation() {
@@ -1284,10 +1354,10 @@ bool testStopMarketBuyTriggersOnReconstructedAskForLastSource() {
   trade.ts.raw = 2000;
   trade.price.raw = 115000000ll;
   trade.qty.raw = kQty1;
-  tryFillOnTrade(engine, trade);
+  tryFillOnTrade(engine, trade, static_cast<std::int64_t>(trade.ts.raw));
   const bool tradeDidNotTrigger = engine.fills.empty() && engine.open[0].state.valid;
   setTop(engine, 109000000ll, 110000000ll);
-  tryFillOnTop(engine, 3000);
+  tryFillOnTop(engine, 3000, true);
 
   return expect(resting, "buy stop-market rests while ask is below trigger") &&
          expect(tradeDidNotTrigger, "buy stop-market last source ignores trade-last") &&
@@ -1356,10 +1426,10 @@ bool testStopMarketSellTriggersOnReconstructedBidForLastSource() {
   trade.ts.raw = 2000;
   trade.price.raw = 109000000ll;
   trade.qty.raw = kQty1;
-  tryFillOnTrade(engine, trade);
+  tryFillOnTrade(engine, trade, static_cast<std::int64_t>(trade.ts.raw));
   const bool tradeDidNotTrigger = engine.fills.empty() && engine.open[0].state.valid;
   setTop(engine, 110000000ll, 111000000ll);
-  tryFillOnTop(engine, 3000);
+  tryFillOnTop(engine, 3000, true);
 
   return expect(resting, "sell stop-market rests while bid is above trigger") &&
          expect(tradeDidNotTrigger, "sell stop-market last source ignores trade-last") &&
@@ -1385,13 +1455,16 @@ bool testStopMarketBuyTriggersOnMarkPrice() {
   cxet::composite::MarkPriceRuntimeV1 mark{};
   mark.ts.raw = 2500;
   mark.markPrice.raw = 110000000ll;
-  tryTriggerStopMarketsOnMark(engine, mark);
+  tryTriggerStopMarketsOnMark(engine, mark, 7500);
 
   return expect(engine.fills.size() == 1u, "mark stop-market fills after mark reaches trigger") &&
          expect(engine.fills[0].priceE8 == 115000000ll, "mark stop-market buy still executes at ask") &&
          expect(engine.orders[0].triggerSource == static_cast<std::uint8_t>(canon::OrderTriggerSource::Mark), "mark stop-market records trigger source") &&
          expect(engine.orders[0].triggerSourcePriceE8 == 110000000ll, "mark stop-market records mark trigger price") &&
-         expect(engine.orders[0].triggerTsNs == 2500, "mark stop-market records trigger timestamp");
+         expect(engine.orders[0].triggerTsNs == 7500,
+                "mark stop-market records projected venue timestamp") &&
+         expect(engine.fills[0].exitTsNs == 7500,
+                "mark stop-market fill uses projected venue timestamp");
 }
 
 bool testStopMarketSellTriggersOnIndexPrice() {
@@ -1408,13 +1481,16 @@ bool testStopMarketSellTriggersOnIndexPrice() {
   cxet::composite::IndexPriceRuntimeV1 index{};
   index.ts.raw = 2600;
   index.indexPrice.raw = 110000000ll;
-  tryTriggerStopMarketsOnIndex(engine, index);
+  tryTriggerStopMarketsOnIndex(engine, index, 7600);
 
   return expect(engine.fills.size() == 1u, "index stop-market fills after index reaches trigger") &&
          expect(engine.fills[0].priceE8 == 109000000ll, "index stop-market sell still executes at bid") &&
          expect(engine.orders[0].triggerSource == static_cast<std::uint8_t>(canon::OrderTriggerSource::Index), "index stop-market records trigger source") &&
          expect(engine.orders[0].triggerSourcePriceE8 == 110000000ll, "index stop-market records index trigger price") &&
-         expect(engine.orders[0].triggerTsNs == 2600, "index stop-market records trigger timestamp");
+         expect(engine.orders[0].triggerTsNs == 7600,
+                "index stop-market records projected venue timestamp") &&
+         expect(engine.fills[0].exitTsNs == 7600,
+                "index stop-market fill uses projected venue timestamp");
 }
 
 bool testMarketBuyConsumesVisibleAskLevelsWithoutMutatingBook() {
@@ -1428,7 +1504,7 @@ bool testMarketBuyConsumesVisibleAskLevelsWithoutMutatingBook() {
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   const hft_trader::core::LocalOrderBookView book = hft_trader::core::orderBook(engine.venueOrderBook);
   const hft_trader::core::LocalOrderBookSideState* asks = book.side(hft_trader::core::BookSide::Ask);
@@ -1470,7 +1546,7 @@ bool testMarketBuyFallsBackToBboWhenVisibleDepthCannotFillMarket() {
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   return expect(engine.fills.size() == 1u, "market buy falls back to one BBO fill when visible depth is insufficient") &&
          expect(engine.fills[0].priceE8 == 10500000000ll, "insufficient depth market buy fills at BBO ask") &&
@@ -1569,7 +1645,7 @@ bool testCrossingLimitBuyOverlaysBboBeforeWalkingVisibleDepth() {
          expect(!engine.open[0].state.valid, "crossing limit buy clears when overlayed depth covers full quantity");
 }
 
-bool testLazyExecutionDepthProviderMarketBuyConsumesLegacyDepth() {
+bool testLazyExecutionDepthProviderRejectsLegacyDepth() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_execution_depth_legacy_" + std::to_string(std::rand()));
   writeText(dir / "manifest.json",
@@ -1583,7 +1659,8 @@ bool testLazyExecutionDepthProviderMarketBuyConsumesLegacyDepth() {
   hft_trader::core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
-  const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
+  const ExecutionDepthOpenStatus openStatus =
+      provider.open(dir, engine.symbol, config, engine.venueOrderBook);
   engine.executionDepthProvider = &provider;
 
   std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(172, Side::Buy())};
@@ -1592,20 +1669,22 @@ bool testLazyExecutionDepthProviderMarketBuyConsumesLegacyDepth() {
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
-  return expect(opened, "lazy execution depth provider opens legacy depth channel") &&
-         expect(provider.rowsRead() == 1u, "lazy execution depth provider reads only needed depth row") &&
-         expect(engine.fills.size() == 2u, "lazy execution depth market buy writes one fill per depth level") &&
-         expect(engine.fills[0].priceE8 == 10100000000ll, "lazy execution depth uses best ask instead of fallback BBO") &&
-         expect(engine.fills[1].priceE8 == 10200000000ll, "lazy execution depth walks second ask level") &&
-         expect(engine.fills[0].chunkCount == 2u, "lazy execution depth carries chunk count") &&
-         expect(engine.fills[0].executionAvgPriceE8 == 10160000000ll, "lazy execution depth carries execution avg");
+  return expect(openStatus == ExecutionDepthOpenStatus::Failed,
+                "lazy execution depth rejects the removed legacy corpus") &&
+         expect(provider.failed(), "legacy depth rejection is fail-closed") &&
+         expect(std::string_view{provider.failureReason()} ==
+                    "manifest_contract_mismatch",
+                "legacy depth rejection names the contract mismatch") &&
+         expect(engine.fills.size() == 1u,
+                "failed legacy provider falls back to one labeled BBO fill") &&
+         expect(engine.fills[0].priceE8 == 10100000000ll,
+                "legacy rejection does not leak its hidden second level");
 }
 
 bool testDeclaredMissingExecutionDepthReportsFallbackStatus() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_execution_depth_missing_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
+  writeCapturedDepthManifest(dir, 1u);
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
@@ -1624,7 +1703,14 @@ bool testDeclaredMissingExecutionDepthReportsFallbackStatus() {
 bool testUndeclaredExecutionDepthUsesPlainBboMode() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_execution_no_depth_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json", "{\"channels\":{}}\n");
+  writeText(
+      dir / "manifest.json",
+      hft_backtest::test_support::capturedManifestJson(
+          "binance",
+          "futures",
+          "BTC_USDT",
+          hft_backtest::test_support::CapturedChannelCounts{
+              .bookTickers = 1u}));
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
@@ -1641,15 +1727,13 @@ bool testUndeclaredExecutionDepthUsesPlainBboMode() {
 bool testLazyExecutionDepthProviderMarketBuyConsumesTapeDepth() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_execution_depth_tape_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
-            "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth_tape.jsonl",
-            "[9223372036854776808,9900000000,100000000,10100000000,40000000,10200000000,60000000]\n"
-            "[9223372036854776809,9900000000,100000000,10300000000,100000000]\n");
-  writeText(dir / "jsonl" / "depth_sidecar.jsonl",
-            "[9223372036854776808,0,1,1,2]\n"
-            "[9223372036854776809,0,1,1,1]\n");
+  writeCapturedDepthSession(
+      dir,
+      {{1000, 1u, {{9900000000ll, 100000000ll, 0},
+                    {10100000000ll, 40000000ll, 1},
+                    {10200000000ll, 60000000ll, 1}}},
+       {1001, 2u, {{9900000000ll, 100000000ll, 0},
+                    {10300000000ll, 100000000ll, 1}}}});
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
@@ -1683,10 +1767,10 @@ bool testLazyExecutionDepthProviderMarketBuyConsumesTapeDepth() {
 bool testStaleLazyExecutionDepthMarketBuyFallsBackToBbo() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_execution_depth_stale_buy_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth.jsonl",
-            "[[9900000000,100000000,0],[10100000000,100000000,1],1000]\n");
+  writeCapturedDepthSession(
+      dir,
+      {{1000, 1u, {{9900000000ll, 100000000ll, 0},
+                    {10100000000ll, 100000000ll, 1}}}});
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
@@ -1703,7 +1787,7 @@ bool testStaleLazyExecutionDepthMarketBuyFallsBackToBbo() {
   io.orderCount = orders.size();
   applyIntents(engine, io, 501002000, 0, 0);
 
-  return expect(opened, "stale lazy depth provider opens legacy fixture") &&
+  return expect(opened, "stale lazy depth provider opens captured fixture") &&
          expect(provider.rowsRead() == 1u, "stale lazy depth provider advances to active timestamp") &&
          expect(engine.fills.size() == 1u, "stale lazy depth market buy falls back to one BBO fill") &&
          expect(engine.fills[0].priceE8 == 10400000000ll, "stale lazy depth market buy fills at BBO ask") &&
@@ -1714,10 +1798,11 @@ bool testStaleLazyExecutionDepthMarketBuyFallsBackToBbo() {
 bool testFreshLazyExecutionDepthMarketBuyMayUseSlightlyOlderDepth() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_execution_depth_fresh_buy_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth.jsonl",
-            "[[9900000000,100000000,0],[10100000000,40000000,1],[10200000000,60000000,1],1000000]\n");
+  writeCapturedDepthSession(
+      dir,
+      {{1000000, 1u, {{9900000000ll, 100000000ll, 0},
+                       {10100000000ll, 40000000ll, 1},
+                       {10200000000ll, 60000000ll, 1}}}});
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
@@ -1734,7 +1819,7 @@ bool testFreshLazyExecutionDepthMarketBuyMayUseSlightlyOlderDepth() {
   io.orderCount = orders.size();
   applyIntents(engine, io, 26000000, 0, 0);
 
-  return expect(opened, "fresh lazy depth provider opens legacy fixture") &&
+  return expect(opened, "fresh lazy depth provider opens captured fixture") &&
          expect(provider.rowsRead() == 1u, "fresh lazy depth provider advances to active timestamp") &&
          expect(engine.fills.size() == 2u, "fresh lazy depth market buy still consumes depth chunks") &&
          expect(engine.fills[0].priceE8 == 10100000000ll, "fresh lazy depth market buy uses best depth ask") &&
@@ -1745,10 +1830,10 @@ bool testFreshLazyExecutionDepthMarketBuyMayUseSlightlyOlderDepth() {
 bool testStaleLazyExecutionDepthMarketSellFallsBackToBboBid() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_execution_depth_stale_sell_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth.jsonl",
-            "[[9900000000,100000000,0],[10100000000,100000000,1],1000]\n");
+  writeCapturedDepthSession(
+      dir,
+      {{1000, 1u, {{9900000000ll, 100000000ll, 0},
+                    {10100000000ll, 100000000ll, 1}}}});
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
@@ -1765,7 +1850,7 @@ bool testStaleLazyExecutionDepthMarketSellFallsBackToBboBid() {
   io.orderCount = orders.size();
   applyIntents(engine, io, 501002000, 0, 0);
 
-  return expect(opened, "stale lazy sell depth provider opens legacy fixture") &&
+  return expect(opened, "stale lazy sell depth provider opens captured fixture") &&
          expect(provider.rowsRead() == 1u, "stale lazy sell depth provider advances to active timestamp") &&
          expect(engine.fills.size() == 1u, "stale lazy depth market sell falls back to one BBO fill") &&
          expect(engine.fills[0].priceE8 == 9700000000ll, "stale lazy depth market sell fills at BBO bid") &&
@@ -1776,11 +1861,12 @@ bool testStaleLazyExecutionDepthMarketSellFallsBackToBboBid() {
 bool testLazyExecutionDepthProviderDoesNotAdvanceWithoutExecutionCandidate() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_execution_depth_idle_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth.jsonl",
-            "[[9900000000,100000000,0],[10100000000,100000000,1],1000]\n"
-            "[[9900000000,100000000,0],[10200000000,100000000,1],2000]\n");
+  writeCapturedDepthSession(
+      dir,
+      {{1000, 1u, {{9900000000ll, 100000000ll, 0},
+                    {10100000000ll, 100000000ll, 1}}},
+       {2000, 2u, {{9900000000ll, 100000000ll, 0},
+                    {10200000000ll, 100000000ll, 1}}}});
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
@@ -1791,7 +1877,7 @@ bool testLazyExecutionDepthProviderDoesNotAdvanceWithoutExecutionCandidate() {
   const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   return expect(opened, "lazy execution depth provider opens idle fixture") &&
          expect(provider.rowsRead() == 0u, "lazy execution depth does not advance without executable orders") &&
@@ -1801,10 +1887,10 @@ bool testLazyExecutionDepthProviderDoesNotAdvanceWithoutExecutionCandidate() {
 bool testLazyExecutionDepthProviderInitializesPassiveQueueAtActivation() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_execution_depth_queue_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth.jsonl",
-            "[[9900000000,55000000,0],[10100000000,100000000,1],1000]\n");
+  writeCapturedDepthSession(
+      dir,
+      {{1000, 1u, {{9900000000ll, 55000000ll, 0},
+                    {10100000000ll, 100000000ll, 1}}}});
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
@@ -1827,7 +1913,7 @@ bool testLazyExecutionDepthProviderInitializesPassiveQueueAtActivation() {
   trade.side = Side::Sell();
   trade.price.raw = 9900000000ll;
   trade.qty.raw = 70000000ll;
-  tryFillOnTrade(engine, trade);
+  tryFillOnTrade(engine, trade, static_cast<std::int64_t>(trade.ts.raw));
 
   return expect(opened, "lazy execution depth provider opens passive queue fixture") &&
          expect(capturedQueueAhead, "lazy execution depth captures queue ahead at activation") &&
@@ -1851,7 +1937,7 @@ bool testPassiveQueueDoesNotFillFromTopQtyShrinkWithoutTrade() {
   const bool capturedQueueAhead = engine.open[0].queueAheadQtyRaw == 55000000ll;
 
   setTopWithQty(engine, 9900000000ll, 5000000ll, 10100000000ll, 100000000ll);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   return expect(capturedQueueAhead, "passive queue shrink test captures queue ahead at activation") &&
          expect(engine.fills.empty(), "top quantity shrink without trade does not create maker fill") &&
@@ -1890,7 +1976,7 @@ bool testCrossingLimitConsumesVisibleDepthThenRestsRemainder() {
   io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   return expect(engine.fills.size() == 1u, "crossing limit consumes visible executable ask depth") &&
          expect(engine.fills[0].qtyE8 == 30000000ll, "crossing limit fill is capped by visible ask depth") &&
@@ -1984,6 +2070,8 @@ bool testPostOnlyCrossingBuyRejectsWithoutTakerFill() {
          expect(engine.fills.empty(), "post-only crossing buy does not taker-fill") &&
          expect(!engine.open[0].state.valid, "post-only crossing buy leaves no open order") &&
          expect(engine.userEvents.size() == 1u, "post-only crossing buy publishes rejected user event") &&
+         expect(cxet::composite::userDataEventContractValid(engine.userEvents[0]),
+                "backtest reject satisfies the normalized USER contract") &&
          expect(engine.userEvents[0].orderStatus == canon::OrderStatus::Rejected, "post-only crossing buy event is rejected");
 }
 
@@ -2076,18 +2164,20 @@ bool testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() {
   const bool policyVisible = engine.open[0].state.limitTimeInForcePolicy == hft_trader::core::LimitTimeInForcePolicy::PostOnlyPrefer;
 
   setTop(engine, kPx100 - 200000000ll, kPx100);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   cxet::composite::TradeRuntimeV1 trade{};
   trade.ts.raw = 3000;
   trade.side = Side::Sell();
   trade.price.raw = kPx100 - 100000000ll;
   trade.qty.raw = kQty1;
-  tryFillOnTrade(engine, trade);
+  tryFillOnTrade(engine, trade, 7000);
 
   return expect(policyVisible, "post-only resting order state keeps post-only policy") &&
          expect(engine.orders[0].status == kRecordStatusFilled, "post-only resting order fills from trade") &&
          expect(engine.fills.size() == 1u, "post-only resting order has one maker fill") &&
+         expect(engine.fills[0].exitTsNs == 7000,
+                "passive trade fill uses projected venue timestamp") &&
          expect(engine.fills[0].orderId == 42u, "post-only maker fill uses order id") &&
          expect(engine.userEvents.size() == 1u, "post-only maker fill publishes one user event") &&
          expect(engine.userEvents[0].maker == 1u, "post-only trade fill is maker");
@@ -2110,7 +2200,7 @@ bool testMakerFillMinCrossTicksRequiresTradeThrough() {
   touch.side = Side::Sell();
   touch.price.raw = orderPrice;
   touch.qty.raw = kQty1;
-  tryFillOnTrade(engine, touch);
+  tryFillOnTrade(engine, touch, static_cast<std::int64_t>(touch.ts.raw));
 
   const bool noTouchFill = engine.fills.empty() && engine.open[0].state.valid;
 
@@ -2119,7 +2209,8 @@ bool testMakerFillMinCrossTicksRequiresTradeThrough() {
   through.side = Side::Sell();
   through.price.raw = orderPrice - engine.tickSizeE8;
   through.qty.raw = kQty1;
-  tryFillOnTrade(engine, through);
+  tryFillOnTrade(engine, through,
+                 static_cast<std::int64_t>(through.ts.raw));
 
   return expect(noTouchFill, "maker min-cross ignores touch-only trade") &&
          expect(engine.orders[0].status == kRecordStatusFilled, "maker min-cross fills after trade-through") &&
@@ -2141,7 +2232,7 @@ bool testTradeQtyPartialFillKeepsMakerOrderLiveUntilCumulativeFilled() {
   first.side = Side::Sell();
   first.price.raw = kPx100 - 100000000ll;
   first.qty.raw = 25000000;
-  tryFillOnTrade(engine, first);
+  tryFillOnTrade(engine, first, static_cast<std::int64_t>(first.ts.raw));
 
   const bool partialVisible = engine.open[0].state.valid && engine.open[0].active;
   const bool partialOrderActive = engine.orders[0].status == kRecordStatusActive;
@@ -2155,7 +2246,7 @@ bool testTradeQtyPartialFillKeepsMakerOrderLiveUntilCumulativeFilled() {
   second.side = Side::Sell();
   second.price.raw = kPx100 - 100000000ll;
   second.qty.raw = 75000000;
-  tryFillOnTrade(engine, second);
+  tryFillOnTrade(engine, second, static_cast<std::int64_t>(second.ts.raw));
 
   return expect(partialVisible, "partial maker trade leaves order live") &&
          expect(partialOrderActive, "partial maker trade keeps order record active") &&
@@ -2190,7 +2281,7 @@ bool testPassiveQueueAdvancesOnlyFromOppositeTradesAtOrderPrice() {
   first.side = Side::Sell();
   first.price.raw = 9900000000ll;
   first.qty.raw = 50000000ll;
-  tryFillOnTrade(engine, first);
+  tryFillOnTrade(engine, first, static_cast<std::int64_t>(first.ts.raw));
   const bool stillWaiting = engine.fills.empty() && engine.open[0].queueAheadQtyRaw == 5000000ll;
 
   cxet::composite::TradeRuntimeV1 second{};
@@ -2198,7 +2289,7 @@ bool testPassiveQueueAdvancesOnlyFromOppositeTradesAtOrderPrice() {
   second.side = Side::Sell();
   second.price.raw = 9900000000ll;
   second.qty.raw = 70000000ll;
-  tryFillOnTrade(engine, second);
+  tryFillOnTrade(engine, second, static_cast<std::int64_t>(second.ts.raw));
 
   return expect(capturedQueueAhead, "passive buy captures visible bid queue ahead at activation") &&
          expect(stillWaiting, "trade volume first consumes queue ahead without filling us") &&
@@ -2495,10 +2586,11 @@ bool testTraderRiskStopAfterForceCloseKeepsRiskFieldsAndFlatPosition() {
 bool testForceCloseOpenLongPositionUsesLazyExecutionDepth() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_force_close_lazy_depth_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth.jsonl",
-            "[[9900000000,40000000,0],[9800000000,60000000,0],[10100000000,100000000,1],1000]\n");
+  writeCapturedDepthSession(
+      dir,
+      {{1000, 1u, {{9900000000ll, 40000000ll, 0},
+                    {9800000000ll, 60000000ll, 0},
+                    {10100000000ll, 100000000ll, 1}}}});
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
@@ -2515,7 +2607,7 @@ bool testForceCloseOpenLongPositionUsesLazyExecutionDepth() {
 
   const bool closed = forceClosePosition(engine, 2000, 0);
 
-  return expect(opened, "force-close lazy depth provider opens legacy fixture") &&
+  return expect(opened, "force-close lazy depth provider opens captured fixture") &&
          expect(closed, "lazy depth force close reports success") &&
          expect(provider.rowsRead() == 1u, "lazy depth force close advances only needed depth row") &&
          expect(engine.netQtyRaw == 0, "lazy depth force close flattens long") &&
@@ -2567,224 +2659,6 @@ bool testCancelOpenOrdersAtFinishWritesCancelAcks() {
          expect(engine.orders[1].activeTsNs == 102000, "final cleanup honors cancel latency") &&
          expect(!engine.open[0].state.valid, "final cleanup clears open order state");
 }
-bool testLoadSessionUsesManifestChannelPathsAndMetadata() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_loader_manifest_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTC_USDT\"]},\n"
-            "  \"channels\": {\n"
-            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
-            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
-            "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"},\n"
-            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
-            "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
-            "  },\n"
-            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
-            "}\n");
-  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"expiry_utc_ns\":1781913600000000000}\n");
-  writeText(dir / "jsonl" / "trades.jsonl", "[10000000000,100000000,1,1000]\n");
-  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,1001]\n");
-  writeText(dir / "jsonl" / "price_limit.jsonl", "[1001,9500000000,10500000000,1]\n");
-  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],1002]\n");
-  writeText(dir / "jsonl" / "candles.jsonl", "[1,900,10200000000,9800000000,500000000]\n");
-
-  SessionLoadPlan plan{};
-  plan.loadTrades = true;
-  plan.loadBookTickers = true;
-  plan.loadDepths = true;
-  plan.loadCandles = true;
-  plan.requireTrades = true;
-  plan.requireBookTickers = true;
-  plan.requireDepths = true;
-  plan.requireCandles = true;
-  SessionData data{};
-  std::string error;
-  const hft_backtest::Status status = loadSession(dir, plan, data, error);
-
-  return expect(status == hft_backtest::Status::Ok, "loader accepts current manifest channel path schema") &&
-         expect(data.exchange == "binance", "loader reads exchange identity") &&
-         expect(data.market == "futures", "loader reads market identity") &&
-         expect(data.symbol == "BTC_USDT", "loader reads first symbol identity") &&
-         expect(data.trades.size() == 1u, "loader reads trades from channel path") &&
-         expect(data.bookTickers.size() == 1u, "loader reads bookticker from channel path") &&
-         expect(data.priceLimits.size() == 1u, "loader reads price_limit from channel path") &&
-         expect(data.depths.size() == 1u, "loader reads depth from channel path") &&
-         expect(data.candles.size() == 1u, "loader reads candles from channel path") &&
-         expect(data.instrument.tickSizeE8 == 1000000, "loader reads tick size metadata") &&
-         expect(data.instrument.lotSizeE8 == 1000, "loader reads lot size metadata") &&
-         expect(data.instrument.expiryUtcNs == 1781913600000000000ll, "loader reads expiry metadata");
-}
-
-bool testLoadSessionFailsMissingRequiredDepth() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_loader_missing_depth_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
-            "\"channels\":{\"depth\":{\"path\":\"jsonl/depth.jsonl\"}}}\n");
-  SessionLoadPlan plan{};
-  plan.loadDepths = true;
-  plan.requireDepths = true;
-  SessionData data{};
-  std::string error;
-  const hft_backtest::Status status = loadSession(dir, plan, data, error);
-
-  return expect(status == hft_backtest::Status::CorruptData, "loader rejects missing required depth") &&
-         expect(error.find("depth") != std::string::npos, "missing required depth error names channel");
-}
-
-bool testLoadSessionPrefersDepthTapeSidecar() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_depth_tape_" + std::to_string(std::rand()));
-  std::filesystem::create_directories(dir / "jsonl");
-  writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
-            "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
-            "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth_tape.jsonl",
-            "[9223372036854776810,9900000000,100000000,10100000000,200000000]\n");
-  writeText(dir / "jsonl" / "depth_sidecar.jsonl", "[9223372036854776810,0,1,1,1]\n");
-  writeText(dir / "jsonl" / "depth.jsonl", "[[9700000000,100000000,0],[10300000000,100000000,1],1002]\n");
-
-  SessionLoadPlan plan{};
-  plan.loadDepths = true;
-  plan.requireDepths = true;
-  SessionData data{};
-  std::string error;
-  const hft_backtest::Status status = loadSession(dir, plan, data, error);
-
-  return expect(status == hft_backtest::Status::Ok, "loader accepts depth tape sidecar package") &&
-         expect(data.depths.size() == 1u, "depth tape sidecar yields one depth row") &&
-         expect(data.depths[0].tsNs == 1002, "depth tape sidecar decodes tagged timestamp") &&
-         expect(data.depths[0].levels.size() == 2u, "depth tape sidecar decodes levels") &&
-         expect(data.depths[0].levels[0].priceE8 == 9900000000ll, "depth tape sidecar wins over legacy depth") &&
-         expect(data.depths[0].levels[0].side == 0, "depth tape sidecar applies bid side") &&
-         expect(data.depths[0].levels[1].side == 1, "depth tape sidecar applies ask side");
-}
-
-bool testLoadSessionKeepsDepthTapeSidecarPrefixWhenTapeTailIsUnpaired() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_depth_tape_partial_tail_" + std::to_string(std::rand()));
-  std::filesystem::create_directories(dir / "jsonl");
-  writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
-            "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
-            "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth_tape.jsonl",
-            "[9223372036854776810,9900000000,100000000,10100000000,200000000]\n"
-            "[9223372036854776811,9910000000,100000000,10110000000,200000000]\n"
-            "[9223372036854776812,9920000000,100000000,10120000000,200000000]\n");
-  writeText(dir / "jsonl" / "depth_sidecar.jsonl",
-            "[9223372036854776810,0,1,1,1]\n"
-            "[9223372036854776811,0,1,1,1]\n");
-
-  SessionLoadPlan plan{};
-  plan.loadDepths = true;
-  plan.requireDepths = true;
-  SessionData data{};
-  std::string error;
-  const hft_backtest::Status status = loadSession(dir, plan, data, error);
-
-  return expect(status == hft_backtest::Status::Ok, "loader accepts paired depth prefix with unpaired tape tail") &&
-         expect(error.empty(), "partial depth tail does not become hard loader error") &&
-         expect(data.depths.size() == 2u, "partial depth tail keeps valid paired prefix") &&
-         expect(data.warnings.size() == 1u, "partial depth tail emits one warning") &&
-         expect(data.warnings[0].find("dropped 1 unpaired depth_tape rows") != std::string::npos,
-                "partial depth tail warning names dropped tape rows");
-}
-
-bool testLoadSessionResyncsDepthTapeSidecarAfterMissingMiddleSidecarRow() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_depth_tape_resync_" + std::to_string(std::rand()));
-  std::filesystem::create_directories(dir / "jsonl");
-  writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
-            "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
-            "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth_tape.jsonl",
-            "[9223372036854776810,9900000000,100000000,10100000000,200000000]\n"
-            "[9223372036854776811,9910000000,100000000,10110000000,200000000]\n"
-            "[9223372036854776812,9920000000,100000000,10120000000,200000000]\n");
-  writeText(dir / "jsonl" / "depth_sidecar.jsonl",
-            "[9223372036854776810,0,1,1,1]\n"
-            "[9223372036854776812,0,1,1,1]\n");
-
-  SessionLoadPlan plan{};
-  plan.loadDepths = true;
-  plan.requireDepths = true;
-  SessionData data{};
-  std::string error;
-  const hft_backtest::Status status = loadSession(dir, plan, data, error);
-
-  return expect(status == hft_backtest::Status::Ok, "loader resyncs after a missing middle sidecar row") &&
-         expect(error.empty(), "resynced depth corruption does not become hard loader error") &&
-         expect(data.depths.size() == 2u, "resynced depth load keeps rows before and after bad row") &&
-         expect(data.depths[0].tsNs == 1002, "resynced depth keeps first row") &&
-         expect(data.depths[1].tsNs == 1004, "resynced depth resumes at next matching timestamp") &&
-         expect(!data.warnings.empty(), "resynced depth emits warning") &&
-         expect(data.warnings[0].find("dropped 1 unpaired depth_tape rows") != std::string::npos,
-                "resync warning names skipped tape row");
-}
-
-bool testLoadSessionSkipsCorruptMiddleDepthTapeSidecarPair() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_depth_tape_corrupt_pair_" + std::to_string(std::rand()));
-  std::filesystem::create_directories(dir / "jsonl");
-  writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
-            "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
-            "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth_tape.jsonl",
-            "[9223372036854776810,9900000000,100000000,10100000000,200000000]\n"
-            "[9223372036854776811,9910000000,100000000,10110000000,200000000]\n"
-            "[9223372036854776812,9920000000,100000000,10120000000,200000000]\n");
-  writeText(dir / "jsonl" / "depth_sidecar.jsonl",
-            "[9223372036854776810,0,1,1,1]\n"
-            "[9223372036854776811,0,3]\n"
-            "[9223372036854776812,0,1,1,1]\n");
-
-  SessionLoadPlan plan{};
-  plan.loadDepths = true;
-  plan.requireDepths = true;
-  SessionData data{};
-  std::string error;
-  const hft_backtest::Status status = loadSession(dir, plan, data, error);
-
-  return expect(status == hft_backtest::Status::Ok, "loader skips a corrupt middle depth pair") &&
-         expect(error.empty(), "skipped corrupt depth pair does not become hard loader error") &&
-         expect(data.depths.size() == 2u, "skipped corrupt depth pair keeps surrounding rows") &&
-         expect(data.depths[0].tsNs == 1002, "skipped corrupt depth keeps first row") &&
-         expect(data.depths[1].tsNs == 1004, "skipped corrupt depth resumes on later valid row") &&
-         expect(!data.warnings.empty(), "skipped corrupt depth pair emits warning") &&
-         expect(data.warnings[0].find("dropped corrupt depth_tape/depth_sidecar row") != std::string::npos,
-                "corrupt pair warning names skipped row");
-}
-
-bool testLoadSessionRejectsDepthTapeWithoutTaggedTimestamp() {
-  const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_depth_tape_bad_tag_" + std::to_string(std::rand()));
-  std::filesystem::create_directories(dir / "jsonl");
-  writeText(dir / "manifest.json",
-            "{\"identity\":{\"exchange\":\"binance\",\"market\":\"futures\",\"symbols\":[\"BTC_USDT\"]},"
-            "\"channels\":{\"depth\":{\"path\":\"jsonl/depth_tape.jsonl\","
-            "\"sidecar_path\":\"jsonl/depth_sidecar.jsonl\"}}}\n");
-  writeText(dir / "jsonl" / "depth_tape.jsonl",
-            "[1002,9900000000,100000000]\n");
-  writeText(dir / "jsonl" / "depth_sidecar.jsonl", "[1002,1,1]\n");
-
-  SessionLoadPlan plan{};
-  plan.loadDepths = true;
-  plan.requireDepths = true;
-  SessionData data{};
-  std::string error;
-  const hft_backtest::Status status = loadSession(dir, plan, data, error);
-
-  return expect(status == hft_backtest::Status::CorruptData,
-                "loader rejects depth tape without tagged timestamp") &&
-         expect(error.find("depth_tape") != std::string::npos,
-                "bad depth tape error names depth_tape");
-}
-
 bool testDepthRowBuildsInitialOrderBookSnapshot() {
   DepthRow row{};
   row.tsNs = 1002;
@@ -2816,6 +2690,71 @@ bool testDepthRowBuildsInitialOrderBookSnapshot() {
          expect(hft_trader::core::bestAsk(view).raw == 10100000000ll, "depth row snapshot sets best ask");
 }
 
+bool testCapturedBboFreshnessUsesReplayClockCoordinates() {
+  SessionData session{};
+  BookTickerRow initial{};
+  initial.bidPriceE8 = 9900000000ll;
+  initial.bidQtyE8 = 100000000ll;
+  initial.askPriceE8 = 10100000000ll;
+  initial.askQtyE8 = 200000000ll;
+  initial.tsNs = 1'000;
+  initial.ingestSeq = 1;
+  session.bookTickers.push_back(initial);
+
+  EngineState strategyEngine{};
+  EngineState venueEngine{};
+  const Symbol symbol = btcUsdtSymbol();
+  StrategyInstrumentSpec instrument{};
+  instrument.tickSizeRaw = 1000000;
+
+  TimelineEvent initialEvent{};
+  initialEvent.kind = kTimelineKindBookTicker;
+  initialEvent.index = 0u;
+  initialEvent.tsNs = 5'000;
+  initialEvent.deliveryTsNs = 9'000;
+  initialEvent.deliveryRealtimeNs = 1'700'000'000'000'009'000ll;
+  initialEvent.receiveMonotonicNs = 123u;
+  applyMarketEventToSnapshots(strategyEngine, session, initialEvent, symbol,
+                              instrument, true);
+  applyMarketEventToSnapshots(venueEngine, session, initialEvent, symbol,
+                              instrument, false);
+
+  BookTickerRow freshness = initial;
+  freshness.ingestSeq = 2;
+  freshness.freshnessOnly = true;
+  session.bookTickers.push_back(freshness);
+  TimelineEvent freshnessEvent = initialEvent;
+  freshnessEvent.index = 1u;
+  freshnessEvent.deliveryTsNs = 11'000;
+  freshnessEvent.deliveryRealtimeNs =
+      1'700'000'000'000'011'000ll;
+  freshnessEvent.receiveMonotonicNs = 456u;
+  freshnessEvent.applicationOnly = true;
+  applyMarketEventToSnapshots(strategyEngine, session, freshnessEvent, symbol,
+                              instrument, true);
+
+  return expect(
+             strategyEngine.snapshot.lastBookTickerRecvMono.raw == 11'000u,
+             "strategy BBO freshness uses replay delivery monotonic time") &&
+         expect(
+             strategyEngine.snapshot.reconstructedBookTickerRecvMono.raw ==
+                 11'000u,
+             "reconstructed strategy BBO freshness uses replay delivery time") &&
+         expect(
+             strategyEngine.snapshot.lastBookTickerRecvUtc.raw ==
+                 1'700'000'000'000'011'000ull,
+             "strategy BBO keeps captured realtime evidence") &&
+         expect(
+             venueEngine.venueSnapshot.lastBookTickerRecvMono.raw == 5'000u,
+             "venue BBO freshness uses exchange-projected replay coordinate") &&
+         expect(
+             strategyEngine.snapshot.lastBookTicker.bid.px.raw ==
+                 initial.bidPriceE8 &&
+                 strategyEngine.snapshot.lastBookTicker.ask.px.raw ==
+                     initial.askPriceE8,
+             "freshness-only BBO does not replace retained prices");
+}
+
 bool testTieredCandleHistoryBuildsCounts() {
   std::vector<CandleRow> rows{};
   rows.push_back(CandleRow{1, 1000, 10200000000ll, 9800000000ll, 500000000ll});
@@ -2834,9 +2773,9 @@ bool testTieredCandleHistoryBuildsCounts() {
          expect(history.m1[0].quoteAmount.raw == 500000000ll, "tiered candle history preserves quote amount");
 }
 
-bool testWriterCreatesV2RunDirectory() {
+bool testWriterCreatesRunDirectory() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                    ("hft_backtest_v2_writer_" + std::to_string(std::rand()));
+                                    ("hft_backtest_writer_" + std::to_string(std::rand()));
   hft_backtest::BacktestRunResult result{};
   result.status = hft_backtest::Status::Ok;
   result.requestId = "run-v2";
@@ -2869,7 +2808,6 @@ bool testWriterCreatesV2RunDirectory() {
   leg.exchange = "binance";
   leg.market = "futures";
   leg.symbol = "BTC_USDT";
-  leg.marketDataLatency = hft_backtest::BacktestLatencyProfile{250u, 100u};
   leg.marketOrderLatency = hft_backtest::BacktestLatencyProfile{2500u, 1000u};
   leg.limitOrderLatency = hft_backtest::BacktestLatencyProfile{1800u, 700u};
   leg.cancelOrderLatency = hft_backtest::BacktestLatencyProfile{1200u, 400u};
@@ -2933,7 +2871,7 @@ bool testWriterCreatesV2RunDirectory() {
 
   return expect(status == hft_backtest::Status::Ok, "v2 writer reports ok") &&
          expect(std::filesystem::is_directory(dir), "result path is a directory") &&
-         expect(manifest.find("\"type\": \"run.result.v2\"") != std::string::npos, "manifest declares v2 result") &&
+         expect(manifest.find("\"type\": \"run.result.v3\"") != std::string::npos, "manifest declares v3 result") &&
          expect(manifest.find("\"pipeline\": \"inline\"") != std::string::npos, "manifest declares inline execution pipeline") &&
          expect(manifest.find("\"depth_execution\": {") != std::string::npos, "manifest declares depth execution telemetry") &&
          expect(manifest.find("\"mode\": \"bbo_fallback\"") != std::string::npos, "manifest records BBO fallback mode") &&
@@ -2962,8 +2900,12 @@ bool testWriterCreatesV2RunDirectory() {
          expect(manifest.find("\"notional_usdt_e8\"") == std::string::npos, "manifest omits removed live probe notional") &&
          expect(manifest.find("\"timeout_ms\"") == std::string::npos, "manifest omits removed live probe timeout") &&
          expect(manifest.find("\"limit_offset_spread_pct\"") == std::string::npos, "manifest omits removed live probe offset") &&
-         expect(manifest.find("\"market_data_latency\": {\"base_us\": 250, \"jitter_us\": 100}") != std::string::npos,
-                "manifest leg summary carries per-leg market data latency") &&
+         expect(manifest.find("\"market_data_delivery\": \"captured_application_frame_arrival\"") != std::string::npos,
+                "manifest labels captured market-data delivery") &&
+         expect(manifest.find("\"latency_model\": \"captured_market_data_plus_synthetic_execution\"") != std::string::npos,
+                "manifest separates captured market arrival from synthetic execution latency") &&
+         expect(manifest.find("\"venue_schedule\": \"exchange_projected_not_after_delivery\"") != std::string::npos,
+                "manifest labels the clamped exchange-projected venue plane") &&
          expect(orderLifetimes == "[110,150,10000000000,100000000,1,0,0,1]\n"
                                   "[120,160,9900000000,100000000,0,0,0,3]\n",
                 "order lifetimes stream keeps limit and stop-market arrays") &&
@@ -3429,7 +3371,7 @@ int main() {
   ok = testMarketSellOverlaysBboBeforeWalkingVisibleDepth() && ok;
   ok = testLimitBuyBelowBboAskIgnoresStaleDepthAsk() && ok;
   ok = testCrossingLimitBuyOverlaysBboBeforeWalkingVisibleDepth() && ok;
-  ok = testLazyExecutionDepthProviderMarketBuyConsumesLegacyDepth() && ok;
+  ok = testLazyExecutionDepthProviderRejectsLegacyDepth() && ok;
   ok = testDeclaredMissingExecutionDepthReportsFallbackStatus() && ok;
   ok = testUndeclaredExecutionDepthUsesPlainBboMode() && ok;
   ok = testLazyExecutionDepthProviderMarketBuyConsumesTapeDepth() && ok;
@@ -3460,16 +3402,10 @@ int main() {
   ok = testForceCloseOpenLongPositionUsesLazyExecutionDepth() && ok;
   ok = testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() && ok;
   ok = testCancelOpenOrdersAtFinishWritesCancelAcks() && ok;
-  ok = testLoadSessionUsesManifestChannelPathsAndMetadata() && ok;
-  ok = testLoadSessionFailsMissingRequiredDepth() && ok;
-  ok = testLoadSessionPrefersDepthTapeSidecar() && ok;
-  ok = testLoadSessionKeepsDepthTapeSidecarPrefixWhenTapeTailIsUnpaired() && ok;
-  ok = testLoadSessionResyncsDepthTapeSidecarAfterMissingMiddleSidecarRow() && ok;
-  ok = testLoadSessionSkipsCorruptMiddleDepthTapeSidecarPair() && ok;
-  ok = testLoadSessionRejectsDepthTapeWithoutTaggedTimestamp() && ok;
   ok = testDepthRowBuildsInitialOrderBookSnapshot() && ok;
+  ok = testCapturedBboFreshnessUsesReplayClockCoordinates() && ok;
   ok = testTieredCandleHistoryBuildsCounts() && ok;
-  ok = testWriterCreatesV2RunDirectory() && ok;
+  ok = testWriterCreatesRunDirectory() && ok;
   ok = testWriterDiagnosesNoSignalBelowThreshold() && ok;
   ok = testWriterUsesSpreadDiagnosticsWithoutFullTrace() && ok;
   ok = testWriterDiagnosesOrdersWithoutFillsAndRateLimits() && ok;

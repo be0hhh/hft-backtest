@@ -1,30 +1,121 @@
 #include "engine/backtest_engine.hpp"
+#include "engine/backtest_replay_clock.hpp"
 
 #include <algorithm>
-#include <limits>
 
 namespace hft_backtest::detail {
 namespace {
 
 bool timelineLess(const TimelineEvent& lhs, const TimelineEvent& rhs) noexcept {
   if (lhs.tsNs != rhs.tsNs) return lhs.tsNs < rhs.tsNs;
-  if (lhs.ingestSeq != rhs.ingestSeq) return lhs.ingestSeq < rhs.ingestSeq;
+  if (lhs.deliveryTsNs != rhs.deliveryTsNs) return lhs.deliveryTsNs < rhs.deliveryTsNs;
+  if (lhs.producerEpoch != rhs.producerEpoch) return lhs.producerEpoch < rhs.producerEpoch;
+  if (lhs.shardId != rhs.shardId) return lhs.shardId < rhs.shardId;
+  if (lhs.shardSequence != rhs.shardSequence) return lhs.shardSequence < rhs.shardSequence;
+  if (lhs.eventOrdinal != rhs.eventOrdinal) return lhs.eventOrdinal < rhs.eventOrdinal;
+  if (lhs.sourceId != rhs.sourceId) return lhs.sourceId < rhs.sourceId;
+  if (lhs.sourceGeneration != rhs.sourceGeneration) return lhs.sourceGeneration < rhs.sourceGeneration;
+  if (lhs.sessionEpoch != rhs.sessionEpoch) return lhs.sessionEpoch < rhs.sessionEpoch;
+  if (lhs.frameSequence != rhs.frameSequence) return lhs.frameSequence < rhs.frameSequence;
   if (lhs.legIndex != rhs.legIndex) return lhs.legIndex < rhs.legIndex;
-  return lhs.kind < rhs.kind;
+  if (lhs.kind != rhs.kind) return lhs.kind < rhs.kind;
+  return lhs.index < rhs.index;
 }
 
-TimelineEvent makeEvent(const SessionData& session, std::uint8_t leg, std::uint8_t kind, std::size_t index) noexcept {
-  if (kind == kTimelineKindDepth) return TimelineEvent{session.depths[index].tsNs, session.depths[index].tsNs, session.depths[index].ingestSeq, kind, leg, index};
-  if (kind == kTimelineKindTrade) return TimelineEvent{session.trades[index].tsNs, session.trades[index].tsNs, session.trades[index].ingestSeq, kind, leg, index};
-  if (kind == kTimelineKindBookTicker) return TimelineEvent{session.bookTickers[index].tsNs, session.bookTickers[index].tsNs, session.bookTickers[index].ingestSeq, kind, leg, index};
-  if (kind == kTimelineKindPriceLimit) return TimelineEvent{session.priceLimits[index].tsNs, session.priceLimits[index].tsNs, session.priceLimits[index].ingestSeq, kind, leg, index};
-  if (kind == kTimelineKindLiquidation) return TimelineEvent{session.liquidations[index].tsNs, session.liquidations[index].tsNs, session.liquidations[index].ingestSeq, kind, leg, index};
-  if (kind == kTimelineKindMarkPrice) return TimelineEvent{session.markPrices[index].tsNs, session.markPrices[index].tsNs, session.markPrices[index].ingestSeq, kind, leg, index};
-  if (kind == kTimelineKindIndexPrice) return TimelineEvent{session.indexPrices[index].tsNs, session.indexPrices[index].tsNs, session.indexPrices[index].ingestSeq, kind, leg, index};
-  if (kind == kTimelineKindFunding) return TimelineEvent{session.funding[index].tsNs, session.funding[index].tsNs, session.funding[index].ingestSeq, kind, leg, index};
-  if (kind == kTimelineKindOpenInterest) return TimelineEvent{session.openInterest[index].tsNs, session.openInterest[index].tsNs, session.openInterest[index].ingestSeq, kind, leg, index};
-  if (kind == kTimelineKindCandle) return TimelineEvent{session.candles[index].tsNs, session.candles[index].tsNs, 0, kind, leg, index};
-  return TimelineEvent{session.priceLimits[index].tsNs, session.priceLimits[index].tsNs, session.priceLimits[index].ingestSeq, kind, leg, index};
+const hftrec::replay::EventArrival& arrivalFor(const SessionData& session,
+                                               std::uint8_t kind,
+                                               std::size_t index) noexcept {
+  if (kind == kTimelineKindDepth) return session.depths[index].arrival;
+  if (kind == kTimelineKindTrade) return session.trades[index].arrival;
+  if (kind == kTimelineKindBookTicker) return session.bookTickers[index].arrival;
+  if (kind == kTimelineKindPriceLimit) return session.priceLimits[index].arrival;
+  if (kind == kTimelineKindLiquidation) return session.liquidations[index].arrival;
+  if (kind == kTimelineKindMarkPrice) return session.markPrices[index].arrival;
+  if (kind == kTimelineKindIndexPrice) return session.indexPrices[index].arrival;
+  if (kind == kTimelineKindFunding) return session.funding[index].arrival;
+  return session.trades[index].arrival;
+}
+
+std::int64_t exchangeTsFor(const SessionData& session,
+                           std::uint8_t kind,
+                           std::size_t index) noexcept {
+  if (kind == kTimelineKindDepth) return session.depths[index].tsNs;
+  if (kind == kTimelineKindTrade) return session.trades[index].tsNs;
+  if (kind == kTimelineKindBookTicker) return session.bookTickers[index].tsNs;
+  if (kind == kTimelineKindPriceLimit) return session.priceLimits[index].tsNs;
+  if (kind == kTimelineKindLiquidation) return session.liquidations[index].tsNs;
+  if (kind == kTimelineKindMarkPrice) return session.markPrices[index].tsNs;
+  if (kind == kTimelineKindIndexPrice) return session.indexPrices[index].tsNs;
+  if (kind == kTimelineKindFunding) return session.funding[index].tsNs;
+  return 0;
+}
+
+std::int64_t ingestSeqFor(const SessionData& session,
+                          std::uint8_t kind,
+                          std::size_t index) noexcept {
+  if (kind == kTimelineKindDepth) return session.depths[index].ingestSeq;
+  if (kind == kTimelineKindTrade) return session.trades[index].ingestSeq;
+  if (kind == kTimelineKindBookTicker) return session.bookTickers[index].ingestSeq;
+  if (kind == kTimelineKindPriceLimit) return session.priceLimits[index].ingestSeq;
+  if (kind == kTimelineKindLiquidation) return session.liquidations[index].ingestSeq;
+  if (kind == kTimelineKindMarkPrice) return session.markPrices[index].ingestSeq;
+  if (kind == kTimelineKindIndexPrice) return session.indexPrices[index].ingestSeq;
+  if (kind == kTimelineKindFunding) return session.funding[index].ingestSeq;
+  return 0;
+}
+
+TimelineEvent makeEvent(const SessionData& session,
+                        std::uint8_t leg,
+                        std::uint8_t kind,
+                        std::size_t index) noexcept {
+  const hftrec::replay::EventArrival& arrival = arrivalFor(session, kind, index);
+  const std::int64_t exchangeTsNs = exchangeTsFor(session, kind, index);
+  const std::uint64_t anchorMonotonicNs =
+      session.replayAnchorMonotonicNs != 0u
+          ? session.replayAnchorMonotonicNs
+          : session.firstReceiveMonotonicNs;
+  const std::int64_t anchorReceiveNs =
+      session.replayAnchorReceiveNs > 0
+          ? session.replayAnchorReceiveNs
+          : session.firstReceiveRealtimeNs;
+  const CapturedReplayCoordinate clock = projectCapturedReplayCoordinate(
+      CapturedReplayClockAnchor{
+          anchorReceiveNs,
+          anchorMonotonicNs},
+      arrival,
+      exchangeTsNs);
+  const bool applicationAtomicRebase =
+      kind == kTimelineKindDepth &&
+      session.depths[index].applicationAtomicRebase;
+  const bool applicationOnly =
+      kind == kTimelineKindBookTicker &&
+      session.bookTickers[index].freshnessOnly;
+
+  TimelineEvent out{};
+  out.tsNs = applicationAtomicRebase || applicationOnly
+      ? clock.deliveryTsNs
+      : clock.venueTsNs;
+  out.exchangeTsNs = exchangeTsNs;
+  out.deliveryTsNs = clock.deliveryTsNs;
+  out.deliveryRealtimeNs = arrival.receiveRealtimeNs;
+  out.receiveMonotonicNs = arrival.receiveMonotonicNs;
+  out.producerEpoch = arrival.producerEpoch;
+  out.sourceGeneration = arrival.sourceGeneration;
+  out.sessionEpoch = arrival.sessionEpoch;
+  out.frameSequence = arrival.frameSequence;
+  out.shardSequence = arrival.shardSequence;
+  out.sourceId = arrival.sourceId;
+  out.shardId = arrival.shardId;
+  out.eventOrdinal = arrival.eventOrdinal;
+  out.ingestSeq = ingestSeqFor(session, kind, index);
+  out.kind = kind;
+  out.legIndex = leg;
+  out.venueScheduleAdjusted = !applicationOnly &&
+      (clock.venueScheduleAdjusted || applicationAtomicRebase);
+  out.applicationAtomicRebase = applicationAtomicRebase;
+  out.applicationOnly = applicationOnly;
+  out.index = index;
+  return out;
 }
 
 std::size_t channelSize(const SessionData& session, std::uint8_t kind) noexcept {
@@ -36,9 +127,10 @@ std::size_t channelSize(const SessionData& session, std::uint8_t kind) noexcept 
   if (kind == kTimelineKindMarkPrice) return session.markPrices.size();
   if (kind == kTimelineKindIndexPrice) return session.indexPrices.size();
   if (kind == kTimelineKindFunding) return session.funding.size();
-  if (kind == kTimelineKindOpenInterest) return session.openInterest.size();
-  if (kind == kTimelineKindCandle) return session.candles.size();
-  return session.priceLimits.size();
+  // Open-interest has no current captured-arrival corpus contract. Candles are
+  // archive seeds only and must never become strategy-visible live deliveries.
+  if (kind == kTimelineKindOpenInterest || kind == kTimelineKindCandle) return 0u;
+  return 0u;
 }
 
 bool channelSorted(const SessionData& session, std::uint8_t leg, std::uint8_t kind) noexcept {

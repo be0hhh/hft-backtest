@@ -33,12 +33,6 @@ void storePreparedSessions(detail::PreparedBacktestInput& prepared,
                            std::vector<detail::SessionData>& sessions);
 void appendSessionWarnings(BacktestRunResult& result, const std::vector<detail::SessionData>& sessions);
 
-[[nodiscard]] bool marketDataLatencyKeepsOrder(const detail::BacktestLatencyConfig& config) noexcept;
-[[nodiscard]] bool hasMarketDataLatency(const BacktestRunRequest& request,
-                                        const detail::BacktestLatencyConfig& fallback) noexcept;
-[[nodiscard]] bool marketDataLatencyKeepsOrder(const BacktestRunRequest& request,
-                                               const detail::BacktestLatencyConfig& fallback) noexcept;
-
 [[nodiscard]] std::string makeRunId();
 [[nodiscard]] std::filesystem::path resultPathFor(const BacktestRunRequest& request,
                                                   const std::string& runId);

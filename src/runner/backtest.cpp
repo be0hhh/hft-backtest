@@ -8,6 +8,7 @@
 #include "strategy/backtest_strategy_warmup.hpp"
 #include "strategy/backtest_strategy_runtime.hpp"
 #include "strategy/backtest_strategy_trace.hpp"
+#include "input/binary_corpus_loader.hpp"
 #include "input/session_loader.hpp"
 #include "runner/backtest_run_error.hpp"
 
@@ -33,6 +34,10 @@
 #include <vector>
 
 namespace hft_backtest {
+
+extern "C" HFT_BACKTEST_API std::uint32_t hft_backtest_api_version() noexcept {
+  return kBacktestApiVersion;
+}
 namespace {
 
 using hft_trader::runtime::StrategyDescriptor;
@@ -93,17 +98,126 @@ void prefetchRead(const void* ptr) noexcept {
 #endif
 }
 
+std::int64_t capturedUtcOffset(const detail::TimelineEvent& event) noexcept {
+  const __int128 offset = static_cast<__int128>(event.deliveryRealtimeNs) -
+      static_cast<__int128>(event.deliveryTsNs);
+  if (offset < std::numeric_limits<std::int64_t>::min())
+    return std::numeric_limits<std::int64_t>::min();
+  if (offset > std::numeric_limits<std::int64_t>::max())
+    return std::numeric_limits<std::int64_t>::max();
+  return static_cast<std::int64_t>(offset);
+}
+
+void applyCapturedDeliveryClock(detail::EngineState& engine,
+                                const detail::TimelineEvent& event) noexcept {
+  engine.replayUtcOffsetNs = capturedUtcOffset(event);
+}
+
+void applyCapturedDeliveryClock(std::vector<detail::EngineState>& engines,
+                                const detail::TimelineEvent& event) noexcept {
+  const std::int64_t offset = capturedUtcOffset(event);
+  for (detail::EngineState& engine : engines) engine.replayUtcOffsetNs = offset;
+}
+
+[[nodiscard]] bool sameDepthApplicationTransaction(
+    const detail::TimelineEvent& first,
+    const detail::TimelineEvent& next) noexcept {
+  return first.kind == detail::kTimelineKindDepth &&
+      next.kind == detail::kTimelineKindDepth &&
+      first.applicationAtomicRebase && next.applicationAtomicRebase &&
+      first.frameSequence != 0u &&
+      next.frameSequence == first.frameSequence &&
+      next.deliveryTsNs == first.deliveryTsNs &&
+      next.deliveryRealtimeNs == first.deliveryRealtimeNs &&
+      next.receiveMonotonicNs == first.receiveMonotonicNs &&
+      next.producerEpoch == first.producerEpoch &&
+      next.sourceGeneration == first.sourceGeneration &&
+      next.sessionEpoch == first.sessionEpoch &&
+      next.sourceId == first.sourceId && next.shardId == first.shardId &&
+      next.legIndex == first.legIndex;
+}
+
+std::int64_t nextReplayTimestamp(std::int64_t value) noexcept {
+  return value < std::numeric_limits<std::int64_t>::max() ? value + 1 : value;
+}
+
 std::size_t requestedLegCount(const BacktestRunRequest& request) noexcept {
+  if (!request.corpusPath.empty() || !request.corpusSources.empty())
+    return request.corpusSources.size();
   return request.sessions.size() + (request.sessionPath.empty() ? 0u : 1u);
+}
+
+bool usesBinaryCorpus(const BacktestRunRequest& request) noexcept {
+  return !request.corpusPath.empty() || !request.corpusSources.empty();
 }
 
 void applyLegSummaryLatency(BacktestLegSummary& leg,
                             const detail::BacktestLatencyConfig& latency) noexcept {
-  leg.marketDataLatency = latency.marketData;
   leg.marketOrderLatency = latency.marketOrder;
   leg.limitOrderLatency = latency.limitOrder;
   leg.cancelOrderLatency = latency.cancelOrder;
   leg.userDataLatency = latency.userData;
+}
+
+BacktestReplayClockEvidence replayClockEvidence(const detail::SessionData& session) {
+  BacktestReplayClockEvidence out{};
+  out.firstReceiveMonotonicNs = session.firstReceiveMonotonicNs;
+  out.lastReceiveMonotonicNs = session.lastReceiveMonotonicNs;
+  out.firstReceiveRealtimeNs = session.firstReceiveRealtimeNs;
+  out.lastReceiveRealtimeNs = session.lastReceiveRealtimeNs;
+  out.realtimeRegressions = session.realtimeRegressionCount;
+  out.monotonicNonIncreasing = session.monotonicNonIncreasingCount;
+  out.exchangeAheadOfReceive = session.exchangeAheadOfReceiveCount;
+  out.exchangeTimestampMissing = session.exchangeTimestampMissingCount;
+  return out;
+}
+
+void mergeReplayClockEvidence(BacktestReplayClockEvidence& out,
+                              const detail::SessionData& session) noexcept {
+  if (out.firstReceiveMonotonicNs == 0u ||
+      (session.firstReceiveMonotonicNs != 0u &&
+       session.firstReceiveMonotonicNs < out.firstReceiveMonotonicNs))
+    out.firstReceiveMonotonicNs = session.firstReceiveMonotonicNs;
+  if (session.lastReceiveMonotonicNs > out.lastReceiveMonotonicNs)
+    out.lastReceiveMonotonicNs = session.lastReceiveMonotonicNs;
+  if (out.firstReceiveRealtimeNs == 0 ||
+      (session.firstReceiveRealtimeNs > 0 &&
+       session.firstReceiveRealtimeNs < out.firstReceiveRealtimeNs))
+    out.firstReceiveRealtimeNs = session.firstReceiveRealtimeNs;
+  if (session.lastReceiveRealtimeNs > out.lastReceiveRealtimeNs)
+    out.lastReceiveRealtimeNs = session.lastReceiveRealtimeNs;
+  out.realtimeRegressions += session.realtimeRegressionCount;
+  out.monotonicNonIncreasing += session.monotonicNonIncreasingCount;
+  out.exchangeAheadOfReceive += session.exchangeAheadOfReceiveCount;
+  out.exchangeTimestampMissing += session.exchangeTimestampMissingCount;
+}
+
+void includeReplayCoordinate(std::int64_t value,
+                             std::int64_t& first,
+                             std::int64_t& last) noexcept {
+  if (value <= 0) return;
+  if (first == 0 || value < first) first = value;
+  if (value > last) last = value;
+}
+
+void includeTimelineClock(BacktestReplayClockEvidence& out,
+                          const detail::TimelineEvent& event) noexcept {
+  includeReplayCoordinate(event.deliveryTsNs, out.firstReplayDeliveryNs,
+                          out.lastReplayDeliveryNs);
+  if (!event.applicationOnly) {
+    includeReplayCoordinate(event.tsNs, out.firstVenueScheduleNs,
+                            out.lastVenueScheduleNs);
+  }
+}
+
+void includeTimelineClock(detail::EngineState& out,
+                          const detail::TimelineEvent& event) noexcept {
+  includeReplayCoordinate(event.deliveryTsNs, out.firstReplayDeliveryNs,
+                          out.lastReplayDeliveryNs);
+  if (!event.applicationOnly) {
+    includeReplayCoordinate(event.tsNs, out.firstVenueScheduleNs,
+                            out.lastVenueScheduleNs);
+  }
 }
 
 void seedRequestedLegSummaries(BacktestRunResult& result,
@@ -124,6 +238,23 @@ void seedRequestedLegSummaries(BacktestRunResult& result,
       leg.strategyClosed = true;
       result.legs.push_back(std::move(leg));
     };
+    if (usesBinaryCorpus(request)) {
+      for (const BacktestCorpusSourceRequest& source : request.corpusSources) {
+        const std::size_t i = result.legs.size();
+        BacktestLegSummary leg{};
+        leg.sessionPath = request.corpusPath;
+        leg.exchange = source.exchange;
+        leg.market = source.market;
+        leg.symbol = source.canonicalSymbol;
+        applyLegSummaryLatency(
+            leg, latencyConfigForLeg(request, leg.exchange, leg.market, i));
+        leg.initialBalanceE8 = legInitialBalanceE8(request, i);
+        leg.walletBalanceE8 = leg.initialBalanceE8;
+        leg.strategyClosed = true;
+        result.legs.push_back(std::move(leg));
+      }
+      return;
+    }
     if (!request.sessionPath.empty()) appendLeg(request.sessionPath, nullptr);
     for (const BacktestSessionRequest& session : request.sessions) {
       appendLeg(session.path, &session);
@@ -150,6 +281,7 @@ void seedLoadedLegSummaries(BacktestRunResult& result,
       leg.makerFeeBpsE8 = fee.makerFeeBpsE8;
       leg.takerFeeBpsE8 = fee.takerFeeBpsE8;
       applyLegSummaryLatency(leg, latencyConfigForLeg(request, session.exchange, session.market, i));
+      leg.replayClock = replayClockEvidence(session);
       leg.initialBalanceE8 = legInitialBalanceE8(request, i);
       leg.walletBalanceE8 = leg.initialBalanceE8;
       leg.strategyClosed = true;
@@ -170,7 +302,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   auto markTotalTime = [&]() noexcept { result.performance.totalNs = elapsedNs(totalStart); };
   result.runId = request.runId.empty() ? makeRunId() : request.runId;
   result.requestId = request.requestId.empty() ? result.runId : request.requestId;
-  result.sessionPath = request.sessionPath;
+  result.sessionPath = usesBinaryCorpus(request)
+      ? request.corpusPath
+      : request.sessionPath;
   result.configPath = request.configPath;
   result.resultPath = resultPathFor(request, result.runId);
   result.tradeMode = request.tradeMode;
@@ -178,15 +312,21 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.hasPrimaryLegIndex = request.hasPrimaryLegIndex;
   result.rateLimitsEnabled = request.rateLimitsEnabled;
   result.strictRateLimitRejects = request.strictRateLimitRejects;
-  const bool hasExplicitSessions = !request.sessions.empty();
-  const std::size_t requestedSessionCount = explicitSessionPathCount(request, hasExplicitSessions);
+  const bool binaryCorpus = usesBinaryCorpus(request);
+  const bool recorderSessions =
+      !request.sessionPath.empty() || !request.sessions.empty();
+  const bool hasExplicitSessions = binaryCorpus
+      ? request.corpusSources.size() > 1u
+      : !request.sessions.empty();
+  const std::size_t requestedSessionCount = binaryCorpus
+      ? request.corpusSources.size()
+      : explicitSessionPathCount(request, hasExplicitSessions);
   const std::int64_t portfolioInitialBalance = portfolioInitialBalanceE8(request, requestedSessionCount);
   BacktestRunRequest effectiveRequest = request;
   effectiveRequest.initialBalanceE8 = portfolioInitialBalance;
   if (effectiveRequest.latencySeed == 0u) effectiveRequest.latencySeed = hashRunSeed(result.runId);
   const detail::BacktestLatencyConfig latencyConfig = detail::latencyConfigFromRequest(effectiveRequest);
   result.latencySeed = latencyConfig.seed;
-  result.marketDataLatency = latencyConfig.marketData;
   result.marketOrderLatency = latencyConfig.marketOrder;
   result.limitOrderLatency = latencyConfig.limitOrder;
   result.cancelOrderLatency = latencyConfig.cancelOrder;
@@ -216,14 +356,18 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
   };
 
-  if ((!hasExplicitSessions && request.sessionPath.empty()) || request.configPath.empty()) {
+  if ((binaryCorpus && recorderSessions) ||
+      (binaryCorpus &&
+       (request.corpusPath.empty() || request.corpusSources.empty())) ||
+      (!binaryCorpus && !recorderSessions) || request.configPath.empty()) {
     result.status = Status::InvalidArgument;
-    result.error = "session_path and config_path are required";
+    result.error = "select either recorder sessions or a corpus path with source selections, plus config_path";
     return result;
   }
-  if (hasExplicitSessions && explicitSessionPathCount(request, hasExplicitSessions) > hft_trader::core::kStrategyRuntimeMaxLegs) {
+  if (requestedSessionCount > hft_trader::core::kStrategyRuntimeMaxLegs) {
     result.status = Status::InvalidArgument;
-    result.error = "too many backtest sessions (max " + std::to_string(hft_trader::core::kStrategyRuntimeMaxLegs) + ")";
+    result.error = "too many backtest market legs (max " +
+        std::to_string(hft_trader::core::kStrategyRuntimeMaxLegs) + ")";
     return result;
   }
   if (request.hasPrimaryLegIndex && request.primaryLegIndex >= requestedSessionCount) {
@@ -295,7 +439,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)writeEmptyArtifacts();
     return result;
   }
-  detail::PreparedBacktestInput* preparedInput = detail::activePreparedBacktestInput();
+  // Prepared JSON-session caches are path keyed and intentionally do not own
+  // corpus source/time selections. Corpus runs load their exact interval for
+  // every point until that cache grows a selection-aware contract.
+  detail::PreparedBacktestInput* preparedInput = binaryCorpus
+      ? nullptr
+      : detail::activePreparedBacktestInput();
   const auto loadStart = std::chrono::steady_clock::now();
   const bool usePreparedSessions = preparedInput != nullptr &&
                                    preparedMatches(*preparedInput, request, hasExplicitSessions, loadPlan);
@@ -304,6 +453,16 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (usePreparedSessions) {
     sessionsView = &preparedInput->sessions;
     result.status = Status::Ok;
+  } else if (binaryCorpus) {
+    loadedSessions.resize(request.corpusSources.size());
+    result.status = Status::Ok;
+    for (std::size_t i = 0u; i < request.corpusSources.size(); ++i) {
+      result.status = detail::loadBinaryMarketCorpus(
+          request.corpusPath, request.corpusSources[i], loadPlan,
+          loadedSessions[i], error);
+      if (!isOk(result.status)) break;
+    }
+    sessionsView = &loadedSessions;
   } else if (hasExplicitSessions) {
     const std::vector<std::filesystem::path> explicitPaths = sessionPathsFor(request, hasExplicitSessions);
     loadedSessions.resize(explicitPaths.size());
@@ -363,7 +522,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
   if (!venue) {
     result.status = Status::ConfigMismatch;
-    result.error = "config venue/symbol does not match recorder session";
+    result.error = "config venue/symbol does not match selected market source";
     (void)writeEmptyArtifacts();
     return result;
   }
@@ -572,7 +731,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (preparedInput == nullptr || leg >= preparedInput->depthCaches.size()) return {};
     return preparedInput->depthCaches[leg];
   };
-  if (!loadPlan.loadDepths) {
+  if (!loadPlan.loadDepths && !binaryCorpus) {
     if (hasExplicitSessions) {
       executionDepthProviders.reserve(legEngines.size());
       for (std::size_t leg = 0; leg < sessions.size() && leg < legEngines.size(); ++leg) {
@@ -646,37 +805,32 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.performance.timelineNs = elapsedNs(timelineStart);
   const auto deliveryStart = std::chrono::steady_clock::now();
   struct DeliveryEventRef {
-    std::int64_t deliveryTsNs{0};
     std::size_t rawIndex{0u};
   };
-  const bool directDeliveryTimeline = !hasMarketDataLatency(effectiveRequest, latencyConfig);
   std::vector<DeliveryEventRef> deliveryRefs{};
-  if (!directDeliveryTimeline) {
-    deliveryRefs.reserve(timeline.size());
-    for (std::size_t rawIndex = 0u; rawIndex < timeline.size(); ++rawIndex) {
-      const detail::TimelineEvent& event = timeline[rawIndex];
-      const std::uint64_t latencyUs = hasExplicitSessions && event.legIndex < legEngines.size()
-          ? detail::sampleLatencyUs(legEngines[event.legIndex].latency, detail::BacktestLatencyChannel::MarketData)
-          : detail::sampleLatencyUs(engine.latency, detail::BacktestLatencyChannel::MarketData);
-      deliveryRefs.push_back(DeliveryEventRef{detail::delayedTs(event.tsNs, latencyUs), rawIndex});
-    }
-    if (!marketDataLatencyKeepsOrder(effectiveRequest, latencyConfig)) {
-      std::stable_sort(deliveryRefs.begin(), deliveryRefs.end(), [&](const DeliveryEventRef& lhs, const DeliveryEventRef& rhs) noexcept {
-        if (lhs.deliveryTsNs != rhs.deliveryTsNs) return lhs.deliveryTsNs < rhs.deliveryTsNs;
-        const detail::TimelineEvent& lhsRaw = timeline[lhs.rawIndex];
-        const detail::TimelineEvent& rhsRaw = timeline[rhs.rawIndex];
-        if (lhsRaw.tsNs != rhsRaw.tsNs) return lhsRaw.tsNs < rhsRaw.tsNs;
-        if (lhsRaw.ingestSeq != rhsRaw.ingestSeq) return lhsRaw.ingestSeq < rhsRaw.ingestSeq;
-        return lhsRaw.kind < rhsRaw.kind;
-      });
-    }
-  }
-  const std::size_t deliveryEventCount = directDeliveryTimeline ? timeline.size() : deliveryRefs.size();
-  auto deliveryEventAt = [&](std::size_t index) noexcept {
-    if (directDeliveryTimeline) return timeline[index];
-    detail::TimelineEvent out = timeline[deliveryRefs[index].rawIndex];
-    out.deliveryTsNs = deliveryRefs[index].deliveryTsNs;
-    return out;
+  deliveryRefs.reserve(timeline.size());
+  for (std::size_t rawIndex = 0u; rawIndex < timeline.size(); ++rawIndex)
+    deliveryRefs.push_back(DeliveryEventRef{rawIndex});
+  std::stable_sort(deliveryRefs.begin(), deliveryRefs.end(), [&](const DeliveryEventRef& lhs,
+                                                                const DeliveryEventRef& rhs) noexcept {
+    const detail::TimelineEvent& a = timeline[lhs.rawIndex];
+    const detail::TimelineEvent& b = timeline[rhs.rawIndex];
+    if (a.deliveryTsNs != b.deliveryTsNs) return a.deliveryTsNs < b.deliveryTsNs;
+    if (a.producerEpoch != b.producerEpoch) return a.producerEpoch < b.producerEpoch;
+    if (a.shardId != b.shardId) return a.shardId < b.shardId;
+    if (a.shardSequence != b.shardSequence) return a.shardSequence < b.shardSequence;
+    if (a.eventOrdinal != b.eventOrdinal) return a.eventOrdinal < b.eventOrdinal;
+    if (a.sourceId != b.sourceId) return a.sourceId < b.sourceId;
+    if (a.sourceGeneration != b.sourceGeneration) return a.sourceGeneration < b.sourceGeneration;
+    if (a.sessionEpoch != b.sessionEpoch) return a.sessionEpoch < b.sessionEpoch;
+    if (a.frameSequence != b.frameSequence) return a.frameSequence < b.frameSequence;
+    if (a.legIndex != b.legIndex) return a.legIndex < b.legIndex;
+    if (a.kind != b.kind) return a.kind < b.kind;
+    return a.index < b.index;
+  });
+  const std::size_t deliveryEventCount = deliveryRefs.size();
+  auto deliveryEventAt = [&](std::size_t index) noexcept -> const detail::TimelineEvent& {
+    return timeline[deliveryRefs[index].rawIndex];
   };
   result.performance.deliveryNs = elapsedNs(deliveryStart);
   result.trades = 0;
@@ -702,15 +856,55 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.openInterest += loadedSession.openInterest.size();
     if (loadedSession.firstTsNs > 0 && loadedSession.firstTsNs < result.firstTsNs) result.firstTsNs = loadedSession.firstTsNs;
     if (loadedSession.lastTsNs > result.lastTsNs) result.lastTsNs = loadedSession.lastTsNs;
+    mergeReplayClockEvidence(result.replayClock, loadedSession);
   }
   if (result.firstTsNs == std::numeric_limits<std::int64_t>::max()) result.firstTsNs = session.firstTsNs;
   result.events = timeline.size();
+  for (const detail::TimelineEvent& event : timeline) {
+    includeTimelineClock(result.replayClock, event);
+    detail::EngineState* eventEngine = &engine;
+    if (hasExplicitSessions && event.legIndex < legEngines.size())
+      eventEngine = &legEngines[event.legIndex];
+    includeTimelineClock(*eventEngine, event);
+    if (event.venueScheduleAdjusted) {
+      ++result.replayClock.venueScheduleAdjustedEvents;
+      ++eventEngine->venueScheduleAdjustedEvents;
+    }
+  }
+  std::int64_t replayStartTsNs = result.firstTsNs;
+  std::int64_t replayEndEstimateNs = result.lastTsNs;
+  if (!timeline.empty()) {
+    replayStartTsNs = timeline.front().tsNs;
+    replayEndEstimateNs = timeline.back().tsNs;
+  }
+  if (deliveryEventCount != 0u) {
+    const std::int64_t firstDeliveryNs = deliveryEventAt(0u).deliveryTsNs;
+    const std::int64_t lastDeliveryNs =
+        deliveryEventAt(deliveryEventCount - 1u).deliveryTsNs;
+    if (replayStartTsNs <= 0 ||
+        (firstDeliveryNs > 0 && firstDeliveryNs < replayStartTsNs))
+      replayStartTsNs = firstDeliveryNs;
+    if (lastDeliveryNs > replayEndEstimateNs)
+      replayEndEstimateNs = lastDeliveryNs;
+  }
+  std::int64_t greatestProcessedTsNs = replayStartTsNs > 0 ? replayStartTsNs : 0;
+  auto currentReplayTsNs = [&]() noexcept {
+    std::int64_t out = greatestProcessedTsNs;
+    if (hasExplicitSessions) {
+      for (const detail::EngineState& legEngine : legEngines)
+        if (legEngine.lastReplayMonotonicNs > out) out = legEngine.lastReplayMonotonicNs;
+    } else if (engine.lastReplayMonotonicNs > out) {
+      out = engine.lastReplayMonotonicNs;
+    }
+    if (out > 0) return out;
+    return replayStartTsNs;
+  };
   const bool captureIndicatorTrace = !result.indicatorProfile.empty();
   const bool captureRangeTrace = emitsPriceRangeTrace(*descriptor);
   const bool captureSpreadDiagnostics = emitsArbSpreadTrace(*descriptor);
   const bool captureSpreadRows = request.captureStrategySpread && captureSpreadDiagnostics;
-  const std::uint64_t replayDurationNs = result.lastTsNs > result.firstTsNs && result.firstTsNs >= 0
-      ? static_cast<std::uint64_t>(result.lastTsNs) - static_cast<std::uint64_t>(result.firstTsNs)
+  const std::uint64_t replayDurationNs = replayEndEstimateNs > replayStartTsNs && replayStartTsNs >= 0
+      ? static_cast<std::uint64_t>(replayEndEstimateNs) - static_cast<std::uint64_t>(replayStartTsNs)
       : 0u;
   if (hasExplicitSessions) {
     for (std::size_t leg = 0u; leg < legEngines.size(); ++leg) {
@@ -732,12 +926,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {
-      detail::appendEquityPoint(legEngine, result.firstTsNs);
-      detail::appendRiskSnapshot(legEngine, result.firstTsNs, detail::kRiskSnapshotReasonStart);
+      detail::appendEquityPoint(legEngine, replayStartTsNs);
+      detail::appendRiskSnapshot(legEngine, replayStartTsNs, detail::kRiskSnapshotReasonStart);
     }
   } else {
-    detail::appendEquityPoint(engine, result.firstTsNs);
-    detail::appendRiskSnapshot(engine, result.firstTsNs, detail::kRiskSnapshotReasonStart);
+    detail::appendEquityPoint(engine, replayStartTsNs);
+    detail::appendRiskSnapshot(engine, replayStartTsNs, detail::kRiskSnapshotReasonStart);
   }
   std::array<hft_trader::core::StrategyAccountState, hft_trader::core::kStrategyRuntimeMaxLegs> riskAccounts{};
   std::array<const hft_trader::runtime::VenueRuntimeConfig*, hft_trader::core::kStrategyRuntimeMaxLegs> riskVenues{};
@@ -754,7 +948,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   auto writeCurrentArtifacts = [&]() noexcept -> Status {
     markTotalTime();
     if (hasExplicitSessions) {
-      const std::int64_t tsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
+      const std::int64_t tsNs = currentReplayTsNs();
       try {
         for (detail::EngineState& legEngine : legEngines) detail::appendRateLimitUsageSnapshot(legEngine, tsNs);
       } catch (...) {
@@ -773,7 +967,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       }
     }
     try {
-      detail::appendRateLimitUsageSnapshot(engine, result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs);
+      detail::appendRateLimitUsageSnapshot(engine, currentReplayTsNs());
     } catch (...) {
     }
     populateResultPnl(result, engine);
@@ -914,56 +1108,123 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     multiScratch->reset(legEngines.size() < hft_trader::core::kStrategyRuntimeMaxLegs ? legEngines.size() : hft_trader::core::kStrategyRuntimeMaxLegs);
   }
   bool replayStopped = false;
+  auto deliverNextApplicationTransaction =
+      [&](const char* phase) -> bool {
+    const std::int64_t deliveryTsNs =
+        deliveryEventAt(deliveryCursor).deliveryTsNs;
+    const bool beforeDeliveryOk = hasExplicitSessions
+        ? runUntilMulti(*descriptor, state.data(), legEngines,
+                        legInstruments, *multiScratch, shard, control,
+                        deliveryTsNs, request, RunUntilBoundary::Exclusive)
+        : runUntil(*descriptor, state.data(), engine, instrument,
+                   *singleScratch, shard, control, deliveryTsNs, request,
+                   RunUntilBoundary::Exclusive);
+    if (!beforeDeliveryOk) {
+      result.status = Status::InvalidArgument;
+      result.error =
+          "strategy event loop did not settle before market delivery";
+      (void)writeCurrentArtifacts();
+      return false;
+    }
+    if (stopOnStrictRateLimitReject()) return false;
+    if (tripHardLiquidation(deliveryTsNs) ||
+        tripTraderRiskStop(deliveryTsNs)) {
+      replayStopped = true;
+      return true;
+    }
+
+    const detail::TimelineEvent& first =
+        deliveryEventAt(deliveryCursor++);
+    const detail::TimelineEvent* cycleEvent = &first;
+    if (first.deliveryTsNs > greatestProcessedTsNs)
+      greatestProcessedTsNs = first.deliveryTsNs;
+    if (hasExplicitSessions) applyCapturedDeliveryClock(legEngines, first);
+    else applyCapturedDeliveryClock(engine, first);
+    if (hasExplicitSessions) {
+      applyMarketEventToSnapshots(legEngines, sessions, first, legSymbols,
+                                  legInstruments, true);
+    } else {
+      applyMarketEventToSnapshots(engine, session, first, selectedSymbol,
+                                  instrument, true);
+    }
+    while (deliveryCursor < deliveryEventCount &&
+           sameDepthApplicationTransaction(
+               first, deliveryEventAt(deliveryCursor))) {
+      const detail::TimelineEvent& next =
+          deliveryEventAt(deliveryCursor++);
+      cycleEvent = &next;
+      if (hasExplicitSessions) {
+        applyMarketEventToSnapshots(legEngines, sessions, next, legSymbols,
+                                    legInstruments, true);
+      } else {
+        applyMarketEventToSnapshots(engine, session, next, selectedSymbol,
+                                    instrument, true);
+      }
+    }
+    const bool deliveredOk = cycleEvent->applicationOnly ||
+        (hasExplicitSessions
+            ? runCycleMulti(*descriptor, state.data(), legEngines,
+                            legInstruments, *multiScratch, shard, control,
+                            cycleEvent->legIndex, cycleEvent->deliveryTsNs,
+                            request, nullptr)
+            : runCycle(*descriptor, state.data(), engine, instrument,
+                       *singleScratch, shard, control,
+                       cycleEvent->deliveryTsNs, request, nullptr));
+    if (!deliveredOk) {
+      result.status = Status::InvalidArgument;
+      result.error = formatStrategyRunCycleError(
+          *descriptor, state.data(), phase, cycleEvent->deliveryTsNs,
+          cycleEvent->legIndex);
+      (void)writeCurrentArtifacts();
+      return false;
+    }
+    if (stopOnStrictRateLimitReject()) return false;
+    const bool afterDeliveryOk = hasExplicitSessions
+        ? runUntilMulti(*descriptor, state.data(), legEngines,
+                        legInstruments, *multiScratch, shard, control,
+                        cycleEvent->deliveryTsNs, request)
+        : runUntil(*descriptor, state.data(), engine, instrument,
+                   *singleScratch, shard, control,
+                   cycleEvent->deliveryTsNs, request);
+    if (!afterDeliveryOk) {
+      result.status = Status::InvalidArgument;
+      result.error =
+          "strategy event loop did not settle after market delivery";
+      (void)writeCurrentArtifacts();
+      return false;
+    }
+    if (stopOnStrictRateLimitReject()) return false;
+    if (hasExplicitSessions) {
+      for (detail::EngineState& legEngine : legEngines) {
+        (void)detail::appendRiskSnapshotIfDue(
+            legEngine, cycleEvent->deliveryTsNs);
+      }
+    } else {
+      (void)detail::appendRiskSnapshotIfDue(
+          engine, cycleEvent->deliveryTsNs);
+    }
+    if (tripHardLiquidation(cycleEvent->deliveryTsNs) ||
+        tripTraderRiskStop(cycleEvent->deliveryTsNs)) {
+      replayStopped = true;
+    }
+    return true;
+  };
   std::size_t i = 0u;
   while (i < timeline.size()) {
     if (i + 1u < timeline.size()) prefetchRead(&timeline[i + 1u]);
-    if (!directDeliveryTimeline && deliveryCursor < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor]);
+    if (deliveryCursor < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor]);
     const std::int64_t eventTsNs = timeline[i].tsNs;
-    // Same-timestamp venue updates win the tie: orders due at raw ts activate after the raw BBO is applied.
-    const bool beforeOk = hasExplicitSessions
-        ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, eventTsNs, request, RunUntilBoundary::Exclusive)
-        : runUntil(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, eventTsNs, request, RunUntilBoundary::Exclusive);
-    if (!beforeOk) {
-      result.status = Status::InvalidArgument;
-      result.error = "strategy event loop did not settle before market event";
-      (void)writeCurrentArtifacts();
-      return result;
-    }
-    if (stopOnStrictRateLimitReject()) return result;
-    if (tripHardLiquidation(eventTsNs) || tripTraderRiskStop(eventTsNs)) {
-      replayStopped = true;
-      break;
-    }
     while (deliveryCursor < deliveryEventCount && deliveryEventAt(deliveryCursor).deliveryTsNs < eventTsNs) {
-      if (!directDeliveryTimeline && deliveryCursor + 1u < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor + 1u]);
-      const detail::TimelineEvent delivered = deliveryEventAt(deliveryCursor++);
-      if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, delivered, legSymbols, legInstruments, true);
-      else applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
-      const bool deliveredOk = hasExplicitSessions
-          ? runCycleMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, delivered.legIndex, delivered.deliveryTsNs, request, nullptr)
-          : runCycle(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, delivered.deliveryTsNs, request, nullptr);
-      if (!deliveredOk) {
-        result.status = Status::InvalidArgument;
-        result.error = formatStrategyRunCycleError(*descriptor,
-                                                   state.data(),
-                                                   "delivered",
-                                                   delivered.deliveryTsNs,
-                                                   delivered.legIndex);
-        (void)writeCurrentArtifacts();
-        return result;
-      }
-      if (stopOnStrictRateLimitReject()) return result;
-      if (hasExplicitSessions) {
-        for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, delivered.deliveryTsNs);
-      } else {
-        (void)detail::appendRiskSnapshotIfDue(engine, delivered.deliveryTsNs);
-      }
-      if (tripHardLiquidation(delivered.deliveryTsNs) || tripTraderRiskStop(delivered.deliveryTsNs)) {
-        replayStopped = true;
-        break;
-      }
+      if (deliveryCursor + 1u < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor + 1u]);
+      if (!deliverNextApplicationTransaction("delivered")) return result;
+      if (replayStopped) break;
     }
     if (replayStopped) break;
+    if (eventTsNs > greatestProcessedTsNs) greatestProcessedTsNs = eventTsNs;
+    // Deliver every application frame that really arrived before this venue
+    // boundary before advancing timers/actions to the boundary. For an exact
+    // tie the venue update still wins: orders due at the same coordinate are
+    // activated only after that venue state has been applied.
     const bool beforeRawOk = hasExplicitSessions
         ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, eventTsNs, request, RunUntilBoundary::Exclusive)
         : runUntil(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, eventTsNs, request, RunUntilBoundary::Exclusive);
@@ -976,48 +1237,33 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (stopOnStrictRateLimitReject()) return result;
     while (i < timeline.size() && timeline[i].tsNs == eventTsNs) {
       if (i + 1u < timeline.size()) prefetchRead(&timeline[i + 1u]);
-      const detail::TimelineEvent& event = timeline[i++];
-      if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, event, legSymbols, legInstruments, false);
-      else applyMarketEventToSnapshots(engine, session, event, selectedSymbol, instrument, false);
-      if (hasExplicitSessions) {
-        for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, event.tsNs);
-      } else {
-        (void)detail::appendRiskSnapshotIfDue(engine, event.tsNs);
+      const detail::TimelineEvent& first = timeline[i++];
+      const detail::TimelineEvent* riskEvent = &first;
+      if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, first, legSymbols, legInstruments, false);
+      else applyMarketEventToSnapshots(engine, session, first, selectedSymbol, instrument, false);
+      while (i < timeline.size() && timeline[i].tsNs == eventTsNs &&
+             sameDepthApplicationTransaction(first, timeline[i])) {
+        const detail::TimelineEvent& next = timeline[i++];
+        riskEvent = &next;
+        if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, next, legSymbols, legInstruments, false);
+        else applyMarketEventToSnapshots(engine, session, next, selectedSymbol, instrument, false);
       }
-      if (tripHardLiquidation(event.tsNs) || tripTraderRiskStop(event.tsNs)) {
+      if (hasExplicitSessions) {
+        for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, riskEvent->tsNs);
+      } else {
+        (void)detail::appendRiskSnapshotIfDue(engine, riskEvent->tsNs);
+      }
+      if (tripHardLiquidation(riskEvent->tsNs) ||
+          tripTraderRiskStop(riskEvent->tsNs)) {
         replayStopped = true;
         break;
       }
     }
     if (replayStopped) break;
     while (deliveryCursor < deliveryEventCount && deliveryEventAt(deliveryCursor).deliveryTsNs <= eventTsNs) {
-      if (!directDeliveryTimeline && deliveryCursor + 1u < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor + 1u]);
-      const detail::TimelineEvent delivered = deliveryEventAt(deliveryCursor++);
-      if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, delivered, legSymbols, legInstruments, true);
-      else applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
-      const bool deliveredOk = hasExplicitSessions
-          ? runCycleMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, delivered.legIndex, delivered.deliveryTsNs, request, nullptr)
-          : runCycle(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, delivered.deliveryTsNs, request, nullptr);
-      if (!deliveredOk) {
-        result.status = Status::InvalidArgument;
-        result.error = formatStrategyRunCycleError(*descriptor,
-                                                   state.data(),
-                                                   "delivered",
-                                                   delivered.deliveryTsNs,
-                                                   delivered.legIndex);
-        (void)writeCurrentArtifacts();
-        return result;
-      }
-      if (stopOnStrictRateLimitReject()) return result;
-      if (hasExplicitSessions) {
-        for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, delivered.deliveryTsNs);
-      } else {
-        (void)detail::appendRiskSnapshotIfDue(engine, delivered.deliveryTsNs);
-      }
-      if (tripHardLiquidation(delivered.deliveryTsNs) || tripTraderRiskStop(delivered.deliveryTsNs)) {
-        replayStopped = true;
-        break;
-      }
+      if (deliveryCursor + 1u < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor + 1u]);
+      if (!deliverNextApplicationTransaction("delivered")) return result;
+      if (replayStopped) break;
     }
     if (replayStopped) break;
     const bool afterOk = hasExplicitSessions
@@ -1042,48 +1288,14 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
   }
   while (!replayStopped && deliveryCursor < deliveryEventCount) {
-    if (!directDeliveryTimeline && deliveryCursor + 1u < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor + 1u]);
-    const detail::TimelineEvent delivered = deliveryEventAt(deliveryCursor++);
-    const bool beforeDelayedOk = hasExplicitSessions
-        ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, delivered.deliveryTsNs, request)
-        : runUntil(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, delivered.deliveryTsNs, request);
-    if (!beforeDelayedOk) {
-      result.status = Status::InvalidArgument;
-      result.error = "strategy event loop did not settle before delayed market event";
-      (void)writeCurrentArtifacts();
-      return result;
-    }
-    if (stopOnStrictRateLimitReject()) return result;
-    if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, delivered, legSymbols, legInstruments, true);
-    else applyMarketEventToSnapshots(engine, session, delivered, selectedSymbol, instrument, true);
-    const bool delayedOk = hasExplicitSessions
-        ? runCycleMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, delivered.legIndex, delivered.deliveryTsNs, request, nullptr)
-        : runCycle(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, delivered.deliveryTsNs, request, nullptr);
-    if (!delayedOk) {
-      result.status = Status::InvalidArgument;
-      result.error = formatStrategyRunCycleError(*descriptor,
-                                                 state.data(),
-                                                 "delayed",
-                                                 delivered.deliveryTsNs,
-                                                 delivered.legIndex);
-      (void)writeCurrentArtifacts();
-      return result;
-    }
-    if (stopOnStrictRateLimitReject()) return result;
-    if (hasExplicitSessions) {
-      for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, delivered.deliveryTsNs);
-    } else {
-      (void)detail::appendRiskSnapshotIfDue(engine, delivered.deliveryTsNs);
-    }
-    if (tripHardLiquidation(delivered.deliveryTsNs) || tripTraderRiskStop(delivered.deliveryTsNs)) {
-      replayStopped = true;
-      break;
-    }
+    if (deliveryCursor + 1u < deliveryEventCount) prefetchRead(&deliveryRefs[deliveryCursor + 1u]);
+    if (!deliverNextApplicationTransaction("delayed")) return result;
   }
   if (!replayStopped) {
+    const std::int64_t settlementBaseTsNs = currentReplayTsNs();
     const bool settled = hasExplicitSessions
-        ? settleAfterReplayMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, result.lastTsNs, effectiveRequest)
-        : settleAfterReplay(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, result.lastTsNs, effectiveRequest);
+        ? settleAfterReplayMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, settlementBaseTsNs, effectiveRequest)
+        : settleAfterReplay(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, settlementBaseTsNs, effectiveRequest);
     if (!settled) {
       result.status = Status::InvalidArgument;
       result.error = "strategy event loop did not settle after replay";
@@ -1093,12 +1305,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (stopOnStrictRateLimitReject()) return result;
   }
   if (!replayStopped) {
-    const std::int64_t stopCheckTsNs = result.lastTsNs > 0 ? result.lastTsNs : result.firstTsNs;
+    const std::int64_t stopCheckTsNs = currentReplayTsNs();
     (void)(tripHardLiquidation(stopCheckTsNs) || tripTraderRiskStop(stopCheckTsNs, true));
   }
   result.performance.replayNs = elapsedNs(replayStart);
   const auto finalizeStart = std::chrono::steady_clock::now();
-  const std::int64_t finalTsNs = result.lastTsNs > 0 ? result.lastTsNs + 1 : result.lastTsNs;
+  const std::int64_t finalTsNs = nextReplayTimestamp(currentReplayTsNs());
   if (hasExplicitSessions) {
     if (!legEngines.empty()) {
       calculateExecutionQualityDeadlines(

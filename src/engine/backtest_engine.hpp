@@ -333,7 +333,6 @@ struct OpenOrder {
   std::int64_t filledQtyRaw{0};
   std::int64_t queueAheadQtyRaw{0};
   std::int64_t lastAggressiveBookTsNs{0};
-  std::int64_t lastPassiveBboTouchTsNs{0};
   bool active{false};
   bool reduceOnly{false};
   bool postOnly{false};
@@ -411,6 +410,15 @@ struct EngineState {
   hft_trader::core::BboReconstructionState venueBboReconstruction{};
   std::uint64_t contextRevision{1u};
   std::int64_t lastStrategySourceMarketDataTsNs{0};
+  // Difference between the captured realtime clock and the replay monotonic
+  // coordinate at the most recently delivered market-data boundary.
+  std::int64_t replayUtcOffsetNs{0};
+  std::int64_t lastReplayMonotonicNs{0};
+  std::int64_t firstReplayDeliveryNs{0};
+  std::int64_t lastReplayDeliveryNs{0};
+  std::int64_t firstVenueScheduleNs{0};
+  std::int64_t lastVenueScheduleNs{0};
+  std::uint64_t venueScheduleAdjustedEvents{0u};
   BacktestInputCoverage inputCoverage{};
   std::uint32_t legIndex{0u};
   ExchangeId exchange{};
@@ -427,7 +435,7 @@ struct EngineState {
   std::int64_t rateLimitCooldownUntilTsNs{0};
   std::int64_t rateLimitProblemUntilTsNs{0};
   std::size_t deliveredUserEvents{0};
-  std::uint64_t fillSequence{0};
+  std::uint64_t userEventSequence{0};
   std::uint64_t timerWakeEvents{0};
   TimeNs lastOrderPathHotMono{};
   std::uint64_t nextServiceClientIntentRaw{0x8000000000000000ull};
@@ -475,11 +483,32 @@ inline const cxet::composite::BookTickerRuntimeV1& effectiveBookTicker(
 }
 
 struct TimelineEvent {
+  // Replay-monotonic venue scheduling coordinate. It is derived from the
+  // captured monotonic receive clock and the exchange timestamp, then clamped
+  // to delivery when venue-clock skew would put the event after its arrival.
   std::int64_t tsNs{0};
+  std::int64_t exchangeTsNs{0};
+  // Replay-monotonic application-frame delivery coordinate. This preserves
+  // captured CLOCK_MONOTONIC deltas while being anchored near UTC for artifacts.
   std::int64_t deliveryTsNs{0};
+  std::int64_t deliveryRealtimeNs{0};
+  std::uint64_t receiveMonotonicNs{0u};
+  std::uint64_t producerEpoch{0u};
+  std::uint64_t sourceGeneration{0u};
+  std::uint64_t sessionEpoch{0u};
+  std::uint64_t frameSequence{0u};
+  std::uint64_t shardSequence{0u};
+  std::uint32_t sourceId{0u};
+  std::uint16_t shardId{0u};
+  std::uint16_t eventOrdinal{0u};
   std::int64_t ingestSeq{0};
   std::uint8_t kind{0};
   std::uint8_t legIndex{0};
+  bool venueScheduleAdjusted{false};
+  bool applicationAtomicRebase{false};
+  // Captured liveness evidence without a new venue state. It is delivered on
+  // the application plane only and does not directly run a strategy cycle.
+  bool applicationOnly{false};
   std::size_t index{0};
 };
 
@@ -539,10 +568,20 @@ bool fillOrderQty(EngineState& engine,
                   std::int64_t tsNs,
                   bool taker,
                   const FillExecutionMetadata& metadata);
-void tryFillOnTop(EngineState& engine, std::int64_t tsNs);
-void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& trade);
-void tryTriggerStopMarketsOnMark(EngineState& engine, const cxet::composite::MarkPriceRuntimeV1& markPrice);
-void tryTriggerStopMarketsOnIndex(EngineState& engine, const cxet::composite::IndexPriceRuntimeV1& indexPrice);
+void tryFillOnTop(EngineState& engine,
+                  std::int64_t venueTsNs,
+                  bool venueBookTickerUpdate);
+void tryFillOnTrade(EngineState& engine,
+                    const cxet::composite::TradeRuntimeV1& trade,
+                    std::int64_t venueTsNs);
+void tryTriggerStopMarketsOnMark(
+    EngineState& engine,
+    const cxet::composite::MarkPriceRuntimeV1& markPrice,
+    std::int64_t venueTsNs);
+void tryTriggerStopMarketsOnIndex(
+    EngineState& engine,
+    const cxet::composite::IndexPriceRuntimeV1& indexPrice,
+    std::int64_t venueTsNs);
 void applyDueActions(EngineState& engine, std::int64_t tsNs);
 void applyDueActionsBefore(EngineState& engine, std::int64_t tsNs);
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs);

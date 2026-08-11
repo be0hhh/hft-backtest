@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(hft_backtest LANGUAGES CXX VERSION 0.1.0)
+project(hft_backtest LANGUAGES CXX VERSION 0.2.0)
 
 if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   message(FATAL_ERROR "hft-backtest is Clang-only. Configure with -DCMAKE_CXX_COMPILER=clang++.")
@@ -81,6 +81,10 @@ set_property(TARGET hft_trader_runtime PROPERTY INTERFACE_LINK_OPTIONS
 find_package(Threads REQUIRED)
 find_package(absl CONFIG REQUIRED)
 
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../hft-recorder/corpus-contract
+                 ${CMAKE_CURRENT_BINARY_DIR}/hftrec-corpus-contract
+                 EXCLUDE_FROM_ALL)
+
 add_library(hft_backtest_core SHARED
   src/accounting/backtest_accounting.cpp
   src/accounting/backtest_metrics.cpp
@@ -90,11 +94,13 @@ add_library(hft_backtest_core SHARED
   src/engine/backtest_common.cpp
   src/engine/backtest_engine_setup.cpp
   src/engine/backtest_prepared.cpp
+  src/engine/backtest_replay_clock.cpp
   src/engine/backtest_timeline.cpp
   src/execution/backtest_execution.cpp
   src/execution/backtest_execution_depth.cpp
   src/execution/backtest_fill_model.cpp
   src/execution/backtest_latency.cpp
+  src/input/binary_corpus_loader.cpp
   src/input/session_loader.cpp
   src/results/backtest_result_writer.cpp
   src/runner/backtest.cpp
@@ -113,19 +119,22 @@ target_include_directories(hft_backtest_core
 )
 target_link_libraries(hft_backtest_core
   PUBLIC hft_trader_runtime cxet_lib Threads::Threads
-  PRIVATE absl::flat_hash_map absl::inlined_vector
+  PRIVATE hftrec_corpus_contract absl::flat_hash_map absl::inlined_vector
 )
 target_compile_features(hft_backtest_core PUBLIC cxx_std_23)
 target_compile_definitions(hft_backtest_core PRIVATE
   HFT_BACKTEST_BUILDING_LIBRARY=1
   HFT_BACKTEST_TRADER_SOURCE_DIR="${HFT_BACKTEST_TRADER_ROOT}"
 )
+target_compile_definitions(hft_backtest_core PUBLIC HFT_BACKTEST_SHARED=1)
 target_compile_options(hft_backtest_core PRIVATE
   $<$<CONFIG:Release>:-O3>
   $<$<AND:$<CONFIG:Release>,$<NOT:$<BOOL:${CXET_PORTABLE_BUILD}>>>:-march=native>
 )
 set_target_properties(hft_backtest_core PROPERTIES
   OUTPUT_NAME hft_backtest_core
+  VERSION 0.2.0
+  SOVERSION 3
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_property(TARGET hft_backtest_core PROPERTY BUILD_RPATH
@@ -148,7 +157,7 @@ set_property(TARGET hft-backtest PROPERTY BUILD_RPATH
 
 add_executable(hft-backtest-execution-tests tests/execution/backtest_execution_tests.cpp)
 target_include_directories(hft-backtest-execution-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(hft-backtest-execution-tests PRIVATE hft_backtest_core)
+target_link_libraries(hft-backtest-execution-tests PRIVATE hft_backtest_core hftrec_corpus_contract)
 target_compile_features(hft-backtest-execution-tests PRIVATE cxx_std_23)
 set_target_properties(hft-backtest-execution-tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -200,7 +209,7 @@ set_property(TARGET hft-backtest-rate-limit-tests PROPERTY BUILD_RPATH
 
 add_executable(hft-backtest-multileg-context-tests tests/execution/backtest_multileg_context_tests.cpp)
 target_include_directories(hft-backtest-multileg-context-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(hft-backtest-multileg-context-tests PRIVATE hft_backtest_core)
+target_link_libraries(hft-backtest-multileg-context-tests PRIVATE hft_backtest_core hftrec_corpus_contract)
 target_compile_features(hft-backtest-multileg-context-tests PRIVATE cxx_std_23)
 set_target_properties(hft-backtest-multileg-context-tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -212,7 +221,7 @@ set_property(TARGET hft-backtest-multileg-context-tests PROPERTY BUILD_RPATH
 )
 
 add_executable(hft-backtest-stat-arb-replay-tests tests/replay/stat_arb_edge_maker_replay_tests.cpp)
-target_link_libraries(hft-backtest-stat-arb-replay-tests PRIVATE hft_backtest_core)
+target_link_libraries(hft-backtest-stat-arb-replay-tests PRIVATE hft_backtest_core hftrec_corpus_contract)
 target_compile_features(hft-backtest-stat-arb-replay-tests PRIVATE cxx_std_23)
 set_target_properties(hft-backtest-stat-arb-replay-tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -224,7 +233,7 @@ set_property(TARGET hft-backtest-stat-arb-replay-tests PROPERTY BUILD_RPATH
 )
 
 add_executable(hft-backtest-uptick-replay-tests tests/replay/uptick_replay_tests.cpp)
-target_link_libraries(hft-backtest-uptick-replay-tests PRIVATE hft_backtest_core)
+target_link_libraries(hft-backtest-uptick-replay-tests PRIVATE hft_backtest_core hftrec_corpus_contract)
 target_compile_features(hft-backtest-uptick-replay-tests PRIVATE cxx_std_23)
 set_target_properties(hft-backtest-uptick-replay-tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -287,7 +296,7 @@ set_property(TARGET hft-backtest-accounting-tests PROPERTY BUILD_RPATH
 
 add_executable(hft-backtest-session-loader-tests tests/input/session_loader_tests.cpp)
 target_include_directories(hft-backtest-session-loader-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(hft-backtest-session-loader-tests PRIVATE hft_backtest_core)
+target_link_libraries(hft-backtest-session-loader-tests PRIVATE hft_backtest_core hftrec_corpus_contract)
 target_compile_features(hft-backtest-session-loader-tests PRIVATE cxx_std_23)
 set_target_properties(hft-backtest-session-loader-tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -300,7 +309,7 @@ set_property(TARGET hft-backtest-session-loader-tests PROPERTY BUILD_RPATH
 
 add_executable(hft-backtest-sweep-tests tests/sweep/backtest_sweep_tests.cpp)
 target_include_directories(hft-backtest-sweep-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(hft-backtest-sweep-tests PRIVATE hft_backtest_core)
+target_link_libraries(hft-backtest-sweep-tests PRIVATE hft_backtest_core hftrec_corpus_contract)
 target_compile_features(hft-backtest-sweep-tests PRIVATE cxx_std_23)
 set_target_properties(hft-backtest-sweep-tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}

@@ -1,7 +1,8 @@
 #include "input/session_loader.hpp"
 
 #include "api/resolve/LocalSymbolValidation.hpp"
-#include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
+#include "core/capture/SessionManifest.hpp"
+#include "core/replay/JsonLineParser.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -112,55 +113,6 @@ void skipWs(std::string_view text, std::size_t& pos) noexcept {
   }
 }
 
-bool consume(std::string_view text, std::size_t& pos, char expected) noexcept {
-  skipWs(text, pos);
-  if (pos >= text.size() || text[pos] != expected) return false;
-  ++pos;
-  return true;
-}
-
-bool skipJsonString(std::string_view text, std::size_t& pos) noexcept {
-  skipWs(text, pos);
-  if (pos >= text.size() || text[pos] != '"') return false;
-  ++pos;
-  while (pos < text.size()) {
-    const char c = text[pos++];
-    if (c == '"') return true;
-    if (c == '\\') {
-      if (pos >= text.size()) return false;
-      ++pos;
-    }
-  }
-  return false;
-}
-
-std::int64_t candleTierFromTimeframe(std::string_view text, std::size_t begin, std::size_t end) noexcept {
-  const std::string_view timeframe = text.substr(begin, end - begin);
-  if (timeframe == "1m") return 1;
-  if (timeframe == "10m" || timeframe == "15m") return 2;
-  if (timeframe == "1d") return 3;
-  return 0;
-}
-
-bool parseJsonStringTier(std::string_view text, std::size_t& pos, std::int64_t& tier) noexcept {
-  skipWs(text, pos);
-  if (pos >= text.size() || text[pos] != '"') return false;
-  ++pos;
-  const std::size_t begin = pos;
-  while (pos < text.size()) {
-    const char c = text[pos++];
-    if (c == '"') {
-      tier = candleTierFromTimeframe(text, begin, pos - 1u);
-      return true;
-    }
-    if (c == '\\') {
-      if (pos >= text.size()) return false;
-      ++pos;
-    }
-  }
-  return false;
-}
-
 bool parseI64(std::string_view text, std::size_t& pos, std::int64_t& out) noexcept {
   skipWs(text, pos);
   if (pos >= text.size()) return false;
@@ -189,303 +141,109 @@ bool parseI64(std::string_view text, std::size_t& pos, std::int64_t& out) noexce
   return true;
 }
 
-bool parseU64(std::string_view text, std::size_t& pos, std::uint64_t& out) noexcept {
-  skipWs(text, pos);
-  if (pos >= text.size() || text[pos] == '-' || text[pos] == '+') return false;
-  std::uint64_t value = 0u;
-  bool any = false;
-  while (pos < text.size()) {
-    const unsigned digit = static_cast<unsigned>(static_cast<unsigned char>(text[pos]) - static_cast<unsigned char>('0'));
-    if (digit > 9u) break;
-    if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / 10u) return false;
-    value = value * 10u + digit;
-    any = true;
-    ++pos;
-  }
-  if (!any) return false;
-  out = value;
+bool parseContractTradeLine(std::string_view line, TradeRow& out) noexcept {
+  hftrec::replay::TradeRow row{};
+  if (!hftrec::isOk(hftrec::replay::parseTradeLine(line, row))) return false;
+  out.priceE8 = row.priceE8;
+  out.qtyE8 = row.qtyE8;
+  out.side = row.side;
+  out.tsNs = row.tsNs;
+  out.ingestSeq = row.ingestSeq;
+  out.arrival = row.arrival;
   return true;
 }
 
-bool parseLevel(std::string_view text, std::size_t& pos, PriceLevelRow& out) noexcept {
-  return consume(text, pos, '[') && parseI64(text, pos, out.priceE8) && consume(text, pos, ',') &&
-         parseI64(text, pos, out.qtyE8) && consume(text, pos, ',') && parseI64(text, pos, out.side) &&
-         (out.side == 0 || out.side == 1) && consume(text, pos, ']');
-}
-
-bool skipJsonAtom(std::string_view text, std::size_t& pos) noexcept;
-
-bool parseTradeLine(std::string_view line, TradeRow& out) noexcept {
-  std::size_t pos = 0;
-  out = TradeRow{};
-  if (!consume(line, pos, '[')) return false;
-  if (!parseI64(line, pos, out.priceE8) || !consume(line, pos, ',')) return false;
-  if (!parseI64(line, pos, out.qtyE8) || !consume(line, pos, ',')) return false;
-  if (!parseI64(line, pos, out.side) || (out.side != 0 && out.side != 1) || !consume(line, pos, ',')) return false;
-  if (!parseI64(line, pos, out.tsNs)) return false;
-  skipWs(line, pos);
-  if (pos < line.size() && line[pos] == ']') return true;
-
-  std::int64_t ignored = 0;
-  if (!consume(line, pos, ',') || !parseI64(line, pos, ignored) ||
-      !consume(line, pos, ',') || !parseI64(line, pos, ignored) ||
-      !consume(line, pos, ',') || !parseI64(line, pos, ignored) ||
-      !consume(line, pos, ',') || !parseI64(line, pos, ignored) ||
-      !consume(line, pos, ',') || !skipJsonAtom(line, pos) ||
-      !consume(line, pos, ',') || !skipJsonAtom(line, pos) ||
-      !consume(line, pos, ',') || !skipJsonAtom(line, pos) ||
-      !consume(line, pos, ',') || !skipJsonAtom(line, pos) ||
-      !consume(line, pos, ',') || !parseI64(line, pos, ignored) ||
-      !consume(line, pos, ',') || !parseI64(line, pos, out.ingestSeq)) {
-    return false;
-  }
+bool parseContractBookTickerLine(std::string_view line, BookTickerRow& out) noexcept {
+  hftrec::replay::BookTickerRow row{};
+  if (!hftrec::isOk(hftrec::replay::parseBookTickerLine(line, row)) || row.eventId == 0u) return false;
+  out.bidPriceE8 = row.bidPriceE8;
+  out.bidQtyE8 = row.bidQtyE8;
+  out.askPriceE8 = row.askPriceE8;
+  out.askQtyE8 = row.askQtyE8;
+  out.tsNs = row.tsNs;
+  out.ingestSeq = row.ingestSeq;
+  out.arrival = row.arrival;
+  out.bidPresent = row.bidPriceE8 > 0;
+  out.askPresent = row.askPriceE8 > 0;
   return true;
 }
 
-bool parseBookTickerLine(std::string_view line, BookTickerRow& out) noexcept {
-  std::size_t pos = 0;
-  out = BookTickerRow{};
-  if (!consume(line, pos, '[') || !parseI64(line, pos, out.bidPriceE8) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.bidQtyE8) || !consume(line, pos, ',') || !parseI64(line, pos, out.askPriceE8) ||
-      !consume(line, pos, ',') || !parseI64(line, pos, out.askQtyE8) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.tsNs)) return false;
-  std::int64_t captureSeq = 0;
-  if (consume(line, pos, ',') && (!parseI64(line, pos, captureSeq) || !consume(line, pos, ',') || !parseI64(line, pos, out.ingestSeq))) return false;
+bool parseContractPriceLimitLine(std::string_view line, PriceLimitRow& out) noexcept {
+  hftrec::replay::PriceLimitRow row{};
+  if (!hftrec::isOk(hftrec::replay::parsePriceLimitLine(line, row))) return false;
+  out.tsNs = row.tsNs;
+  out.buyLimitE8 = row.buyLimitE8;
+  out.sellLimitE8 = row.sellLimitE8;
+  out.enabled = row.enabled;
+  out.ingestSeq = row.ingestSeq;
+  out.arrival = row.arrival;
   return true;
 }
 
-bool parsePriceLimitLine(std::string_view line, PriceLimitRow& out) noexcept {
-  std::size_t pos = 0;
-  std::int64_t enabled = 0;
-  out = PriceLimitRow{};
-  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.buyLimitE8) || !consume(line, pos, ',') || !parseI64(line, pos, out.sellLimitE8) ||
-      !consume(line, pos, ',') || !parseI64(line, pos, enabled)) {
-    return false;
-  }
-  out.enabled = enabled != 0 ? 1u : 0u;
-  std::int64_t captureSeq = 0;
-  if (consume(line, pos, ',') && (!parseI64(line, pos, captureSeq) || !consume(line, pos, ',') || !parseI64(line, pos, out.ingestSeq))) return false;
+bool parseContractLiquidationLine(std::string_view line, LiquidationRow& out) noexcept {
+  hftrec::replay::LiquidationRow row{};
+  if (!hftrec::isOk(hftrec::replay::parseLiquidationLine(line, row))) return false;
+  out.priceE8 = row.priceE8;
+  out.qtyE8 = row.qtyE8;
+  out.side = row.side;
+  out.tsNs = row.tsNs;
+  out.avgPriceE8 = row.avgPriceE8;
+  out.filledQtyE8 = row.filledQtyE8;
+  out.orderType = row.orderType;
+  out.timeInForce = row.timeInForce;
+  out.status = row.status;
+  out.sourceMode = row.sourceMode;
+  out.ingestSeq = row.ingestSeq;
+  out.arrival = row.arrival;
   return true;
 }
 
-bool skipJsonAtom(std::string_view text, std::size_t& pos) noexcept {
-  skipWs(text, pos);
-  if (pos >= text.size()) return false;
-  if (text[pos] == '"') return skipJsonString(text, pos);
-  std::int64_t ignored = 0;
-  const std::size_t before = pos;
-  if (parseI64(text, pos, ignored)) return true;
-  pos = before;
-  if (text.compare(pos, 4, "true") == 0) {
-    pos += 4;
-    return true;
-  }
-  if (text.compare(pos, 5, "false") == 0) {
-    pos += 5;
-    return true;
-  }
-  if (text.compare(pos, 4, "null") == 0) {
-    pos += 4;
-    return true;
-  }
-  return false;
-}
-
-bool parseOptionalIngestSeq(std::string_view line, std::size_t& pos, std::int64_t& out) noexcept {
-  if (!consume(line, pos, ',')) return true;
-  std::int64_t first = 0;
-  if (!parseI64(line, pos, first)) return false;
-  if (consume(line, pos, ',')) return parseI64(line, pos, out);
-  out = first;
+bool parseContractMarkPriceLine(std::string_view line, MarkPriceRow& out) noexcept {
+  hftrec::replay::MarkPriceRow row{};
+  if (!hftrec::isOk(hftrec::replay::parseMarkPriceLine(line, row))) return false;
+  out.tsNs = row.tsNs;
+  out.markPriceE8 = row.markPriceE8;
+  out.ingestSeq = row.ingestSeq;
+  out.arrival = row.arrival;
   return true;
 }
 
-bool parseLiquidationLine(std::string_view line, LiquidationRow& out) noexcept {
-  std::size_t pos = 0;
-  out = LiquidationRow{};
-  if (!consume(line, pos, '[') || !parseI64(line, pos, out.priceE8) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.qtyE8) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.side) || (out.side != 0 && out.side != 1) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.tsNs)) return false;
-  if (consume(line, pos, ',')) {
-    if (!parseI64(line, pos, out.avgPriceE8) || !consume(line, pos, ',') || !parseI64(line, pos, out.filledQtyE8)) return false;
-    if (consume(line, pos, ',')) {
-      if (!skipJsonAtom(line, pos) || !consume(line, pos, ',') || !skipJsonAtom(line, pos) ||
-          !consume(line, pos, ',') || !skipJsonAtom(line, pos) || !consume(line, pos, ',') ||
-          !parseI64(line, pos, out.orderType) || !consume(line, pos, ',') ||
-          !parseI64(line, pos, out.timeInForce) || !consume(line, pos, ',') ||
-          !parseI64(line, pos, out.status) || !consume(line, pos, ',') ||
-          !parseI64(line, pos, out.sourceMode)) return false;
-      if (!parseOptionalIngestSeq(line, pos, out.ingestSeq)) return false;
-    }
-  }
+bool parseContractIndexPriceLine(std::string_view line, IndexPriceRow& out) noexcept {
+  hftrec::replay::IndexPriceRow row{};
+  if (!hftrec::isOk(hftrec::replay::parseIndexPriceLine(line, row))) return false;
+  out.tsNs = row.tsNs;
+  out.indexPriceE8 = row.indexPriceE8;
+  out.ingestSeq = row.ingestSeq;
+  out.arrival = row.arrival;
   return true;
 }
 
-bool parseMarkPriceLine(std::string_view line, MarkPriceRow& out) noexcept {
-  std::size_t pos = 0;
-  out = MarkPriceRow{};
-  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.markPriceE8)) return false;
-  return parseOptionalIngestSeq(line, pos, out.ingestSeq);
-}
-
-bool parseIndexPriceLine(std::string_view line, IndexPriceRow& out) noexcept {
-  std::size_t pos = 0;
-  out = IndexPriceRow{};
-  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.indexPriceE8)) return false;
-  return parseOptionalIngestSeq(line, pos, out.ingestSeq);
-}
-
-bool parseFundingLine(std::string_view line, FundingRow& out) noexcept {
-  std::size_t pos = 0;
-  out = FundingRow{};
-  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.fundingRateE8) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.fundingTsNs) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.nextFundingTsNs)) return false;
-  return parseOptionalIngestSeq(line, pos, out.ingestSeq);
-}
-
-bool parseOpenInterestLine(std::string_view line, OpenInterestRow& out) noexcept {
-  std::size_t pos = 0;
-  out = OpenInterestRow{};
-  if (!consume(line, pos, '[') || !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.openInterestE8)) return false;
-  if (consume(line, pos, ',')) {
-    if (!parseI64(line, pos, out.openInterestValueE8)) return false;
-    if (!parseOptionalIngestSeq(line, pos, out.ingestSeq)) return false;
-  }
+bool parseContractFundingLine(std::string_view line, FundingRow& out) noexcept {
+  hftrec::replay::FundingRow row{};
+  if (!hftrec::isOk(hftrec::replay::parseFundingLine(line, row))) return false;
+  out.tsNs = row.tsNs;
+  out.fundingRateE8 = row.fundingRateE8;
+  out.fundingTsNs = row.fundingTsNs;
+  out.nextFundingTsNs = row.nextFundingTsNs;
+  out.ingestSeq = row.ingestSeq;
+  out.arrival = row.arrival;
   return true;
 }
 
-bool parseCandleLine(std::string_view line, CandleRow& out) noexcept {
-  std::size_t pos = 0;
-  out = CandleRow{};
-  if (!consume(line, pos, '[')) return false;
-  skipWs(line, pos);
-  if (pos < line.size() && line[pos] == '"') {
-    if (!skipJsonString(line, pos) || !consume(line, pos, ',') ||
-        !skipJsonString(line, pos) || !consume(line, pos, ',') ||
-        !skipJsonString(line, pos) || !consume(line, pos, ',') ||
-        !parseJsonStringTier(line, pos, out.tier) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, out.openE8) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, out.highE8) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, out.lowE8) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, out.closeE8) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, out.volumeE8) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, out.quoteAmountE8)) return false;
-    out.hasOhlc = true;
-    return out.tsNs > 0 && out.openE8 > 0 && out.highE8 > 0 && out.lowE8 > 0 &&
-           out.closeE8 > 0 && out.highE8 >= out.lowE8 &&
-           out.volumeE8 >= 0 && out.quoteAmountE8 >= 0;
-  }
-  if (!parseI64(line, pos, out.tier) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, out.tsNs) || !consume(line, pos, ',')) return false;
-  std::int64_t firstPrice = 0;
-  std::int64_t secondPrice = 0;
-  std::int64_t thirdPrice = 0;
-  if (!parseI64(line, pos, firstPrice) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, secondPrice) || !consume(line, pos, ',') ||
-      !parseI64(line, pos, thirdPrice)) return false;
-  if (consume(line, pos, ',')) {
-    out.openE8 = firstPrice;
-    out.highE8 = secondPrice;
-    out.lowE8 = thirdPrice;
-    if (!parseI64(line, pos, out.closeE8) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, out.volumeE8) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, out.quoteAmountE8)) return false;
-    out.hasOhlc = true;
-  } else {
-    out.highE8 = firstPrice;
-    out.lowE8 = secondPrice;
-    out.quoteAmountE8 = thirdPrice;
-  }
-  return (out.tier >= 1 && out.tier <= 3 && out.tsNs > 0 && out.highE8 > 0 && out.lowE8 > 0 &&
-          out.highE8 >= out.lowE8 && out.quoteAmountE8 >= 0 &&
-          (!out.hasOhlc || (out.openE8 > 0 && out.closeE8 > 0 && out.volumeE8 >= 0)));
-}
-
-bool parseBookDocument(std::string_view line, std::vector<PriceLevelRow>& levels, std::int64_t& tsNs, std::int64_t* ingestSeq = nullptr) noexcept {
-  std::size_t pos = 0;
-  levels.clear();
-  if (!consume(line, pos, '[')) return false;
-  while (true) {
-    skipWs(line, pos);
-    if (pos >= line.size()) return false;
-    if (line[pos] != '[') break;
-    PriceLevelRow level{};
-    if (!parseLevel(line, pos, level)) return false;
-    levels.push_back(level);
-    if (!consume(line, pos, ',')) return false;
-  }
-  if (!parseI64(line, pos, tsNs)) return false;
-  std::int64_t captureSeq = 0;
-  std::int64_t parsedIngestSeq = 0;
-  if (consume(line, pos, ',') && (!parseI64(line, pos, captureSeq) || !consume(line, pos, ',') || !parseI64(line, pos, parsedIngestSeq))) return false;
-  if (ingestSeq) *ingestSeq = parsedIngestSeq;
+bool parseContractCandleLine(std::string_view line, CandleRow& out) noexcept {
+  hftrec::replay::CandleRow row{};
+  if (!hftrec::isOk(hftrec::replay::parseCandleLine(line, row))) return false;
+  out.tier = row.tier;
+  out.tsNs = row.tsNs;
+  out.highE8 = row.highE8;
+  out.lowE8 = row.lowE8;
+  out.quoteAmountE8 = row.quoteAmountE8;
+  out.openE8 = row.openE8;
+  out.closeE8 = row.closeE8;
+  out.volumeE8 = row.volumeE8;
+  out.hasOhlc = row.hasOhlc;
+  out.arrival = row.arrival;
   return true;
-}
-
-bool parseDepthTapeLine(std::string_view line, DepthRow& row, std::uint64_t& taggedTs) noexcept {
-  std::size_t pos = 0;
-  row = DepthRow{};
-  if (!consume(line, pos, '[') || !parseU64(line, pos, taggedTs)) return false;
-  if (!cxet::composite::isOrderBookTapeTimestampWord(taggedTs)) return false;
-  const TimeNs ts = cxet::composite::orderBookTapeTimestampFromWord(taggedTs);
-  if (ts.raw > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) return false;
-  row.tsNs = static_cast<std::int64_t>(ts.raw);
-  while (true) {
-    skipWs(line, pos);
-    if (pos >= line.size()) return false;
-    if (line[pos] == ']') {
-      ++pos;
-      skipWs(line, pos);
-      return pos == line.size();
-    }
-    if (!consume(line, pos, ',')) return false;
-    PriceLevelRow level{};
-    if (!parseI64(line, pos, level.priceE8) || !consume(line, pos, ',') || !parseI64(line, pos, level.qtyE8)) {
-      return false;
-    }
-    if (level.priceE8 < 0 || level.qtyE8 < 0) return false;
-    row.levels.push_back(level);
-  }
-}
-
-bool applyDepthSidecarLine(std::string_view line, std::uint64_t expectedTaggedTs, DepthRow& row) noexcept {
-  std::size_t pos = 0;
-  std::uint64_t taggedTs = 0u;
-  if (!consume(line, pos, '[') || !parseU64(line, pos, taggedTs) || taggedTs != expectedTaggedTs) return false;
-  std::size_t levelIndex = 0u;
-  while (true) {
-    skipWs(line, pos);
-    if (pos >= line.size()) return false;
-    if (line[pos] == ']') {
-      ++pos;
-      skipWs(line, pos);
-      return pos == line.size() && levelIndex == row.levels.size();
-    }
-    std::int64_t side = 0;
-    std::int64_t count = 0;
-    if (!consume(line, pos, ',') || !parseI64(line, pos, side) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, count)) {
-      return false;
-    }
-    if ((side != 0 && side != 1) || count < 0) return false;
-    for (std::int64_t i = 0; i < count; ++i) {
-      if (levelIndex >= row.levels.size()) return false;
-      row.levels[levelIndex++].side = side;
-    }
-  }
-}
-
-bool parseDepthSidecarTaggedTs(std::string_view line, std::uint64_t& taggedTs) noexcept {
-  std::size_t pos = 0;
-  return consume(line, pos, '[') && parseU64(line, pos, taggedTs);
 }
 
 bool readLine(std::string_view text, std::size_t& pos, std::string_view& line) noexcept {
@@ -499,17 +257,6 @@ bool readLine(std::string_view text, std::size_t& pos, std::string_view& line) n
   return true;
 }
 
-std::uint64_t countNonEmptyRemainingLines(std::string_view text, std::size_t pos) noexcept {
-  std::uint64_t count = 0u;
-  while (pos < text.size()) {
-    std::string_view line{};
-    if (!readLine(text, pos, line)) break;
-    if (!line.empty()) ++count;
-  }
-  return count;
-}
-
-constexpr std::uint64_t kDepthResyncLookaheadRows = 512u;
 constexpr std::size_t kMaxSessionWarnings = 64u;
 
 void appendSessionWarning(std::vector<std::string>& warnings, std::string warning) {
@@ -518,20 +265,6 @@ void appendSessionWarning(std::vector<std::string>& warnings, std::string warnin
   } else if (warnings.size() == kMaxSessionWarnings) {
     warnings.push_back("additional session warnings suppressed");
   }
-}
-
-std::string depthRecoveryWarning(std::uint64_t lineNo,
-                                 std::uint64_t loadedRows,
-                                 std::uint64_t droppedTapeRows,
-                                 std::uint64_t droppedSidecarRows,
-                                 std::string_view reason) {
-  std::ostringstream warning;
-  warning << "partial depth replay: " << reason << " at line " << lineNo
-          << ", loaded " << loadedRows << " paired rows";
-  if (droppedTapeRows > 0u) warning << ", dropped " << droppedTapeRows << " unpaired depth_tape rows";
-  if (droppedSidecarRows > 0u) warning << ", dropped " << droppedSidecarRows << " unpaired depth_sidecar rows";
-  warning << "; exact replay lost";
-  return warning.str();
 }
 
 struct TimelineRowKey {
@@ -648,6 +381,7 @@ Status loadDepthTapeSidecarJsonl(const std::filesystem::path& tapePath,
                                  std::string& error,
                                  std::vector<std::string>& warnings,
                                  bool* sortedOut = nullptr) {
+  (void)warnings;
   out.clear();
   if (sortedOut) *sortedOut = true;
   if (!std::filesystem::exists(tapePath) || !std::filesystem::exists(sidecarPath)) {
@@ -671,43 +405,14 @@ Status loadDepthTapeSidecarJsonl(const std::filesystem::path& tapePath,
   std::size_t sidecarPos = 0u;
   std::uint64_t lineNo = 0u;
   bool sorted = true;
-  bool hasPendingTape = false;
-  bool hasPendingSidecar = false;
-  std::string_view pendingTapeLine{};
-  std::string_view pendingSidecarLine{};
-  while (hasPendingTape || hasPendingSidecar || tapePos < tapeText.size() || sidecarPos < sidecarText.size()) {
+  while (tapePos < tapeText.size() || sidecarPos < sidecarText.size()) {
     std::string_view tapeLine{};
     std::string_view sidecarLine{};
-    bool hasTape = false;
-    bool hasSidecar = false;
-    if (hasPendingTape) {
-      tapeLine = pendingTapeLine;
-      hasPendingTape = false;
-      hasTape = true;
-    } else {
-      hasTape = readLine(tapeText, tapePos, tapeLine);
-    }
-    if (hasPendingSidecar) {
-      sidecarLine = pendingSidecarLine;
-      hasPendingSidecar = false;
-      hasSidecar = true;
-    } else {
-      hasSidecar = readLine(sidecarText, sidecarPos, sidecarLine);
-    }
+    const bool hasTape = readLine(tapeText, tapePos, tapeLine);
+    const bool hasSidecar = readLine(sidecarText, sidecarPos, sidecarLine);
     ++lineNo;
     if (!hasTape && !hasSidecar) break;
     if (hasTape != hasSidecar) {
-      if (!out.empty()) {
-        const std::uint64_t loadedRows = static_cast<std::uint64_t>(out.size());
-        const std::uint64_t droppedTapeRows =
-            (hasTape && !tapeLine.empty() ? 1u : 0u) + countNonEmptyRemainingLines(tapeText, tapePos);
-        const std::uint64_t droppedSidecarRows =
-            (hasSidecar && !sidecarLine.empty() ? 1u : 0u) + countNonEmptyRemainingLines(sidecarText, sidecarPos);
-        appendSessionWarning(warnings,
-                             depthRecoveryWarning(lineNo, loadedRows, droppedTapeRows, droppedSidecarRows,
-                                                  "depth_tape/depth_sidecar unpaired tail"));
-        break;
-      }
       error = "depth_tape/depth_sidecar line count mismatch at line ";
       error += std::to_string(lineNo);
       return Status::CorruptData;
@@ -715,67 +420,22 @@ Status loadDepthTapeSidecarJsonl(const std::filesystem::path& tapePath,
     if (tapeLine.empty() && sidecarLine.empty()) {
       continue;
     }
-    DepthRow row{};
-    std::uint64_t taggedTs = 0u;
-    const bool tapeOk = !tapeLine.empty() && parseDepthTapeLine(tapeLine, row, taggedTs);
-    const bool pairOk = tapeOk && !sidecarLine.empty() && applyDepthSidecarLine(sidecarLine, taggedTs, row);
+    hftrec::replay::DepthRow contractRow{};
+    const bool pairOk = !tapeLine.empty() && !sidecarLine.empty() &&
+        hftrec::isOk(hftrec::replay::parseDepthTapeSidecarLine(tapeLine, sidecarLine, contractRow)) &&
+        contractRow.eventId != 0u;
     if (!pairOk) {
-      std::uint64_t sidecarTaggedTs = 0u;
-      const bool sidecarTagged = !sidecarLine.empty() && parseDepthSidecarTaggedTs(sidecarLine, sidecarTaggedTs);
-      std::uint64_t droppedTapeRows = 0u;
-      std::uint64_t droppedSidecarRows = 0u;
-      bool recovered = false;
-      if (tapeOk) {
-        std::size_t scanPos = sidecarPos;
-        for (std::uint64_t skipped = 1u; skipped <= kDepthResyncLookaheadRows && scanPos < sidecarText.size(); ++skipped) {
-          std::string_view candidate{};
-          if (!readLine(sidecarText, scanPos, candidate)) break;
-          std::uint64_t candidateTaggedTs = 0u;
-          if (!candidate.empty() && parseDepthSidecarTaggedTs(candidate, candidateTaggedTs) && candidateTaggedTs == taggedTs) {
-            pendingTapeLine = tapeLine;
-            pendingSidecarLine = candidate;
-            hasPendingTape = true;
-            hasPendingSidecar = true;
-            sidecarPos = scanPos;
-            droppedSidecarRows = skipped;
-            recovered = true;
-            break;
-          }
-        }
-      }
-      if (!recovered && sidecarTagged) {
-        std::size_t scanPos = tapePos;
-        for (std::uint64_t skipped = 1u; skipped <= kDepthResyncLookaheadRows && scanPos < tapeText.size(); ++skipped) {
-          std::string_view candidate{};
-          if (!readLine(tapeText, scanPos, candidate)) break;
-          DepthRow candidateRow{};
-          std::uint64_t candidateTaggedTs = 0u;
-          if (!candidate.empty() && parseDepthTapeLine(candidate, candidateRow, candidateTaggedTs) &&
-              candidateTaggedTs == sidecarTaggedTs) {
-            pendingTapeLine = candidate;
-            pendingSidecarLine = sidecarLine;
-            hasPendingTape = true;
-            hasPendingSidecar = true;
-            tapePos = scanPos;
-            droppedTapeRows = skipped;
-            recovered = true;
-            break;
-          }
-        }
-      }
-      if (recovered) {
-        appendSessionWarning(warnings,
-                             depthRecoveryWarning(lineNo, static_cast<std::uint64_t>(out.size()),
-                                                  droppedTapeRows, droppedSidecarRows,
-                                                  "depth_tape/depth_sidecar resynced"));
-        continue;
-      }
-      appendSessionWarning(warnings,
-                           depthRecoveryWarning(lineNo, static_cast<std::uint64_t>(out.size()),
-                                                tapeLine.empty() ? 0u : 1u,
-                                                sidecarLine.empty() ? 0u : 1u,
-                                                "dropped corrupt depth_tape/depth_sidecar row"));
-      continue;
+      error = "failed to parse captured-arrival depth_tape/depth_sidecar row at line ";
+      error += std::to_string(lineNo);
+      return Status::CorruptData;
+    }
+    DepthRow row{};
+    row.tsNs = contractRow.tsNs;
+    row.ingestSeq = contractRow.ingestSeq;
+    row.arrival = contractRow.arrival;
+    row.levels.reserve(contractRow.levels.size());
+    for (const hftrec::replay::PricePair& level : contractRow.levels) {
+      row.levels.push_back(PriceLevelRow{level.priceE8, level.qtyE8, level.side});
     }
     if (!out.empty() && rowKeyLess(rowKey(row), rowKey(out.back()))) sorted = false;
     out.push_back(std::move(row));
@@ -896,12 +556,208 @@ void appendManifestCaptureWarnings(std::string_view manifest, std::vector<std::s
   }
 }
 
-std::filesystem::path existingPath(const std::filesystem::path& root, std::string_view path, std::string_view fallback) {
-  const std::filesystem::path declared = root / std::filesystem::path{std::string{path}};
-  if (!path.empty() && std::filesystem::exists(declared)) return declared;
-  const std::filesystem::path direct = root / std::filesystem::path{std::string{fallback}};
-  if (std::filesystem::exists(direct)) return direct;
-  return root / "jsonl" / std::filesystem::path{std::string{fallback}};
+bool cleanRequiredRuntimeChannel(const hftrec::capture::ChannelRuntimeHealth& health) noexcept {
+  return health.state == "live" && health.reconnectCount == 0u &&
+      health.droppedEventCount == 0u && health.unroutableEventCount == 0u &&
+      health.lastError.empty();
+}
+
+bool addArrivalRowCount(std::uint64_t value, std::uint64_t& total) noexcept {
+  if (value > std::numeric_limits<std::uint64_t>::max() - total) return false;
+  total += value;
+  return true;
+}
+
+bool arrivalSummaryMatchesDeclaredRows(
+    const hftrec::capture::SessionManifest& manifest) noexcept {
+  std::uint64_t declaredRows = 0u;
+  if (!addArrivalRowCount(manifest.tradesCount, declaredRows) ||
+      !addArrivalRowCount(manifest.liquidationsCount, declaredRows) ||
+      !addArrivalRowCount(manifest.bookTickerCount, declaredRows) ||
+      !addArrivalRowCount(manifest.markPriceCount, declaredRows) ||
+      !addArrivalRowCount(manifest.indexPriceCount, declaredRows) ||
+      !addArrivalRowCount(manifest.fundingCount, declaredRows) ||
+      !addArrivalRowCount(manifest.priceLimitCount, declaredRows) ||
+      !addArrivalRowCount(manifest.depthCount, declaredRows) ||
+      !addArrivalRowCount(manifest.candlesCount, declaredRows) ||
+      !addArrivalRowCount(manifest.candles2Count, declaredRows)) {
+    return false;
+  }
+
+  std::uint64_t accountedRows = 0u;
+  return addArrivalRowCount(manifest.arrivalClock.capturedRows, accountedRows) &&
+      addArrivalRowCount(manifest.arrivalClock.historicalRows, accountedRows) &&
+      addArrivalRowCount(manifest.arrivalClock.unavailableRows, accountedRows) &&
+      accountedRows == declaredRows;
+}
+
+bool validateManifestChannel(std::string_view name,
+                             bool load,
+                             bool required,
+                             bool enabled,
+                             std::uint64_t count,
+                             std::string_view path,
+                             std::string_view rowSchema,
+                             std::string_view expectedRowSchema,
+                             const hftrec::capture::ChannelRuntimeHealth* runtime,
+                             std::vector<std::string>& warnings,
+                             std::string& error) {
+  if (!load) return true;
+  if (!enabled) {
+    if (!required) return true;
+    error = "manifest does not enable required ";
+    error += name;
+    error += " channel";
+    return false;
+  }
+  if (path.empty() || rowSchema != expectedRowSchema) {
+    error = "unsupported captured-arrival ";
+    error += name;
+    error += " channel contract";
+    return false;
+  }
+  if (required && count == 0u) {
+    error = "manifest declares empty required ";
+    error += name;
+    error += " channel";
+    return false;
+  }
+  if (runtime && !cleanRequiredRuntimeChannel(*runtime)) {
+    if (required) {
+      error = "required ";
+      error += name;
+      error += " channel is not clean";
+      return false;
+    }
+    appendSessionWarning(warnings, "optional " + std::string{name} + " channel is degraded");
+  }
+  return true;
+}
+
+bool validateCurrentRecorderManifest(const hftrec::capture::SessionManifest& manifest,
+                                     const SessionLoadPlan& plan,
+                                     std::vector<std::string>& warnings,
+                                     std::string& error) {
+  if (manifest.manifestSchemaVersion != hftrec::capture::kManifestSchemaVersionCurrent ||
+      manifest.corpusSchemaVersion != hftrec::capture::kCorpusSchemaVersionCurrent ||
+      manifest.captureContractVersion != hftrec::capture::kCaptureContractVersionCurrent) {
+    error = "incompatible recorder corpus: captured-arrival contract is required";
+    return false;
+  }
+  if (manifest.sessionStatus != "complete") {
+    error = "recorder session is not finalized: status=" + manifest.sessionStatus;
+    return false;
+  }
+  if (!manifest.structurallyLoadable ||
+      manifest.sessionHealth != hftrec::SessionHealth::Clean ||
+      !manifest.exactReplayEligible) {
+    error = "recorder session is structurally incompatible or corrupt";
+    return false;
+  }
+  if (manifest.arrivalClock.boundary !=
+          "hft-parser.application-frame-ready" ||
+      manifest.arrivalClock.realtimeClock != "CLOCK_REALTIME" ||
+      manifest.arrivalClock.monotonicClock != "CLOCK_MONOTONIC") {
+    error = "recorder session uses an unsupported arrival-clock boundary";
+    return false;
+  }
+  if (manifest.arrivalClock.capturedRows == 0u ||
+      manifest.arrivalClock.unavailableRows != 0u) {
+    error = "recorder session is not captured-arrival replay eligible";
+    return false;
+  }
+  if (manifest.arrivalClock.firstReceiveRealtimeNs <= 0 ||
+      manifest.arrivalClock.lastReceiveRealtimeNs <= 0 ||
+      manifest.arrivalClock.firstReceiveMonotonicNs == 0u ||
+      manifest.arrivalClock.lastReceiveMonotonicNs == 0u ||
+      !arrivalSummaryMatchesDeclaredRows(manifest)) {
+    error = "recorder arrival-clock summary does not match declared corpus rows";
+    return false;
+  }
+  if (manifest.arrivalClock.realtimeRegressions != 0u)
+    appendSessionWarning(warnings, "CLOCK_REALTIME regressions preserved: " +
+        std::to_string(manifest.arrivalClock.realtimeRegressions));
+  if (manifest.arrivalClock.monotonicNonIncreasing != 0u)
+    appendSessionWarning(warnings, "non-increasing CLOCK_MONOTONIC samples preserved: " +
+        std::to_string(manifest.arrivalClock.monotonicNonIncreasing));
+  if (manifest.arrivalClock.exchangeAheadOfReceive != 0u)
+    appendSessionWarning(warnings, "exchange timestamps ahead of local receive preserved: " +
+        std::to_string(manifest.arrivalClock.exchangeAheadOfReceive));
+  if (manifest.arrivalClock.exchangeTimestampMissing != 0u)
+    appendSessionWarning(warnings, "missing exchange timestamps preserved: " +
+        std::to_string(manifest.arrivalClock.exchangeTimestampMissing));
+  if (!manifest.warningSummary.empty()) appendSessionWarning(warnings, "capture warning: " + manifest.warningSummary);
+
+  if (!validateManifestChannel("trades", plan.loadTrades, plan.requireTrades,
+          manifest.tradesEnabled, manifest.tradesCount, manifest.tradesPath,
+          manifest.tradesRowSchema, hftrec::capture::kTradesRowSchemaCurrent, &manifest.tradesRuntime,
+          warnings, error)) return false;
+  if (!validateManifestChannel("bookticker", plan.loadBookTickers, plan.requireBookTickers,
+          manifest.bookTickerEnabled, manifest.bookTickerCount, manifest.bookTickerPath,
+          manifest.bookTickerRowSchema, hftrec::capture::kBookTickerRowSchemaCurrent, &manifest.bookTickerRuntime,
+          warnings, error)) return false;
+  if (!validateManifestChannel("price_limit", plan.loadPriceLimits, plan.requirePriceLimits,
+          manifest.priceLimitEnabled, manifest.priceLimitCount, manifest.priceLimitPath,
+          manifest.priceLimitRowSchema, hftrec::capture::kPriceLimitRowSchemaCurrent, &manifest.priceLimitRuntime,
+          warnings, error)) return false;
+  if (!validateManifestChannel("depth", plan.loadDepths, plan.requireDepths,
+          manifest.orderbookEnabled, manifest.depthCount, manifest.depthPath,
+          manifest.depthRowSchema, hftrec::capture::kDepthRowSchemaCurrent, &manifest.depthRuntime,
+          warnings, error)) return false;
+  if (plan.loadDepths && manifest.orderbookEnabled && manifest.depthSidecarPath.empty()) {
+    error = "captured-arrival depth sidecar path is missing";
+    return false;
+  }
+  if (!validateManifestChannel("liquidations", plan.loadLiquidations, plan.requireLiquidations,
+          manifest.liquidationsEnabled, manifest.liquidationsCount, manifest.liquidationsPath,
+          manifest.liquidationsRowSchema, hftrec::capture::kLiquidationsRowSchemaCurrent, &manifest.liquidationsRuntime,
+          warnings, error)) return false;
+  if (!validateManifestChannel("mark_price", plan.loadMarkPrices, plan.requireMarkPrices,
+          manifest.markPriceEnabled, manifest.markPriceCount, manifest.markPricePath,
+          manifest.markPriceRowSchema, hftrec::capture::kMarkPriceRowSchemaCurrent, &manifest.markPriceRuntime,
+          warnings, error)) return false;
+  if (!validateManifestChannel("index_price", plan.loadIndexPrices, plan.requireIndexPrices,
+          manifest.indexPriceEnabled, manifest.indexPriceCount, manifest.indexPricePath,
+          manifest.indexPriceRowSchema, hftrec::capture::kIndexPriceRowSchemaCurrent, &manifest.indexPriceRuntime,
+          warnings, error)) return false;
+  if (!validateManifestChannel("funding", plan.loadFunding, plan.requireFunding,
+          manifest.fundingEnabled, manifest.fundingCount, manifest.fundingPath,
+          manifest.fundingRowSchema, hftrec::capture::kFundingRowSchemaCurrent, &manifest.fundingRuntime,
+          warnings, error)) return false;
+  if (plan.requireOpenInterest) {
+    error = "current recorder manifest has no required open_interest captured-arrival contract";
+    return false;
+  }
+  if (plan.loadOpenInterest) {
+    appendSessionWarning(warnings, "optional open_interest captured-arrival channel is unavailable");
+  }
+  if (plan.loadCandles) {
+    const bool useDetailed = manifest.candles2Enabled;
+    const bool enabled = useDetailed || manifest.candlesEnabled;
+    const std::uint64_t count = useDetailed ? manifest.candles2Count : manifest.candlesCount;
+    const std::string& path = useDetailed ? manifest.candles2Path : manifest.candlesPath;
+    const std::string& schema = useDetailed ? manifest.candles2RowSchema : manifest.candlesRowSchema;
+    const std::string_view expected = hftrec::capture::kCandlesRowSchemaCurrent;
+    if (!validateManifestChannel("candles", true, plan.requireCandles, enabled, count, path,
+                                 schema, expected, nullptr, warnings, error)) return false;
+  }
+  return true;
+}
+
+bool validateLoadedRowCount(std::string_view channel,
+                            std::size_t actual,
+                            std::uint64_t declared,
+                            std::string& error) {
+  if (static_cast<std::uint64_t>(actual) == declared) return true;
+  error = "captured-arrival ";
+  error += channel;
+  error += " row count does not match finalized manifest";
+  return false;
+}
+
+std::filesystem::path declaredPath(const std::filesystem::path& root, std::string_view path) {
+  if (path.empty()) return {};
+  return root / std::filesystem::path{std::string{path}};
 }
 
 void updateRange(SessionData& data, std::int64_t ts) noexcept {
@@ -945,16 +801,98 @@ void loadTradeHistoryManifestFields(std::string_view manifest, SessionData& out)
 }
 
 void splitTradeWarmup(SessionData& out) {
-  if (out.tradeHistoryRequestedEndNs <= 0 || out.trades.empty()) return;
+  if (out.trades.empty()) return;
   std::vector<TradeRow> replay{};
   replay.reserve(out.trades.size());
   out.tradeWarmup.clear();
   out.tradeWarmup.reserve(out.trades.size());
   for (const TradeRow& row : out.trades) {
-    if (row.tsNs > 0 && row.tsNs < out.tradeHistoryRequestedEndNs) out.tradeWarmup.push_back(row);
+    if (hftrec::replay::isHistoricalBackfill(row.arrival)) out.tradeWarmup.push_back(row);
     else replay.push_back(row);
   }
   out.trades = std::move(replay);
+}
+
+template <typename Row>
+bool validateCapturedLiveRows(std::string_view channel,
+                              const std::vector<Row>& rows,
+                              std::string& error) {
+  for (std::size_t i = 0u; i < rows.size(); ++i) {
+    if (hftrec::replay::hasCapturedApplicationArrival(rows[i].arrival)) continue;
+    error = "captured-arrival ";
+    error += channel;
+    error += " row is not an application-frame arrival at row ";
+    error += std::to_string(i + 1u);
+    return false;
+  }
+  return true;
+}
+
+template <typename Row>
+bool validateReplayClockRows(std::string_view channel,
+                             const std::vector<Row>& rows,
+                             __int128 replayOffset,
+                             std::string& error) {
+  for (std::size_t i = 0u; i < rows.size(); ++i) {
+    const __int128 mapped = static_cast<__int128>(rows[i].arrival.receiveMonotonicNs) +
+        replayOffset;
+    if (mapped > 0 && mapped <= std::numeric_limits<std::int64_t>::max()) continue;
+    error = "captured-arrival ";
+    error += channel;
+    error += " row cannot be mapped into replay monotonic time at row ";
+    error += std::to_string(i + 1u);
+    return false;
+  }
+  return true;
+}
+
+bool validateHistoricalSeeds(const SessionData& out, std::string& error) {
+  for (std::size_t i = 0u; i < out.tradeWarmup.size(); ++i) {
+    if (hftrec::replay::isHistoricalBackfill(out.tradeWarmup[i].arrival)) continue;
+    error = "trade warmup row is not marked historical_backfill at row " +
+        std::to_string(i + 1u);
+    return false;
+  }
+  for (std::size_t i = 0u; i < out.candles.size(); ++i) {
+    if (hftrec::replay::isHistoricalBackfill(out.candles[i].arrival)) continue;
+    error = "candle seed row is not marked historical_backfill at row " +
+        std::to_string(i + 1u);
+    return false;
+  }
+  return true;
+}
+
+bool validateCapturedReplayRows(const SessionData& out, std::string& error) {
+  if (out.firstReceiveRealtimeNs <= 0 || out.firstReceiveMonotonicNs == 0u) {
+    error = "captured-arrival replay clock anchor is missing";
+    return false;
+  }
+  const __int128 replayOffset = static_cast<__int128>(out.firstReceiveRealtimeNs) -
+      static_cast<__int128>(out.firstReceiveMonotonicNs);
+  if (replayOffset < std::numeric_limits<std::int64_t>::min() ||
+      replayOffset > std::numeric_limits<std::int64_t>::max()) {
+    error = "captured-arrival replay clock anchor is out of range";
+    return false;
+  }
+  return validateCapturedLiveRows("trades", out.trades, error) &&
+      validateCapturedLiveRows("bookticker", out.bookTickers, error) &&
+      validateCapturedLiveRows("price_limit", out.priceLimits, error) &&
+      validateCapturedLiveRows("depth", out.depths, error) &&
+      validateCapturedLiveRows("liquidations", out.liquidations, error) &&
+      validateCapturedLiveRows("mark_price", out.markPrices, error) &&
+      validateCapturedLiveRows("index_price", out.indexPrices, error) &&
+      validateCapturedLiveRows("funding", out.funding, error) &&
+      validateCapturedLiveRows("open_interest", out.openInterest, error) &&
+      validateReplayClockRows("trades", out.trades, replayOffset, error) &&
+      validateReplayClockRows("bookticker", out.bookTickers, replayOffset, error) &&
+      validateReplayClockRows("price_limit", out.priceLimits, replayOffset, error) &&
+      validateReplayClockRows("depth", out.depths, replayOffset, error) &&
+      validateReplayClockRows("liquidations", out.liquidations, replayOffset, error) &&
+      validateReplayClockRows("mark_price", out.markPrices, replayOffset, error) &&
+      validateReplayClockRows("index_price", out.indexPrices, replayOffset, error) &&
+      validateReplayClockRows("funding", out.funding, replayOffset, error) &&
+      validateReplayClockRows("open_interest", out.openInterest, replayOffset, error) &&
+      validateHistoricalSeeds(out, error);
 }
 
 void rebuildReplayRange(SessionData& out) noexcept {
@@ -964,7 +902,6 @@ void rebuildReplayRange(SessionData& out) noexcept {
   for (const BookTickerRow& row : out.bookTickers) updateRange(out, row.tsNs);
   for (const PriceLimitRow& row : out.priceLimits) updateRange(out, row.tsNs);
   for (const DepthRow& row : out.depths) updateRange(out, row.tsNs);
-  for (const CandleRow& row : out.candles) updateRange(out, row.tsNs);
   for (const LiquidationRow& row : out.liquidations) updateRange(out, row.tsNs);
   for (const MarkPriceRow& row : out.markPrices) updateRange(out, row.tsNs);
   for (const IndexPriceRow& row : out.indexPrices) updateRange(out, row.tsNs);
@@ -990,23 +927,36 @@ Status loadSession(const std::filesystem::path& sessionPath,
     error = "missing manifest.json";
     return Status::IoError;
   }
-  out.exchange = extractStringAfter(manifest, "\"exchange\"");
-  out.market = extractStringAfter(manifest, "\"market\"");
-  out.symbol = extractStringAfter(manifest, "\"symbols\"");
-  appendManifestCaptureWarnings(manifest, out.warnings);
-  const std::string tradesPath = extractChannelPath(manifest, "trades");
-  const std::string bookTickerPath = extractChannelPath(manifest, "bookticker");
-  const std::string priceLimitPath = extractChannelPath(manifest, "price_limit");
-  const std::string depthPath = extractChannelPath(manifest, "depth");
-  const std::string depthSidecarPath = extractChannelSidecarPath(manifest, "depth");
-  const std::string candlesPath = extractChannelPath(manifest, "candles");
-  std::string candles2Path = extractChannelPath(manifest, "candles2");
-  if (candles2Path.empty()) candles2Path = extractChannelPath(manifest, "candlesv2");
-  const std::string liquidationsPath = extractChannelPath(manifest, "liquidations");
-  const std::string markPricePath = extractChannelPath(manifest, "mark_price");
-  const std::string indexPricePath = extractChannelPath(manifest, "index_price");
-  const std::string fundingPath = extractChannelPath(manifest, "funding");
-  const std::string openInterestPath = extractChannelPath(manifest, "open_interest");
+  hftrec::capture::SessionManifest recorderManifest{};
+  if (!hftrec::isOk(hftrec::capture::parseManifestJson(manifest, recorderManifest))) {
+    error = "malformed or incompatible recorder manifest.json; current captured-arrival v3 contract is required";
+    return Status::CorruptData;
+  }
+  if (!validateCurrentRecorderManifest(recorderManifest, plan, out.warnings, error)) {
+    return Status::CorruptData;
+  }
+  out.exchange = recorderManifest.exchange;
+  out.market = recorderManifest.market;
+  out.symbol = recorderManifest.symbols.empty() ? std::string{} : recorderManifest.symbols.front();
+  out.firstReceiveMonotonicNs = recorderManifest.arrivalClock.firstReceiveMonotonicNs;
+  out.lastReceiveMonotonicNs = recorderManifest.arrivalClock.lastReceiveMonotonicNs;
+  out.firstReceiveRealtimeNs = recorderManifest.arrivalClock.firstReceiveRealtimeNs;
+  out.lastReceiveRealtimeNs = recorderManifest.arrivalClock.lastReceiveRealtimeNs;
+  out.realtimeRegressionCount = recorderManifest.arrivalClock.realtimeRegressions;
+  out.monotonicNonIncreasingCount = recorderManifest.arrivalClock.monotonicNonIncreasing;
+  out.exchangeAheadOfReceiveCount = recorderManifest.arrivalClock.exchangeAheadOfReceive;
+  out.exchangeTimestampMissingCount = recorderManifest.arrivalClock.exchangeTimestampMissing;
+  const std::string& tradesPath = recorderManifest.tradesPath;
+  const std::string& bookTickerPath = recorderManifest.bookTickerPath;
+  const std::string& priceLimitPath = recorderManifest.priceLimitPath;
+  const std::string& depthPath = recorderManifest.depthPath;
+  const std::string& depthSidecarPath = recorderManifest.depthSidecarPath;
+  const std::string& candlesPath = recorderManifest.candlesPath;
+  const std::string& candles2Path = recorderManifest.candles2Path;
+  const std::string& liquidationsPath = recorderManifest.liquidationsPath;
+  const std::string& markPricePath = recorderManifest.markPricePath;
+  const std::string& indexPricePath = recorderManifest.indexPricePath;
+  const std::string& fundingPath = recorderManifest.fundingPath;
   loadTradeHistoryManifestFields(manifest, out);
   if (out.exchange.empty() || out.market.empty() || out.symbol.empty()) {
     error = "manifest identity is incomplete";
@@ -1017,82 +967,97 @@ Status loadSession(const std::filesystem::path& sessionPath,
     return Status::CorruptData;
   }
 
-  const std::string metadataPath = extractArtifactPath(manifest, "instrument_metadata_path");
-  loadInstrumentMetadata(existingPath(sessionPath, metadataPath, "instrument_metadata.json"), out.instrument);
+  const std::string& metadataPath = recorderManifest.instrumentMetadataPath;
+  loadInstrumentMetadata(declaredPath(sessionPath, metadataPath), out.instrument);
 
   if (plan.loadTrades) {
-    Status status = loadJsonl<TradeRow>(existingPath(sessionPath, tradesPath, "trades.jsonl"), "trades", plan.requireTrades, out.trades, parseTradeLine, error);
+    Status status = loadJsonl<TradeRow>(declaredPath(sessionPath, tradesPath), "trades", plan.requireTrades, out.trades, parseContractTradeLine, error);
     if (!isOk(status)) return status;
+    if (!validateLoadedRowCount(
+            "trades", out.trades.size(), recorderManifest.tradesCount,
+            error)) return Status::CorruptData;
     splitTradeWarmup(out);
   }
   if (plan.loadBookTickers) {
-    Status status = loadJsonl<BookTickerRow>(existingPath(sessionPath, bookTickerPath, "bookticker.jsonl"), "bookticker", plan.requireBookTickers, out.bookTickers, parseBookTickerLine, error);
+    Status status = loadJsonl<BookTickerRow>(declaredPath(sessionPath, bookTickerPath), "bookticker", plan.requireBookTickers, out.bookTickers, parseContractBookTickerLine, error);
     if (!isOk(status)) return status;
+    if (!validateLoadedRowCount(
+            "bookticker", out.bookTickers.size(),
+            recorderManifest.bookTickerCount, error))
+      return Status::CorruptData;
   }
   if (plan.loadPriceLimits) {
-    Status status = loadJsonl<PriceLimitRow>(existingPath(sessionPath, priceLimitPath, "price_limit.jsonl"), "price_limit", plan.requirePriceLimits, out.priceLimits, parsePriceLimitLine, error);
+    Status status = loadJsonl<PriceLimitRow>(declaredPath(sessionPath, priceLimitPath), "price_limit", plan.requirePriceLimits, out.priceLimits, parseContractPriceLimitLine, error);
     if (!isOk(status)) return status;
+    if (!validateLoadedRowCount(
+            "price_limit", out.priceLimits.size(),
+            recorderManifest.priceLimitCount, error))
+      return Status::CorruptData;
   }
   if (plan.loadDepths) {
-    const std::filesystem::path declaredDepth = depthPath.empty()
-                                                    ? std::filesystem::path{}
-                                                    : sessionPath / std::filesystem::path{depthPath};
-    const bool declaredTape = !declaredDepth.empty() && declaredDepth.filename() == "depth_tape.jsonl";
-    const std::filesystem::path tapePath = declaredTape
-                                               ? existingPath(sessionPath, depthPath, "depth_tape.jsonl")
-                                               : existingPath(sessionPath, std::string_view{}, "depth_tape.jsonl");
-    const std::filesystem::path sidecarPath = !depthSidecarPath.empty()
-                                                  ? existingPath(sessionPath, depthSidecarPath, "depth_sidecar.jsonl")
-                                                  : existingPath(sessionPath, std::string_view{}, "depth_sidecar.jsonl");
-    Status status = Status::Ok;
-    if (std::filesystem::exists(tapePath) || std::filesystem::exists(sidecarPath)) {
-      status = loadDepthTapeSidecarJsonl(tapePath, sidecarPath, plan.requireDepths, out.depths, error, out.warnings);
-    } else {
-      status = loadJsonl<DepthRow>(existingPath(sessionPath, depthPath, "depth.jsonl"), "depth", plan.requireDepths, out.depths, [](std::string_view line, DepthRow& row) noexcept {
-        return parseBookDocument(line, row.levels, row.tsNs, &row.ingestSeq);
-      }, error);
-    }
+    const std::filesystem::path tapePath = declaredPath(sessionPath, depthPath);
+    const std::filesystem::path sidecarPath = declaredPath(sessionPath, depthSidecarPath);
+    const Status status = loadDepthTapeSidecarJsonl(
+        tapePath, sidecarPath, plan.requireDepths, out.depths, error, out.warnings);
     if (!isOk(status)) return status;
+    if (!validateLoadedRowCount(
+            "depth", out.depths.size(), recorderManifest.depthCount,
+            error)) return Status::CorruptData;
   }
   if (plan.loadCandles) {
-    std::filesystem::path detailedPath = existingPath(sessionPath, candles2Path, "candles2.jsonl");
-    if (!std::filesystem::exists(detailedPath)) {
-      const std::filesystem::path candlesV2Path = existingPath(sessionPath, std::string_view{}, "candlesv2.jsonl");
-      if (std::filesystem::exists(candlesV2Path)) detailedPath = candlesV2Path;
-    }
-    const std::filesystem::path legacyPath = existingPath(sessionPath, candlesPath, "candles.jsonl");
-    const bool detailedExists = std::filesystem::exists(detailedPath);
-    Status status = loadJsonl<CandleRow>(detailedExists ? detailedPath : legacyPath,
-                                         detailedExists ? "candles2" : "candles",
+    const bool detailed = recorderManifest.candles2Enabled;
+    const std::filesystem::path candlePath = declaredPath(
+        sessionPath, detailed ? std::string_view{candles2Path} : std::string_view{candlesPath});
+    Status status = loadJsonl<CandleRow>(candlePath,
+                                         detailed ? "candles2" : "candles",
                                          plan.requireCandles,
                                          out.candles,
-                                         parseCandleLine,
+                                         parseContractCandleLine,
                                          error);
     if (!isOk(status)) return status;
+    const std::uint64_t declaredCount = detailed
+        ? recorderManifest.candles2Count
+        : recorderManifest.candlesCount;
+    if (!validateLoadedRowCount(
+            detailed ? "candles2" : "candles",
+            out.candles.size(), declaredCount, error))
+      return Status::CorruptData;
   }
   if (plan.loadLiquidations) {
-    Status status = loadJsonl<LiquidationRow>(existingPath(sessionPath, liquidationsPath, "liquidations.jsonl"), "liquidations", plan.requireLiquidations, out.liquidations, parseLiquidationLine, error);
+    Status status = loadJsonl<LiquidationRow>(declaredPath(sessionPath, liquidationsPath), "liquidations", plan.requireLiquidations, out.liquidations, parseContractLiquidationLine, error);
     if (!isOk(status)) return status;
+    if (!validateLoadedRowCount(
+            "liquidations", out.liquidations.size(),
+            recorderManifest.liquidationsCount, error))
+      return Status::CorruptData;
   }
   if (plan.loadMarkPrices) {
-    Status status = loadJsonl<MarkPriceRow>(existingPath(sessionPath, markPricePath, "mark_price.jsonl"), "mark_price", plan.requireMarkPrices, out.markPrices, parseMarkPriceLine, error);
+    Status status = loadJsonl<MarkPriceRow>(declaredPath(sessionPath, markPricePath), "mark_price", plan.requireMarkPrices, out.markPrices, parseContractMarkPriceLine, error);
     if (!isOk(status)) return status;
+    if (!validateLoadedRowCount(
+            "mark_price", out.markPrices.size(),
+            recorderManifest.markPriceCount, error))
+      return Status::CorruptData;
   }
   if (plan.loadIndexPrices) {
-    Status status = loadJsonl<IndexPriceRow>(existingPath(sessionPath, indexPricePath, "index_price.jsonl"), "index_price", plan.requireIndexPrices, out.indexPrices, parseIndexPriceLine, error);
+    Status status = loadJsonl<IndexPriceRow>(declaredPath(sessionPath, indexPricePath), "index_price", plan.requireIndexPrices, out.indexPrices, parseContractIndexPriceLine, error);
     if (!isOk(status)) return status;
+    if (!validateLoadedRowCount(
+            "index_price", out.indexPrices.size(),
+            recorderManifest.indexPriceCount, error))
+      return Status::CorruptData;
   }
   if (plan.loadFunding) {
-    Status status = loadJsonl<FundingRow>(existingPath(sessionPath, fundingPath, "funding.jsonl"), "funding", plan.requireFunding, out.funding, parseFundingLine, error);
+    Status status = loadJsonl<FundingRow>(declaredPath(sessionPath, fundingPath), "funding", plan.requireFunding, out.funding, parseContractFundingLine, error);
     if (!isOk(status)) return status;
-  }
-  if (plan.loadOpenInterest) {
-    Status status = loadJsonl<OpenInterestRow>(existingPath(sessionPath, openInterestPath, "open_interest.jsonl"), "open_interest", plan.requireOpenInterest, out.openInterest, parseOpenInterestLine, error);
-    if (!isOk(status)) return status;
+    if (!validateLoadedRowCount(
+            "funding", out.funding.size(), recorderManifest.fundingCount,
+            error)) return Status::CorruptData;
   }
 
-  out.timelineChannelSorted.fill(true);
-  out.timelineOrderKnown = true;
+  if (!validateCapturedReplayRows(out, error)) return Status::CorruptData;
+  out.timelineChannelSorted.fill(false);
+  out.timelineOrderKnown = false;
   rebuildReplayRange(out);
   return Status::Ok;
 }

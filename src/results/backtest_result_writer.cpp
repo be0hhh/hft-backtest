@@ -927,7 +927,7 @@ bool writeRateLimitUsage(const std::filesystem::path& path, const EngineState& e
 
 void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, const EngineState& engine, const char* indent) {
   const char q = '"';
-  out << indent << q << "mode" << q << ": " << q << "deterministic_bbo_v2_strategy_close" << q << ",\n";
+  out << indent << q << "mode" << q << ": " << q << "deterministic_bbo_strategy_close" << q << ",\n";
   out << indent << q << "events" << q << ": " << result.events << ",\n";
   out << indent << q << "trades" << q << ": " << result.trades << ",\n";
   out << indent << q << "booktickers" << q << ": " << result.bookTickers << ",\n";
@@ -978,6 +978,29 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
   out << indent << q << "mae_e8" << q << ": " << result.maeE8 << "\n";
 }
 
+void writeReplayClockObject(std::ostream& out,
+                            const BacktestReplayClockEvidence& clock) {
+  const char q = '"';
+  out << '{'
+      << q << "arrival_boundary" << q << ": " << quote(clock.arrivalBoundary) << ", "
+      << q << "market_data_delivery" << q << ": " << quote(clock.marketDataDelivery) << ", "
+      << q << "venue_schedule" << q << ": " << quote(clock.venueSchedule) << ", "
+      << q << "first_receive_monotonic_ns" << q << ": " << clock.firstReceiveMonotonicNs << ", "
+      << q << "last_receive_monotonic_ns" << q << ": " << clock.lastReceiveMonotonicNs << ", "
+      << q << "first_receive_realtime_ns" << q << ": " << clock.firstReceiveRealtimeNs << ", "
+      << q << "last_receive_realtime_ns" << q << ": " << clock.lastReceiveRealtimeNs << ", "
+      << q << "first_replay_delivery_ns" << q << ": " << clock.firstReplayDeliveryNs << ", "
+      << q << "last_replay_delivery_ns" << q << ": " << clock.lastReplayDeliveryNs << ", "
+      << q << "first_venue_schedule_ns" << q << ": " << clock.firstVenueScheduleNs << ", "
+      << q << "last_venue_schedule_ns" << q << ": " << clock.lastVenueScheduleNs << ", "
+      << q << "realtime_regressions" << q << ": " << clock.realtimeRegressions << ", "
+      << q << "monotonic_non_increasing" << q << ": " << clock.monotonicNonIncreasing << ", "
+      << q << "exchange_ahead_of_receive" << q << ": " << clock.exchangeAheadOfReceive << ", "
+      << q << "exchange_timestamp_missing" << q << ": " << clock.exchangeTimestampMissing << ", "
+      << q << "venue_schedule_adjusted_events" << q << ": " << clock.venueScheduleAdjustedEvents
+      << '}';
+}
+
 void writeLegsArray(std::ostream& out, const BacktestRunResult& result, const char* indent) {
   const char q = '"';
   out << indent << q << "legs" << q << ": [";
@@ -992,8 +1015,6 @@ void writeLegsArray(std::ostream& out, const BacktestRunResult& result, const ch
         << q << "symbol" << q << ": " << quote(leg.symbol) << ", "
         << q << "maker_fee_bps_e8" << q << ": " << leg.makerFeeBpsE8 << ", "
         << q << "taker_fee_bps_e8" << q << ": " << leg.takerFeeBpsE8 << ", "
-        << q << "market_data_latency" << q << ": {" << q << "base_us" << q << ": " << leg.marketDataLatency.baseUs
-        << ", " << q << "jitter_us" << q << ": " << leg.marketDataLatency.jitterUs << "}, "
         << q << "market_order_latency" << q << ": {" << q << "base_us" << q << ": " << leg.marketOrderLatency.baseUs
         << ", " << q << "jitter_us" << q << ": " << leg.marketOrderLatency.jitterUs << "}, "
         << q << "limit_order_latency" << q << ": {" << q << "base_us" << q << ": " << leg.limitOrderLatency.baseUs
@@ -1002,7 +1023,9 @@ void writeLegsArray(std::ostream& out, const BacktestRunResult& result, const ch
         << ", " << q << "jitter_us" << q << ": " << leg.cancelOrderLatency.jitterUs << "}, "
         << q << "user_data_latency" << q << ": {" << q << "base_us" << q << ": " << leg.userDataLatency.baseUs
         << ", " << q << "jitter_us" << q << ": " << leg.userDataLatency.jitterUs << "}, "
-        << q << "orders" << q << ": " << leg.orders << ", "
+        << q << "replay_clock" << q << ": ";
+    writeReplayClockObject(out, leg.replayClock);
+    out << ", " << q << "orders" << q << ": " << leg.orders << ", "
         << q << "fills" << q << ": " << leg.fills << ", "
         << q << "user_events" << q << ": " << leg.userEvents << ", "
         << q << "timer_wake_events" << q << ": " << leg.timerWakeEvents << ", "
@@ -1083,8 +1106,8 @@ bool writeManifest(const std::filesystem::path& path,
       ? result.rateLimitRejectedCommands
       : rejectedCommandCount(manifestRateLimits);
   out << "{\n";
-  out << "  " << q << "type" << q << ": " << q << "run.result.v2" << q << ",\n";
-  out << "  " << q << "schema_version" << q << ": 2,\n";
+  out << "  " << q << "type" << q << ": " << q << "run.result.v3" << q << ",\n";
+  out << "  " << q << "schema_version" << q << ": 3,\n";
   out << "  " << q << "request_id" << q << ": " << quote(result.requestId) << ",\n";
   out << "  " << q << "run_id" << q << ": " << quote(result.runId) << ",\n";
   out << "  " << q << "status" << q << ": " << quote(resultStatusName(result.status)) << ",\n";
@@ -1097,10 +1120,9 @@ bool writeManifest(const std::filesystem::path& path,
       << ", " << q << "trade_mode" << q << ": " << q << tradeModeName(result.tradeMode) << q
       << ", " << q << "primary_leg_index" << q << ": " << result.primaryLegIndex
       << ", " << q << "has_primary_leg_index" << q << ": " << (result.hasPrimaryLegIndex ? "true" : "false")
-      << ", " << q << "latency_model" << q << ": " << q << "realistic_tail_v1" << q
+      << ", " << q << "latency_model" << q << ": " << q << "captured_market_data_plus_synthetic_execution" << q
       << ", " << q << "latency_seed" << q << ": " << result.latencySeed
-      << ", " << q << "market_data" << q << ": {" << q << "base_us" << q << ": " << result.marketDataLatency.baseUs
-      << ", " << q << "jitter_us" << q << ": " << result.marketDataLatency.jitterUs << "}"
+      << ", " << q << "market_data_delivery" << q << ": " << q << "captured_application_frame_arrival" << q
       << ", " << q << "market_order" << q << ": {" << q << "base_us" << q << ": " << result.marketOrderLatency.baseUs
       << ", " << q << "jitter_us" << q << ": " << result.marketOrderLatency.jitterUs << "}"
       << ", " << q << "limit_order" << q << ": {" << q << "base_us" << q << ": " << result.limitOrderLatency.baseUs
@@ -1111,6 +1133,9 @@ bool writeManifest(const std::filesystem::path& path,
       << ", " << q << "jitter_us" << q << ": " << result.userDataLatency.jitterUs << "}"
       << ", " << q << "order_latency_us" << q << ": " << result.orderLatencyUs
       << ", " << q << "cancel_latency_us" << q << ": " << result.cancelLatencyUs << "},\n";
+  out << "  " << q << "replay_clock" << q << ": ";
+  writeReplayClockObject(out, result.replayClock);
+  out << ",\n";
   out << "  " << q << "rate_limits" << q << ": {"
       << q << "enabled" << q << ": " << (result.rateLimitsEnabled ? "true" : "false")
       << ", " << q << "strict_rejects" << q << ": " << (result.strictRateLimitRejects ? "true" : "false")

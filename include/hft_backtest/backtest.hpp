@@ -12,6 +12,10 @@
 
 namespace hft_backtest {
 
+inline constexpr std::uint32_t kBacktestApiVersion = 3u;
+
+extern "C" HFT_BACKTEST_API std::uint32_t hft_backtest_api_version() noexcept;
+
 struct BacktestLatencyProfile {
   std::uint64_t baseUs{0};
   std::uint64_t jitterUs{0};
@@ -47,6 +51,15 @@ struct BacktestSessionRequest {
   std::string symbol{};
 };
 
+struct BacktestCorpusSourceRequest {
+  std::string exchange{};
+  std::string market{};
+  std::string canonicalSymbol{};
+  // Half-open UTC receive interval [beginReceiveNs, endReceiveNs).
+  std::int64_t beginReceiveNs{0};
+  std::int64_t endReceiveNs{0};
+};
+
 struct BacktestFeeSchedule {
   std::string exchange{};
   std::string market{};
@@ -57,7 +70,6 @@ struct BacktestFeeSchedule {
 struct BacktestLatencySchedule {
   std::string exchange{};
   std::string market{};
-  BacktestLatencyProfile marketData{};
   BacktestLatencyProfile marketOrder{};
   BacktestLatencyProfile limitOrder{};
   BacktestLatencyProfile cancelOrder{};
@@ -79,6 +91,8 @@ enum class BacktestTradeMode : std::uint8_t {
 struct BacktestRunRequest {
   std::filesystem::path sessionPath{};
   std::vector<BacktestSessionRequest> sessions{};
+  std::filesystem::path corpusPath{};
+  std::vector<BacktestCorpusSourceRequest> corpusSources{};
   std::filesystem::path configPath{};
   std::filesystem::path outputPath{};
   std::string requestId{};
@@ -86,7 +100,6 @@ struct BacktestRunRequest {
   std::string strategy{};
   std::string indicatorProfile{};
   std::uint64_t latencySeed{0};
-  BacktestLatencyProfile marketDataLatency{};
   BacktestLatencyProfile marketOrderLatency{};
   BacktestLatencyProfile limitOrderLatency{};
   BacktestLatencyProfile cancelOrderLatency{};
@@ -138,6 +151,25 @@ struct BacktestLiveProbeSummary {
   bool ignored{false};
 };
 
+struct BacktestReplayClockEvidence {
+  std::string arrivalBoundary{"hft-parser.application-frame-ready"};
+  std::string marketDataDelivery{"captured_application_frame_arrival"};
+  std::string venueSchedule{"exchange_projected_not_after_delivery"};
+  std::uint64_t firstReceiveMonotonicNs{0u};
+  std::uint64_t lastReceiveMonotonicNs{0u};
+  std::int64_t firstReceiveRealtimeNs{0};
+  std::int64_t lastReceiveRealtimeNs{0};
+  std::int64_t firstReplayDeliveryNs{0};
+  std::int64_t lastReplayDeliveryNs{0};
+  std::int64_t firstVenueScheduleNs{0};
+  std::int64_t lastVenueScheduleNs{0};
+  std::uint64_t realtimeRegressions{0u};
+  std::uint64_t monotonicNonIncreasing{0u};
+  std::uint64_t exchangeAheadOfReceive{0u};
+  std::uint64_t exchangeTimestampMissing{0u};
+  std::uint64_t venueScheduleAdjustedEvents{0u};
+};
+
 struct BacktestLegSummary {
   std::filesystem::path sessionPath{};
   std::string exchange{};
@@ -145,7 +177,6 @@ struct BacktestLegSummary {
   std::string symbol{};
   std::int64_t makerFeeBpsE8{0};
   std::int64_t takerFeeBpsE8{0};
-  BacktestLatencyProfile marketDataLatency{};
   BacktestLatencyProfile marketOrderLatency{};
   BacktestLatencyProfile limitOrderLatency{};
   BacktestLatencyProfile cancelOrderLatency{};
@@ -167,6 +198,7 @@ struct BacktestLegSummary {
   std::int64_t openPositionQtyE8{0};
   std::vector<std::int64_t> totalPnlCurveE8{};
   BacktestDepthExecutionSummary depthExecution{};
+  BacktestReplayClockEvidence replayClock{};
   bool strategyClosed{false};
 };
 
@@ -182,7 +214,6 @@ struct BacktestRunResult {
   std::string error{};
   std::vector<std::string> warnings{};
   std::uint64_t latencySeed{0};
-  BacktestLatencyProfile marketDataLatency{};
   BacktestLatencyProfile marketOrderLatency{};
   BacktestLatencyProfile limitOrderLatency{};
   BacktestLatencyProfile cancelOrderLatency{};
@@ -231,6 +262,7 @@ struct BacktestRunResult {
   BacktestStageTimings performance{};
   BacktestInputCoverage inputCoverage{};
   BacktestLiveProbeSummary liveProbe{};
+  BacktestReplayClockEvidence replayClock{};
   std::uint64_t rateLimitRejectedCommands{0};
   BacktestTradeMode tradeMode{BacktestTradeMode::AllLegs};
   std::uint32_t primaryLegIndex{0u};

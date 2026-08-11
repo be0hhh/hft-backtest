@@ -100,17 +100,15 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
                                              bool taker,
                                              bool finalFill) noexcept {
   cxet::composite::UserDataEvent event{};
+  event.eventId.raw = ++engine.userEventSequence;
   event.exchangeId = engine.exchange;
   event.kind = cxet::composite::UserDataEventKind::Order;
   event.symbol = engine.symbol;
   (void)hft_trader::runtime::makeRuntimeClientOrderId(engine.exchange, 'o', order.state.clientIntentId, 1u, event.clientOrderId);
   event.orderId = event.clientOrderId;
   event.side = order.state.side;
-  event.sideSet = 1u;
   event.orderType = order.state.orderType;
-  event.orderTypeSet = 1u;
   event.orderStatus = finalFill ? canon::OrderStatus::Closed : canon::OrderStatus::PartiallyFilled;
-  event.orderStatusSet = 1u;
   event.price.raw = priceE8;
   event.avgPrice.raw = priceE8;
   event.lastPrice.raw = priceE8;
@@ -123,7 +121,43 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
   event.updateTime = event.eventTime;
   event.reduceOnly = order.reduceOnly ? 1u : 0u;
   event.maker = taker ? 0u : 1u;
-  ++engine.fillSequence;
+  event.presentFields =
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Symbol) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::ClientOrderId) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::OrderId) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Side) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::OrderType) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::OrderStatus) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Price) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::AvgPrice) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::LastPrice) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Qty) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::FilledQty) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::LastFilledQty) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Fee) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::RealizedPnl) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::EventTime) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::UpdateTime) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::ReduceOnly) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Maker);
   return event;
 }
 
@@ -132,22 +166,43 @@ cxet::composite::UserDataEvent makeRejectedOrderEvent(EngineState& engine,
                                                       std::int64_t tsNs,
                                                       canon::OrderProblem problem = canon::OrderProblem::None) noexcept {
   cxet::composite::UserDataEvent event{};
+  event.eventId.raw = ++engine.userEventSequence;
   event.exchangeId = engine.exchange;
   event.kind = cxet::composite::UserDataEventKind::Order;
   event.symbol = engine.symbol;
   (void)hft_trader::runtime::makeRuntimeClientOrderId(engine.exchange, 'o', order.state.clientIntentId, 1u, event.clientOrderId);
   event.orderId = event.clientOrderId;
   event.side = order.state.side;
-  event.sideSet = 1u;
   event.orderType = order.state.orderType;
-  event.orderTypeSet = 1u;
   event.orderStatus = canon::OrderStatus::Rejected;
   event.orderProblem = problem;
-  event.orderStatusSet = 1u;
   event.qty = order.state.qty;
   event.eventTime.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   event.updateTime = event.eventTime;
   event.reduceOnly = order.reduceOnly ? 1u : 0u;
+  event.presentFields =
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Symbol) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::ClientOrderId) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::OrderId) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Side) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::OrderType) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::OrderStatus) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::OrderProblem) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Qty) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::EventTime) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::UpdateTime) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::ReduceOnly);
   return event;
 }
 
@@ -155,17 +210,15 @@ cxet::composite::UserDataEvent makeCanceledOrderEvent(EngineState& engine,
                                                       const OpenOrder& order,
                                                       std::int64_t tsNs) noexcept {
   cxet::composite::UserDataEvent event{};
+  event.eventId.raw = ++engine.userEventSequence;
   event.exchangeId = engine.exchange;
   event.kind = cxet::composite::UserDataEventKind::Order;
   event.symbol = engine.symbol;
   (void)hft_trader::runtime::makeRuntimeClientOrderId(engine.exchange, 'o', order.state.clientIntentId, 1u, event.clientOrderId);
   event.orderId = event.clientOrderId;
   event.side = order.state.side;
-  event.sideSet = 1u;
   event.orderType = order.state.orderType;
-  event.orderTypeSet = 1u;
   event.orderStatus = canon::OrderStatus::Canceled;
-  event.orderStatusSet = 1u;
   event.price = order.state.price;
   event.qty = order.state.qty;
   event.filledQty.raw = order.filledQtyRaw;
@@ -173,6 +226,33 @@ cxet::composite::UserDataEvent makeCanceledOrderEvent(EngineState& engine,
   event.eventTime.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   event.updateTime = event.eventTime;
   event.reduceOnly = order.reduceOnly ? 1u : 0u;
+  event.presentFields =
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Symbol) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::ClientOrderId) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::OrderId) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Side) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::OrderType) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::OrderStatus) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Price) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::Qty) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::FilledQty) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::LastFilledQty) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::EventTime) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::UpdateTime) |
+      cxet::composite::userDataFieldBit(
+          cxet::composite::UserDataField::ReduceOnly);
   return event;
 }
 
@@ -564,7 +644,7 @@ void activateOrder(EngineState& engine, OpenOrder& order, std::int64_t activeTsN
       order.queueInitialized = true;
     }
   }
-  tryFillOnTop(engine, activeTsNs);
+  tryFillOnTop(engine, activeTsNs, false);
 }
 
 bool submitCancelIntent(EngineState& engine,
@@ -763,7 +843,6 @@ bool submitCancelIntent(EngineState& engine,
   slot.filledQtyRaw = 0;
   slot.queueAheadQtyRaw = 0;
   slot.lastAggressiveBookTsNs = 0;
-  slot.lastPassiveBboTouchTsNs = 0;
   slot.active = false;
   slot.reduceOnly = intent.reduceOnly;
   slot.postOnly = postOnly;
@@ -1024,10 +1103,12 @@ void triggerStopMarketsBySource(EngineState& engine,
     updateTriggeredStopMarketRecord(engine, order, sourcePrice, tsNs);
     triggered = true;
   }
-  if (triggered) tryFillOnTop(engine, tsNs);
+  if (triggered) tryFillOnTop(engine, tsNs, false);
 }
 
-void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
+void tryFillOnTop(EngineState& engine,
+                  std::int64_t tsNs,
+                  bool venueBookTickerUpdate) {
   if (engine.liquidated || engine.riskStopped) return;
   const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
   const std::int64_t bid = top.bid.px.raw;
@@ -1087,7 +1168,8 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
         continue;
       }
     }
-    if (order.state.orderType == canon::OrderType::Limit) {
+    if (venueBookTickerUpdate &&
+        order.state.orderType == canon::OrderType::Limit) {
       const PassiveBboTouchFill fill = consumePassiveQueueForBboTouch(engine, order, top, tsNs);
       if (fill.requestedQtyE8 > 0) {
         FillExecutionMetadata metadata{};
@@ -1124,7 +1206,9 @@ void tryFillOnTop(EngineState& engine, std::int64_t tsNs) {
   }
 }
 
-void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& trade) {
+void tryFillOnTrade(EngineState& engine,
+                    const cxet::composite::TradeRuntimeV1& trade,
+                    std::int64_t venueTsNs) {
   if (engine.liquidated || engine.riskStopped) return;
   for (OpenOrder& order : engine.open) {
     if (!order.state.valid || !order.active || order.state.orderType == canon::OrderType::Market ||
@@ -1135,22 +1219,29 @@ void tryFillOnTrade(EngineState& engine, const cxet::composite::TradeRuntimeV1& 
     metadata.fillReason = kFillReasonPassiveQueue;
     metadata.queueAheadBeforeE8 = fill.queueAheadBeforeE8;
     metadata.queueAheadAfterE8 = fill.queueAheadAfterE8;
-    (void)fillOrderQty(engine, order, order.state.price.raw, fill.requestedQtyE8, static_cast<std::int64_t>(trade.ts.raw), false, metadata);
+    (void)fillOrderQty(engine, order, order.state.price.raw,
+                       fill.requestedQtyE8, venueTsNs, false, metadata);
   }
 }
 
-void tryTriggerStopMarketsOnMark(EngineState& engine, const cxet::composite::MarkPriceRuntimeV1& markPrice) {
+void tryTriggerStopMarketsOnMark(
+    EngineState& engine,
+    const cxet::composite::MarkPriceRuntimeV1& markPrice,
+    std::int64_t venueTsNs) {
   triggerStopMarketsBySource(engine,
                              canon::OrderTriggerSource::Mark,
                              markPrice.markPrice.raw,
-                             static_cast<std::int64_t>(markPrice.ts.raw));
+                             venueTsNs);
 }
 
-void tryTriggerStopMarketsOnIndex(EngineState& engine, const cxet::composite::IndexPriceRuntimeV1& indexPrice) {
+void tryTriggerStopMarketsOnIndex(
+    EngineState& engine,
+    const cxet::composite::IndexPriceRuntimeV1& indexPrice,
+    std::int64_t venueTsNs) {
   triggerStopMarketsBySource(engine,
                              canon::OrderTriggerSource::Index,
                              indexPrice.indexPrice.raw,
-                             static_cast<std::int64_t>(indexPrice.ts.raw));
+                             venueTsNs);
 }
 
 void applyDueActions(EngineState& engine, std::int64_t tsNs) {

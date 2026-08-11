@@ -2,6 +2,15 @@
 
 `hft-backtest` is an app-layer replay/backtest module above CXETCPP, hft-trader, and hft-recorder session corpora.
 
+## Project-owned versioning
+
+- Keep one canonical current backtest contract. Do not add parallel
+  `V1`/`V2`/`V3` types, compatibility aliases or forwarding facades; update all
+  in-repo producers and consumers atomically.
+- Numeric result/corpus/ABI guards remain fail-closed, but current app-owned
+  names stay free of `V<number>`. Only isolated legacy readers, externally
+  dictated protocol tokens and immutable evidence may retain versioned names.
+
 ## Boundaries
 
 - Do not change strategy code to make backtests work. Link the prebuilt hft-trader runtime shared library and adapt at the app boundary.

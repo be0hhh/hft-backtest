@@ -1,6 +1,7 @@
 #include "hft_backtest/backtest_sweep.hpp"
 
 #include "sweep/backtest_sweep_internal.hpp"
+#include "../support/CapturedSessionFixture.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -29,6 +30,64 @@ void writeText(const std::filesystem::path& path, std::string_view text) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream out(path, std::ios::out | std::ios::trunc | std::ios::binary);
   out << text;
+}
+
+void writeSweepReplaySession(const std::filesystem::path& dir) {
+  using hft_backtest::test_support::CapturedChannelCounts;
+  using hft_backtest::test_support::DepthLevel;
+  writeText(
+      dir / "manifest.json",
+      hft_backtest::test_support::capturedManifestJson(
+          "binance",
+          "futures",
+          "BTC_USDT",
+          CapturedChannelCounts{
+              .trades = 4u,
+              .bookTickers = 1u,
+              .priceLimits = 1u,
+              .depth = 1u,
+              .candles = 3u}));
+  writeText(dir / "instrument_metadata.json",
+            "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
+  writeText(dir / "jsonl" / "trades.jsonl",
+            hft_backtest::test_support::tradeRow(
+                10000000000ll, 100000000ll, 1, 1500000000ll, 1u,
+                "BTC_USDT", "binance") +
+                hft_backtest::test_support::tradeRow(
+                    10020000000ll, 100000000ll, 0, 1600000000ll, 2u,
+                    "BTC_USDT", "binance") +
+                hft_backtest::test_support::tradeRow(
+                    10050000000ll, 100000000ll, 1, 2100000000ll, 3u,
+                    "BTC_USDT", "binance") +
+                hft_backtest::test_support::tradeRow(
+                    10060000000ll, 100000000ll, 1, 3100000000ll, 7u,
+                    "BTC_USDT", "binance"));
+  writeText(dir / "jsonl" / "bookticker.jsonl",
+            hft_backtest::test_support::bookTickerRow(
+                9900000000ll, 100000000ll, 10100000000ll, 100000000ll,
+                3000000000ll, 6u, "BTC_USDT", "binance"));
+  writeText(dir / "jsonl" / "price_limit.jsonl",
+            hft_backtest::test_support::priceLimitRow(
+                3000000000ll, 10500000000ll, 9500000000ll, 5u));
+  const auto levels = std::initializer_list<DepthLevel>{
+      {9900000000ll, 100000000ll, 0},
+      {10100000000ll, 100000000ll, 1}};
+  writeText(dir / "jsonl" / "depth_tape.jsonl",
+            hft_backtest::test_support::depthTapeRow(
+                2500000000ll, 4u, levels));
+  writeText(dir / "jsonl" / "depth_sidecar.jsonl",
+            hft_backtest::test_support::depthSidecarRow(
+                2500000000ll, 4u, levels));
+  writeText(dir / "jsonl" / "candles.jsonl",
+            hft_backtest::test_support::candleRow(
+                1, 1000000000ll, 10200000000ll, 9800000000ll,
+                500000000ll, 1u, "BTC_USDT", "binance", "1m") +
+                hft_backtest::test_support::candleRow(
+                    2, 900000000ll, 10300000000ll, 9700000000ll,
+                    600000000ll, 2u, "BTC_USDT", "binance", "15m") +
+                hft_backtest::test_support::candleRow(
+                    3, 800000000ll, 10400000000ll, 9600000000ll,
+                    700000000ll, 3u, "BTC_USDT", "binance", "1d"));
 }
 
 bool testSearchPlanHonorsBudgetAcrossManyParams() {
@@ -68,32 +127,7 @@ bool testSearchPlanSamplesGridParamsDeterministically() {
 bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_sweep_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTC_USDT\"]},\n"
-            "  \"channels\": {\n"
-            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
-            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
-            "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"},\n"
-            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
-            "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
-            "  },\n"
-            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"},\n"
-            "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1, \"history_requested_end_ns\": 2500000000, \"history_rows\": 3}}\n"
-            "}\n");
-  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
-  writeText(dir / "jsonl" / "trades.jsonl",
-            "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTC_USDT\",\"binance\",\"futures\",1,1]\n"
-            "[10020000000,100000000,0,1600000000,2,2,2,10020000000,0,\"BTC_USDT\",\"binance\",\"futures\",2,2]\n"
-            "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTC_USDT\",\"binance\",\"futures\",3,3]\n"
-            "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTC_USDT\",\"binance\",\"futures\",4,4]\n");
-  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
-  writeText(dir / "jsonl" / "price_limit.jsonl", "[3000000000,9500000000,10500000000,1]\n");
-  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000,2,2]\n");
-  writeText(dir / "jsonl" / "candles.jsonl",
-            "[1,1000000000,10200000000,9800000000,500000000]\n"
-            "[2,900000000,10300000000,9700000000,600000000]\n"
-            "[3,800000000,10400000000,9600000000,700000000]\n");
+  writeSweepReplaySession(dir);
   writeText(dir / "spread.ini",
             "[runtime]\nname=spread\nenv_path=.env\n"
             "[strategy]\ntype=spread_maker1and2\nenabled=1\n"
@@ -155,32 +189,7 @@ bool testSweepRunsSummaryOnlyAndWritesCompactArtifacts() {
 bool testSweepCanRunTwiceInOneProcess() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_sweep_twice_" + std::to_string(std::rand()));
-  writeText(dir / "manifest.json",
-            "{\n"
-            "  \"identity\": {\"exchange\": \"binance\", \"market\": \"futures\", \"symbols\": [\"BTC_USDT\"]},\n"
-            "  \"channels\": {\n"
-            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
-            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
-            "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"},\n"
-            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"},\n"
-            "    \"candles\": {\"path\": \"jsonl/candles.jsonl\"}\n"
-            "  },\n"
-            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"},\n"
-            "  \"summary\": {\"trades\": {\"history_requested_start_ns\": 1, \"history_requested_end_ns\": 2500000000, \"history_rows\": 3}}\n"
-            "}\n");
-  writeText(dir / "instrument_metadata.json", "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000,\"contract_base_qty_e8\":100000000}\n");
-  writeText(dir / "jsonl" / "trades.jsonl",
-            "[10000000000,100000000,1,1500000000,1,1,1,10000000000,0,\"BTC_USDT\",\"binance\",\"futures\",1,1]\n"
-            "[10020000000,100000000,0,1600000000,2,2,2,10020000000,0,\"BTC_USDT\",\"binance\",\"futures\",2,2]\n"
-            "[10050000000,100000000,1,2100000000,3,3,3,10050000000,0,\"BTC_USDT\",\"binance\",\"futures\",3,3]\n"
-            "[10060000000,100000000,1,3100000000,4,4,4,10060000000,0,\"BTC_USDT\",\"binance\",\"futures\",4,4]\n");
-  writeText(dir / "jsonl" / "bookticker.jsonl", "[9900000000,100000000,10100000000,100000000,3000000000,3,3]\n");
-  writeText(dir / "jsonl" / "price_limit.jsonl", "[3000000000,9500000000,10500000000,1]\n");
-  writeText(dir / "jsonl" / "depth.jsonl", "[[9900000000,100000000,1],[10100000000,100000000,0],2500000000,2,2]\n");
-  writeText(dir / "jsonl" / "candles.jsonl",
-            "[1,1000000000,10200000000,9800000000,500000000]\n"
-            "[2,900000000,10300000000,9700000000,600000000]\n"
-            "[3,800000000,10400000000,9600000000,700000000]\n");
+  writeSweepReplaySession(dir);
   writeText(dir / "spread.ini",
             "[runtime]\nname=spread\nenv_path=.env\n"
             "[strategy]\ntype=spread_maker1and2\nenabled=1\n"

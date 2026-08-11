@@ -115,7 +115,7 @@ void triggerMark(EngineState& engine, std::int64_t markPx, std::uint64_t tsNs) n
   cxet::composite::MarkPriceRuntimeV1 mark{};
   mark.ts.raw = tsNs;
   mark.markPrice.raw = markPx;
-  tryTriggerStopMarketsOnMark(engine, mark);
+  tryTriggerStopMarketsOnMark(engine, mark, tsNs);
 }
 
 bool expect(bool value, std::string_view message) {

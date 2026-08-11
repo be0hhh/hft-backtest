@@ -1,5 +1,8 @@
 #include "execution/backtest_execution_depth.hpp"
 
+#include "engine/backtest_replay_clock.hpp"
+#include "core/capture/SessionManifest.hpp"
+#include "core/replay/JsonLineParser.hpp"
 #include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
 
 #include <chrono>
@@ -67,12 +70,6 @@ class MappedFile {
   std::size_t size_{0u};
 };
 
-enum class DepthSource : std::uint8_t {
-  None = 0u,
-  LegacySnapshot = 1u,
-  TapeSidecar = 2u,
-};
-
 enum class ReadDepthRowResult : std::uint8_t {
   Eof = 0u,
   Row = 1u,
@@ -82,15 +79,27 @@ enum class ReadDepthRowResult : std::uint8_t {
 constexpr std::size_t kCursorInlineDepthLevels = 64u;
 
 struct CursorDepthRow {
-  std::int64_t tsNs{0};
+  std::int64_t exchangeTsNs{0};
+  std::int64_t scheduleTsNs{0};
+  std::int64_t deliveryTsNs{0};
   std::int64_t ingestSeq{0};
+  hftrec::replay::EventArrival arrival{};
   absl::InlinedVector<PriceLevelRow, kCursorInlineDepthLevels> levels{};
 
   void clear() {
-    tsNs = 0;
+    exchangeTsNs = 0;
+    scheduleTsNs = 0;
+    deliveryTsNs = 0;
     ingestSeq = 0;
+    arrival = {};
     levels.clear();
   }
+};
+
+struct DepthScheduleKey {
+  std::int64_t scheduleTsNs{0};
+  std::int64_t deliveryTsNs{0};
+  hftrec::replay::EventArrival arrival{};
 };
 
 [[nodiscard]] bool readText(const std::filesystem::path& path, std::string& out) {
@@ -100,162 +109,6 @@ struct CursorDepthRow {
   ss << in.rdbuf();
   out = ss.str();
   return true;
-}
-
-void skipWs(std::string_view text, std::size_t& pos) noexcept {
-  while (pos < text.size()) {
-    const char c = text[pos];
-    if (c != ' ' && c != '\n' && c != '\r' && c != '\t') break;
-    ++pos;
-  }
-}
-
-[[nodiscard]] bool consume(std::string_view text, std::size_t& pos, char expected) noexcept {
-  skipWs(text, pos);
-  if (pos >= text.size() || text[pos] != expected) return false;
-  ++pos;
-  return true;
-}
-
-[[nodiscard]] bool parseI64(std::string_view text, std::size_t& pos, std::int64_t& out) noexcept {
-  skipWs(text, pos);
-  if (pos >= text.size()) return false;
-  const bool negative = text[pos] == '-';
-  if (negative || text[pos] == '+') ++pos;
-  if (pos >= text.size()) return false;
-  constexpr std::uint64_t kMaxPositive = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-  constexpr std::uint64_t kMaxNegativeAbs = kMaxPositive + 1u;
-  const std::uint64_t limit = negative ? kMaxNegativeAbs : kMaxPositive;
-  std::uint64_t value = 0u;
-  bool any = false;
-  while (pos < text.size()) {
-    const unsigned digit = static_cast<unsigned>(static_cast<unsigned char>(text[pos]) - static_cast<unsigned char>('0'));
-    if (digit > 9u) break;
-    if (value > (limit - digit) / 10u) return false;
-    value = value * 10u + digit;
-    any = true;
-    ++pos;
-  }
-  if (!any) return false;
-  out = negative
-      ? (value == kMaxNegativeAbs ? std::numeric_limits<std::int64_t>::min() : -static_cast<std::int64_t>(value))
-      : static_cast<std::int64_t>(value);
-  return true;
-}
-
-[[nodiscard]] bool parseU64(std::string_view text, std::size_t& pos, std::uint64_t& out) noexcept {
-  skipWs(text, pos);
-  if (pos >= text.size() || text[pos] == '-' || text[pos] == '+') return false;
-  std::uint64_t value = 0u;
-  bool any = false;
-  while (pos < text.size()) {
-    const unsigned digit = static_cast<unsigned>(static_cast<unsigned char>(text[pos]) - static_cast<unsigned char>('0'));
-    if (digit > 9u) break;
-    if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / 10u) return false;
-    value = value * 10u + digit;
-    any = true;
-    ++pos;
-  }
-  if (!any) return false;
-  out = value;
-  return true;
-}
-
-[[nodiscard]] bool parseLevel(std::string_view text, std::size_t& pos, PriceLevelRow& out) noexcept {
-  return consume(text, pos, '[') && parseI64(text, pos, out.priceE8) && consume(text, pos, ',') &&
-         parseI64(text, pos, out.qtyE8) && consume(text, pos, ',') && parseI64(text, pos, out.side) &&
-         (out.side == 0 || out.side == 1) && consume(text, pos, ']');
-}
-
-template<typename Levels>
-[[nodiscard]] bool parseBookDocument(std::string_view line,
-                                     Levels& levels,
-                                     std::int64_t& tsNs,
-                                     std::int64_t* ingestSeq = nullptr) noexcept {
-  std::size_t pos = 0;
-  levels.clear();
-  if (!consume(line, pos, '[')) return false;
-  while (true) {
-    skipWs(line, pos);
-    if (pos >= line.size()) return false;
-    if (line[pos] != '[') break;
-    PriceLevelRow level{};
-    if (!parseLevel(line, pos, level)) return false;
-    try {
-      levels.push_back(level);
-    } catch (...) {
-      return false;
-    }
-    if (!consume(line, pos, ',')) return false;
-  }
-  if (!parseI64(line, pos, tsNs)) return false;
-  std::int64_t captureSeq = 0;
-  std::int64_t parsedIngestSeq = 0;
-  if (consume(line, pos, ',') &&
-      (!parseI64(line, pos, captureSeq) || !consume(line, pos, ',') || !parseI64(line, pos, parsedIngestSeq))) {
-    return false;
-  }
-  if (ingestSeq) *ingestSeq = parsedIngestSeq;
-  return true;
-}
-
-[[nodiscard]] bool parseDepthTapeLine(std::string_view line, CursorDepthRow& row, std::uint64_t& taggedTs) noexcept {
-  std::size_t pos = 0;
-  row.clear();
-  if (!consume(line, pos, '[') || !parseU64(line, pos, taggedTs)) return false;
-  if (!cxet::composite::isOrderBookTapeTimestampWord(taggedTs)) return false;
-  const TimeNs ts = cxet::composite::orderBookTapeTimestampFromWord(taggedTs);
-  if (ts.raw > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) return false;
-  row.tsNs = static_cast<std::int64_t>(ts.raw);
-  while (true) {
-    skipWs(line, pos);
-    if (pos >= line.size()) return false;
-    if (line[pos] == ']') {
-      ++pos;
-      skipWs(line, pos);
-      return pos == line.size();
-    }
-    if (!consume(line, pos, ',')) return false;
-    PriceLevelRow level{};
-    if (!parseI64(line, pos, level.priceE8) || !consume(line, pos, ',') || !parseI64(line, pos, level.qtyE8)) {
-      return false;
-    }
-    if (level.priceE8 < 0 || level.qtyE8 < 0) return false;
-    try {
-      row.levels.push_back(level);
-    } catch (...) {
-      return false;
-    }
-  }
-}
-
-[[nodiscard]] bool applyDepthSidecarLine(std::string_view line,
-                                         std::uint64_t expectedTaggedTs,
-                                         CursorDepthRow& row) noexcept {
-  std::size_t pos = 0;
-  std::uint64_t taggedTs = 0u;
-  if (!consume(line, pos, '[') || !parseU64(line, pos, taggedTs) || taggedTs != expectedTaggedTs) return false;
-  std::size_t levelIndex = 0u;
-  while (true) {
-    skipWs(line, pos);
-    if (pos >= line.size()) return false;
-    if (line[pos] == ']') {
-      ++pos;
-      skipWs(line, pos);
-      return pos == line.size() && levelIndex == row.levels.size();
-    }
-    std::int64_t side = 0;
-    std::int64_t count = 0;
-    if (!consume(line, pos, ',') || !parseI64(line, pos, side) || !consume(line, pos, ',') ||
-        !parseI64(line, pos, count)) {
-      return false;
-    }
-    if ((side != 0 && side != 1) || count < 0) return false;
-    for (std::int64_t i = 0; i < count; ++i) {
-      if (levelIndex >= row.levels.size()) return false;
-      row.levels[levelIndex++].side = side;
-    }
-  }
 }
 
 [[nodiscard]] bool readLine(std::string_view text, std::size_t& pos, std::string_view& line) noexcept {
@@ -269,100 +122,8 @@ template<typename Levels>
   return true;
 }
 
-[[nodiscard]] std::string extractStringAfter(std::string_view text, std::string_view key) {
-  const std::size_t keyPos = text.find(key);
-  if (keyPos == std::string_view::npos) return {};
-  const std::size_t colon = text.find(':', keyPos + key.size());
-  if (colon == std::string_view::npos) return {};
-  std::size_t firstQuote = colon + 1u;
-  skipWs(text, firstQuote);
-  if (firstQuote >= text.size() || text[firstQuote] != '"') return {};
-  std::size_t secondQuote = firstQuote + 1u;
-  while (secondQuote < text.size()) {
-    if (text[secondQuote] == '"' && text[secondQuote - 1u] != '\\') break;
-    ++secondQuote;
-  }
-  if (secondQuote >= text.size()) return {};
-  return std::string{text.substr(firstQuote + 1u, secondQuote - firstQuote - 1u)};
-}
-
-[[nodiscard]] std::string_view extractObjectAfter(std::string_view text, std::string_view key) noexcept {
-  const std::size_t keyPos = text.find(key);
-  if (keyPos == std::string_view::npos) return {};
-  std::size_t objectBegin = text.find(':', keyPos + key.size());
-  if (objectBegin == std::string_view::npos) return {};
-  ++objectBegin;
-  skipWs(text, objectBegin);
-  if (objectBegin >= text.size() || text[objectBegin] != '{') return {};
-  std::uint32_t depth = 0;
-  bool inString = false;
-  bool escaped = false;
-  for (std::size_t pos = objectBegin; pos < text.size(); ++pos) {
-    const char c = text[pos];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (inString) {
-      if (c == '\\') escaped = true;
-      else if (c == '"') inString = false;
-      continue;
-    }
-    if (c == '"') {
-      inString = true;
-    } else if (c == '{') {
-      ++depth;
-    } else if (c == '}') {
-      if (depth == 0u) return {};
-      --depth;
-      if (depth == 0u) return text.substr(objectBegin, pos - objectBegin + 1u);
-    }
-  }
-  return {};
-}
-
-[[nodiscard]] std::string extractChannelPath(std::string_view manifest, std::string_view channel) {
-  std::string key{"\""};
-  key += channel;
-  key += "\"";
-  const std::string_view object = extractObjectAfter(manifest, key);
-  if (object.empty()) return extractStringAfter(manifest, key);
-  return extractStringAfter(object, "\"path\"");
-}
-
-[[nodiscard]] std::string extractChannelSidecarPath(std::string_view manifest, std::string_view channel) {
-  std::string key{"\""};
-  key += channel;
-  key += "\"";
-  const std::string_view object = extractObjectAfter(manifest, key);
-  return object.empty() ? std::string{} : extractStringAfter(object, "\"sidecar_path\"");
-}
-
-[[nodiscard]] std::filesystem::path existingPath(const std::filesystem::path& root,
-                                                 std::string_view path,
-                                                 std::string_view fallback) {
-  const std::filesystem::path declared = root / std::filesystem::path{std::string{path}};
-  if (!path.empty() && std::filesystem::exists(declared)) return declared;
-  const std::filesystem::path direct = root / std::filesystem::path{std::string{fallback}};
-  if (std::filesystem::exists(direct)) return direct;
-  return root / "jsonl" / std::filesystem::path{std::string{fallback}};
-}
-
 [[nodiscard]] Side orderBookSideFromDepthRow(std::int64_t side) noexcept {
   return side == 0 ? Side::Buy() : Side::Sell();
-}
-
-void toRuntimeSnapshot(const CursorDepthRow& row,
-                       cxet::composite::OrderBookSnapshot& out) noexcept {
-  cxet::composite::resetOrderBookSnapshotHeader(out);
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  for (const PriceLevelRow& level : row.levels) {
-    Price price{};
-    Amount qty{};
-    price.raw = level.priceE8;
-    qty.raw = level.qtyE8;
-    (void)cxet::composite::appendOrderBookLevel(out, price, qty, orderBookSideFromDepthRow(level.side));
-  }
 }
 
 void toRuntime(const CursorDepthRow& row,
@@ -371,7 +132,8 @@ void toRuntime(const CursorDepthRow& row,
   cxet::composite::resetOrderBookTapeRuntimeHeader(tape);
   cxet::composite::resetOrderBookTapeSidesRuntimeHeader(sides);
   TimeNs ts{};
-  ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+  ts.raw = static_cast<std::uint64_t>(
+      row.exchangeTsNs > 0 ? row.exchangeTsNs : 0);
   (void)cxet::composite::appendOrderBookTapeTimestamp(tape, ts);
   for (const PriceLevelRow& level : row.levels) {
     Price price{};
@@ -390,24 +152,23 @@ void toRuntime(const CursorDepthRow& row,
 }  // namespace
 
 struct ExecutionDepthProviderImpl {
-  MappedFile legacyFile{};
   MappedFile tapeFile{};
   MappedFile sidecarFile{};
-  std::string_view legacyText{};
   std::string_view tapeText{};
   std::string_view sidecarText{};
-  std::size_t legacyPos{0u};
   std::size_t tapePos{0u};
   std::size_t sidecarPos{0u};
+  CapturedReplayClockAnchor clockAnchor{};
+  hftrec::replay::DepthRow contractScratch{};
+  DepthScheduleKey lastSourceKey{};
   CursorDepthRow pending{};
   CursorDepthRow scratch{};
-  cxet::composite::OrderBookSnapshot snapshotScratch{};
   cxet::composite::OrderBookTapeRuntimeV1 tapeScratch{};
   cxet::composite::OrderBookTapeSidesRuntimeV1 sideScratch{};
+  bool lastSourceRowValid{false};
   bool pendingValid{false};
   bool eof{false};
   std::uint64_t sourceRows{0u};
-  DepthSource source{DepthSource::None};
 };
 
 namespace {
@@ -416,10 +177,11 @@ constexpr std::uint64_t kDepthCheckpointRows = 65536u;
 
 struct ExecutionDepthCheckpoint {
   std::int64_t tsNs{0};
-  std::size_t legacyPos{0u};
   std::size_t tapePos{0u};
   std::size_t sidecarPos{0u};
   std::uint64_t sourceRows{0u};
+  DepthScheduleKey lastSourceKey{};
+  bool lastSourceRowValid{false};
   hft_trader::core::LocalOrderBookState book{};
 };
 
@@ -438,10 +200,11 @@ class ExecutionDepthCheckpointCache {
         });
     if (it == checkpoints_.begin()) return false;
     const ExecutionDepthCheckpoint& checkpoint = *(it - 1);
-    impl.legacyPos = checkpoint.legacyPos;
     impl.tapePos = checkpoint.tapePos;
     impl.sidecarPos = checkpoint.sidecarPos;
     impl.sourceRows = checkpoint.sourceRows;
+    impl.lastSourceKey = checkpoint.lastSourceKey;
+    impl.lastSourceRowValid = checkpoint.lastSourceRowValid;
     impl.pendingValid = false;
     impl.eof = false;
     return book.copyFromBounded(checkpoint.book);
@@ -456,7 +219,13 @@ class ExecutionDepthCheckpointCache {
       if (!checkpoints_.empty() && checkpoints_.back().sourceRows >= impl.sourceRows) return;
       if (!checkpoints_.empty() && checkpoints_.back().tsNs > tsNs) return;
       checkpoints_.push_back(ExecutionDepthCheckpoint{
-          tsNs, impl.legacyPos, impl.tapePos, impl.sidecarPos, impl.sourceRows, book});
+          tsNs,
+          impl.tapePos,
+          impl.sidecarPos,
+          impl.sourceRows,
+          impl.lastSourceKey,
+          impl.lastSourceRowValid,
+          book});
     } catch (...) {
     }
   }
@@ -483,6 +252,9 @@ class ExecutionDepthCheckpointCache {
 std::shared_ptr<ExecutionDepthCheckpointCache> makeExecutionDepthCheckpointCache() {
   return std::make_shared<ExecutionDepthCheckpointCache>();
 }
+
+ReadDepthRowResult readNextDepthRow(ExecutionDepthProviderImpl& impl,
+                                    CursorDepthRow& out) noexcept;
 
 ExecutionDepthProvider::~ExecutionDepthProvider() {
   delete impl_;
@@ -530,46 +302,57 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
       }
     }
 
-  std::string manifest;
-  (void)readText(sessionPath / "manifest.json", manifest);
-  const std::string depthPath = extractChannelPath(manifest, "depth");
-  const std::string depthSidecarPath = extractChannelSidecarPath(manifest, "depth");
-  const bool depthDeclared = !depthPath.empty() || !depthSidecarPath.empty();
-
-  const std::filesystem::path declaredDepth = !depthPath.empty()
-      ? sessionPath / std::filesystem::path{depthPath}
-      : std::filesystem::path{};
-  const bool declaredTape = !declaredDepth.empty() && declaredDepth.filename() == "depth_tape.jsonl";
-  const bool declaredTapePair = declaredTape || !depthSidecarPath.empty();
-  std::filesystem::path tapePath{};
-  std::filesystem::path sidecarPath{};
-  std::filesystem::path legacyPath{};
-  if (depthDeclared) {
-    if (declaredTapePair) {
-      tapePath = !depthPath.empty()
-          ? sessionPath / std::filesystem::path{depthPath}
-          : existingPath(sessionPath, std::string_view{}, "depth_tape.jsonl");
-      sidecarPath = !depthSidecarPath.empty()
-          ? sessionPath / std::filesystem::path{depthSidecarPath}
-          : existingPath(sessionPath, std::string_view{}, "depth_sidecar.jsonl");
-    } else {
-      legacyPath = declaredDepth;
-    }
-  } else {
-    tapePath = existingPath(sessionPath, std::string_view{}, "depth_tape.jsonl");
-    sidecarPath = existingPath(sessionPath, std::string_view{}, "depth_sidecar.jsonl");
-    legacyPath = existingPath(sessionPath, std::string_view{}, "depth.jsonl");
+  std::string manifestDocument;
+  hftrec::capture::SessionManifest manifest{};
+  if (!readText(sessionPath / "manifest.json", manifestDocument) ||
+      !hftrec::isOk(hftrec::capture::parseManifestJson(
+          manifestDocument, manifest)) ||
+      manifest.manifestSchemaVersion !=
+          hftrec::capture::kManifestSchemaVersionCurrent ||
+      manifest.corpusSchemaVersion !=
+          hftrec::capture::kCorpusSchemaVersionCurrent ||
+      manifest.captureContractVersion !=
+          hftrec::capture::kCaptureContractVersionCurrent ||
+      manifest.sessionStatus != "complete" ||
+      !manifest.structurallyLoadable ||
+      manifest.sessionHealth != hftrec::SessionHealth::Clean ||
+      !manifest.exactReplayEligible ||
+      manifest.arrivalClock.unavailableRows != 0u ||
+      manifest.arrivalClock.firstReceiveRealtimeNs <= 0 ||
+      manifest.arrivalClock.firstReceiveMonotonicNs == 0u) {
+    failed_ = true;
+    failureReason_ = "manifest_contract_mismatch";
+    return ExecutionDepthOpenStatus::Failed;
   }
-  const bool hasTape = !tapePath.empty() && !sidecarPath.empty() &&
-                       std::filesystem::exists(tapePath) && std::filesystem::exists(sidecarPath);
-  const bool hasLegacy = !legacyPath.empty() && std::filesystem::exists(legacyPath);
-  if (!hasTape && !hasLegacy) {
-    if (depthDeclared) {
-      failed_ = true;
-      failureReason_ = "declared_files_missing";
-      return ExecutionDepthOpenStatus::Failed;
-    }
+  if (!manifest.orderbookEnabled || manifest.depthCount == 0u) {
     return ExecutionDepthOpenStatus::Absent;
+  }
+  if (manifest.depthRowSchema != hftrec::capture::kDepthRowSchemaCurrent ||
+      manifest.depthPath.empty() || manifest.depthSidecarPath.empty()) {
+    failed_ = true;
+    failureReason_ = "depth_contract_mismatch";
+    return ExecutionDepthOpenStatus::Failed;
+  }
+  const hftrec::capture::ChannelRuntimeHealth& depthRuntime =
+      manifest.depthRuntime;
+  if (depthRuntime.state != "live" || depthRuntime.reconnectCount != 0u ||
+      depthRuntime.droppedEventCount != 0u ||
+      depthRuntime.unroutableEventCount != 0u ||
+      !depthRuntime.lastError.empty()) {
+    failed_ = true;
+    failureReason_ = "depth_capture_not_clean";
+    return ExecutionDepthOpenStatus::Failed;
+  }
+
+  const std::filesystem::path tapePath =
+      sessionPath / std::filesystem::path{manifest.depthPath};
+  const std::filesystem::path sidecarPath =
+      sessionPath / std::filesystem::path{manifest.depthSidecarPath};
+  if (!std::filesystem::exists(tapePath) ||
+      !std::filesystem::exists(sidecarPath)) {
+    failed_ = true;
+    failureReason_ = "declared_files_missing";
+    return ExecutionDepthOpenStatus::Failed;
   }
 
   std::unique_ptr<ExecutionDepthProviderImpl> next{new (std::nothrow) ExecutionDepthProviderImpl{}};
@@ -579,24 +362,44 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
     return ExecutionDepthOpenStatus::Failed;
   }
 
-  if (hasTape) {
-    if (!next->tapeFile.open(tapePath) || !next->sidecarFile.open(sidecarPath)) {
-      failed_ = true;
-      failureReason_ = "open_failed";
-      return ExecutionDepthOpenStatus::Failed;
-    }
-    next->tapeText = next->tapeFile.view();
-    next->sidecarText = next->sidecarFile.view();
-    next->source = DepthSource::TapeSidecar;
-  } else {
-    if (!next->legacyFile.open(legacyPath)) {
-      failed_ = true;
-      failureReason_ = "open_failed";
-      return ExecutionDepthOpenStatus::Failed;
-    }
-    next->legacyText = next->legacyFile.view();
-    next->source = DepthSource::LegacySnapshot;
+  if (!next->tapeFile.open(tapePath) ||
+      !next->sidecarFile.open(sidecarPath)) {
+    failed_ = true;
+    failureReason_ = "open_failed";
+    return ExecutionDepthOpenStatus::Failed;
   }
+  next->tapeText = next->tapeFile.view();
+  next->sidecarText = next->sidecarFile.view();
+  next->clockAnchor.firstReceiveRealtimeNs =
+      manifest.arrivalClock.firstReceiveRealtimeNs;
+  next->clockAnchor.firstReceiveMonotonicNs =
+      manifest.arrivalClock.firstReceiveMonotonicNs;
+
+  std::uint64_t validatedRows = 0u;
+  CursorDepthRow validationRow{};
+  while (true) {
+    const ReadDepthRowResult validationStatus =
+        readNextDepthRow(*next, validationRow);
+    if (validationStatus == ReadDepthRowResult::Eof) break;
+    if (validationStatus == ReadDepthRowResult::Corrupt ||
+        validatedRows == std::numeric_limits<std::uint64_t>::max()) {
+      failed_ = true;
+      failureReason_ = "depth_contract_validation_failed";
+      if (cache_) cache_->markFailed(failureReason_);
+      return ExecutionDepthOpenStatus::Failed;
+    }
+    ++validatedRows;
+  }
+  if (validatedRows != manifest.depthCount) {
+    failed_ = true;
+    failureReason_ = "depth_declared_count_mismatch";
+    if (cache_) cache_->markFailed(failureReason_);
+    return ExecutionDepthOpenStatus::Failed;
+  }
+  next->tapePos = 0u;
+  next->sidecarPos = 0u;
+  next->lastSourceKey = {};
+  next->lastSourceRowValid = false;
 
   impl_ = next.release();
   available_ = true;
@@ -615,16 +418,52 @@ bool ExecutionDepthProvider::ready() const noexcept {
   return available_ && hft_trader::core::orderBook(book_).initialized();
 }
 
-ReadDepthRowResult readLegacyRow(ExecutionDepthProviderImpl& impl, CursorDepthRow& out) noexcept {
-  while (impl.legacyPos < impl.legacyText.size()) {
-    std::string_view line{};
-    if (!readLine(impl.legacyText, impl.legacyPos, line)) break;
-    if (line.empty()) continue;
+bool depthScheduleLess(const CursorDepthRow& lhs,
+                       const DepthScheduleKey& rhs) noexcept {
+  if (lhs.scheduleTsNs != rhs.scheduleTsNs)
+    return lhs.scheduleTsNs < rhs.scheduleTsNs;
+  if (lhs.deliveryTsNs != rhs.deliveryTsNs)
+    return lhs.deliveryTsNs < rhs.deliveryTsNs;
+  if (lhs.arrival.producerEpoch != rhs.arrival.producerEpoch)
+    return lhs.arrival.producerEpoch < rhs.arrival.producerEpoch;
+  if (lhs.arrival.shardId != rhs.arrival.shardId)
+    return lhs.arrival.shardId < rhs.arrival.shardId;
+  if (lhs.arrival.shardSequence != rhs.arrival.shardSequence)
+    return lhs.arrival.shardSequence < rhs.arrival.shardSequence;
+  if (lhs.arrival.eventOrdinal != rhs.arrival.eventOrdinal)
+    return lhs.arrival.eventOrdinal < rhs.arrival.eventOrdinal;
+  if (lhs.arrival.sourceId != rhs.arrival.sourceId)
+    return lhs.arrival.sourceId < rhs.arrival.sourceId;
+  if (lhs.arrival.sourceGeneration != rhs.arrival.sourceGeneration)
+    return lhs.arrival.sourceGeneration < rhs.arrival.sourceGeneration;
+  if (lhs.arrival.sessionEpoch != rhs.arrival.sessionEpoch)
+    return lhs.arrival.sessionEpoch < rhs.arrival.sessionEpoch;
+  return lhs.arrival.frameSequence < rhs.arrival.frameSequence;
+}
+
+bool copyContractDepthRow(const hftrec::replay::DepthRow& source,
+                          const CapturedReplayClockAnchor& anchor,
+                          CursorDepthRow& out) noexcept {
+  out.clear();
+  const CapturedReplayCoordinate clock = projectCapturedReplayCoordinate(
+      anchor, source.arrival, source.tsNs);
+  if (clock.deliveryTsNs <= 0 || clock.venueTsNs <= 0) return false;
+  out.exchangeTsNs = source.tsNs;
+  out.scheduleTsNs = clock.venueTsNs;
+  out.deliveryTsNs = clock.deliveryTsNs;
+  out.ingestSeq = source.ingestSeq;
+  out.arrival = source.arrival;
+  try {
+    out.levels.reserve(source.levels.size());
+    for (const hftrec::replay::PricePair& level : source.levels) {
+      out.levels.push_back(PriceLevelRow{
+          level.priceE8, level.qtyE8, level.side});
+    }
+  } catch (...) {
     out.clear();
-    if (!parseBookDocument(line, out.levels, out.tsNs, &out.ingestSeq)) return ReadDepthRowResult::Corrupt;
-    return ReadDepthRowResult::Row;
+    return false;
   }
-  return ReadDepthRowResult::Eof;
+  return true;
 }
 
 ReadDepthRowResult readTapeSidecarRow(ExecutionDepthProviderImpl& impl, CursorDepthRow& out) noexcept {
@@ -636,48 +475,42 @@ ReadDepthRowResult readTapeSidecarRow(ExecutionDepthProviderImpl& impl, CursorDe
     if (!hasTape && !hasSidecar) break;
     if (tapeLine.empty() && sidecarLine.empty()) continue;
     if (!hasTape || !hasSidecar || tapeLine.empty() || sidecarLine.empty()) return ReadDepthRowResult::Corrupt;
-    out.clear();
-    std::uint64_t taggedTs = 0u;
-    if (!parseDepthTapeLine(tapeLine, out, taggedTs) || !applyDepthSidecarLine(sidecarLine, taggedTs, out)) {
+    if (!hftrec::isOk(hftrec::replay::parseDepthTapeSidecarLine(
+            tapeLine, sidecarLine, impl.contractScratch)) ||
+        !copyContractDepthRow(
+            impl.contractScratch, impl.clockAnchor, out) ||
+        (impl.lastSourceRowValid &&
+         depthScheduleLess(out, impl.lastSourceKey))) {
       return ReadDepthRowResult::Corrupt;
     }
+    impl.lastSourceKey = DepthScheduleKey{
+        out.scheduleTsNs, out.deliveryTsNs, out.arrival};
+    impl.lastSourceRowValid = true;
     return ReadDepthRowResult::Row;
   }
   return ReadDepthRowResult::Eof;
 }
 
 ReadDepthRowResult readNextDepthRow(ExecutionDepthProviderImpl& impl, CursorDepthRow& out) noexcept {
-  if (impl.source == DepthSource::LegacySnapshot) return readLegacyRow(impl, out);
-  if (impl.source == DepthSource::TapeSidecar) return readTapeSidecarRow(impl, out);
-  return ReadDepthRowResult::Eof;
+  return readTapeSidecarRow(impl, out);
 }
 
-bool applyDepthRow(DepthSource source,
-                   hft_trader::core::LocalOrderBookState& book,
+bool applyDepthRow(hft_trader::core::LocalOrderBookState& book,
                    const Symbol& symbol,
                    const hft_trader::core::LocalOrderBookConfig& config,
                    const CursorDepthRow& row,
-                   cxet::composite::OrderBookSnapshot& snapshotScratch,
                    cxet::composite::OrderBookTapeRuntimeV1& tapeScratch,
                    cxet::composite::OrderBookTapeSidesRuntimeV1& sideScratch) noexcept {
-  if (source == DepthSource::LegacySnapshot) {
-    toRuntimeSnapshot(row, snapshotScratch);
-    return hft_trader::core::applySnapshot(
-        book, snapshotScratch, symbol, config);
-  }
-  if (source == DepthSource::TapeSidecar) {
-    if (!hft_trader::core::orderBook(book).initialized()) {
-      book.symbol = symbol;
-      book.config = config;
-      if (book.config.maxStoredLevelsPerSide.raw == 0u) {
-        book.config.maxStoredLevelsPerSide =
-            book.capacityLevelsPerSide();
-      }
+  if (!hft_trader::core::orderBook(book).initialized()) {
+    book.symbol = symbol;
+    book.config = config;
+    if (book.config.maxStoredLevelsPerSide.raw == 0u) {
+      book.config.maxStoredLevelsPerSide =
+          book.capacityLevelsPerSide();
     }
-    toRuntime(row, tapeScratch, sideScratch);
-    return hft_trader::core::applyTapeDelta(book, tapeScratch, sideScratch);
   }
-  return false;
+  toRuntime(row, tapeScratch, sideScratch);
+  return hft_trader::core::applyTapeDelta(book, tapeScratch, sideScratch);
 }
 
 bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
@@ -686,7 +519,9 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
   if (cache_ && impl_->sourceRows == 0u && !impl_->pendingValid) {
     (void)cache_->restore(tsNs, *impl_, book_);
   }
-  if (impl_->eof || (impl_->pendingValid && impl_->pending.tsNs > tsNs)) return ready();
+  if (impl_->eof ||
+      (impl_->pendingValid && impl_->pending.scheduleTsNs > tsNs))
+    return ready();
   const auto readStart = std::chrono::steady_clock::now();
   auto finishRead = [&]() noexcept {
     const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -695,14 +530,12 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
   };
   while (!impl_->eof) {
     if (impl_->pendingValid) {
-      if (impl_->pending.tsNs > tsNs) break;
-      const std::int64_t appliedTsNs = impl_->pending.tsNs;
-      if (!applyDepthRow(impl_->source,
-                         book_,
+      if (impl_->pending.scheduleTsNs > tsNs) break;
+      const std::int64_t appliedTsNs = impl_->pending.scheduleTsNs;
+      if (!applyDepthRow(book_,
                          symbol_,
                          config_,
                          impl_->pending,
-                         impl_->snapshotScratch,
                          impl_->tapeScratch,
                          impl_->sideScratch)) {
         available_ = false;
@@ -733,7 +566,7 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
       finishRead();
       return false;
     }
-    if (impl_->scratch.tsNs > tsNs) {
+    if (impl_->scratch.scheduleTsNs > tsNs) {
       try {
         impl_->pending = impl_->scratch;
       } catch (...) {
@@ -747,12 +580,10 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
       impl_->pendingValid = true;
       break;
     }
-    if (!applyDepthRow(impl_->source,
-                       book_,
+    if (!applyDepthRow(book_,
                        symbol_,
                        config_,
                        impl_->scratch,
-                       impl_->snapshotScratch,
                        impl_->tapeScratch,
                        impl_->sideScratch)) {
       available_ = false;
@@ -764,7 +595,8 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
     }
     ++rowsRead_;
     ++impl_->sourceRows;
-    if (cache_) cache_->publish(*impl_, impl_->scratch.tsNs, book_);
+    if (cache_)
+      cache_->publish(*impl_, impl_->scratch.scheduleTsNs, book_);
   }
   finishRead();
   return ready();

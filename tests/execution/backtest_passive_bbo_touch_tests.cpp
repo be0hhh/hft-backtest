@@ -120,12 +120,14 @@ bool testPassiveSellFillsWhenBestBidTouchesOrderAsk() {
   auto order = postOnlyOrderIntent(1u, Side::Sell(), 10100000000ll);
   submitOne(engine, order, 1000);
 
-  setTop(engine, 10100000000ll, 60000000ll, 10200000000ll, kQty1, 2000u);
-  tryFillOnTop(engine, 2000);
+  setTop(engine, 10100000000ll, 60000000ll, 10200000000ll, kQty1, 1500u);
+  tryFillOnTop(engine, 2000, true);
 
   return expect(engine.fills.size() == 1u, "passive sell fills when best bid touches ask") &&
          expect(engine.fills[0].fillReason == kFillReasonPassiveBboTouch, "passive sell uses BBO-touch fill reason") &&
          expect(engine.fills[0].liquidity == kFillLiquidityMaker, "passive sell BBO-touch fill is maker") &&
+         expect(engine.fills[0].exitTsNs == 2000,
+                "passive sell uses projected venue timestamp") &&
          expect(engine.fills[0].priceE8 == 10100000000ll, "passive sell fills at order price") &&
          expect(engine.fills[0].qtyE8 == 60000000ll, "passive sell BBO-touch fill is capped by bid qty") &&
          expect(engine.orders[0].status == kRecordStatusActive, "partial passive sell remains active");
@@ -138,7 +140,7 @@ bool testPassiveBuyFillsWhenBestAskTouchesOrderBid() {
   submitOne(engine, order, 1000);
 
   setTop(engine, 10000000000ll, kQty1, 10100000000ll, kQty1, 2000u);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   return expect(engine.fills.size() == 1u, "passive buy fills when best ask touches bid") &&
          expect(engine.fills[0].fillReason == kFillReasonPassiveBboTouch, "passive buy uses BBO-touch fill reason") &&
@@ -154,7 +156,7 @@ bool testPassiveSellDoesNotFillWhenOnlyAskMovesAway() {
   submitOne(engine, order, 1000);
 
   setTop(engine, 10000000000ll, kQty1, 10300000000ll, kQty1, 2000u);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   return expect(engine.fills.empty(), "same-side ask move away does not fill passive sell") &&
          expect(engine.open[0].state.valid, "same-side ask move leaves passive sell open") &&
@@ -171,7 +173,7 @@ bool testPassiveBboTouchConsumesKnownQueueAheadBeforeFill() {
   const bool capturedQueueAhead = engine.open[0].queueAheadQtyRaw == 55000000ll;
 
   setTop(engine, 10100000000ll, 70000000ll, 10200000000ll, kQty1, 2000u);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   return expect(capturedQueueAhead, "passive BBO-touch captures queue ahead at activation") &&
          expect(engine.fills.size() == 1u, "BBO-touch fills only after queue ahead is consumed") &&
@@ -189,7 +191,7 @@ bool testPassiveBboTouchIgnoresTradeThroughMinCrossTicks() {
   submitOne(engine, order, 1000);
 
   setTop(engine, 10100000000ll, kQty1, 10200000000ll, kQty1, 2000u);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   return expect(engine.fills.size() == 1u, "BBO-touch fills on equality even when trade min-cross requires through") &&
          expect(engine.fills[0].fillReason == kFillReasonPassiveBboTouch, "BBO-touch equality uses BBO-touch reason") &&
@@ -207,23 +209,27 @@ bool testFreshCrossingNonPostOnlyLimitStaysTaker() {
          expect(engine.fills[0].liquidity == kFillLiquidityTaker, "fresh crossing non-postonly limit remains taker");
 }
 
-bool testRepeatedSameBboTimestampDoesNotDoubleFill() {
+bool testDistinctBboEventsAtSameVenueTimestampRemainDistinct() {
   EngineState engine{};
   setTop(engine, 10000000000ll, kQty1, 10200000000ll, kQty1, 1000u);
   auto order = postOnlyOrderIntent(7u, Side::Sell(), 10100000000ll);
   submitOne(engine, order, 1000);
 
   setTop(engine, 10100000000ll, 60000000ll, 10200000000ll, kQty1, 2000u);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
   const bool firstPartialFill = engine.fills.size() == 1u &&
                                 engine.fills[0].qtyE8 == 60000000ll &&
                                 engine.open[0].filledQtyRaw == 60000000ll;
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
-  return expect(firstPartialFill, "first BBO-touch creates one partial maker fill") &&
-         expect(engine.fills.size() == 1u, "same BBO timestamp does not create a second fill") &&
-         expect(engine.open[0].state.valid, "same BBO timestamp leaves partial order open") &&
-         expect(engine.open[0].filledQtyRaw == 60000000ll, "same BBO timestamp does not advance cumulative fill");
+  return expect(firstPartialFill,
+                "first BBO-touch creates one partial maker fill") &&
+         expect(engine.fills.size() == 2u,
+                "distinct BBO event at the same venue timestamp is retained") &&
+         expect(engine.fills[1].qtyE8 == 40000000ll,
+                "second tied BBO event fills the remaining quantity") &&
+         expect(!engine.open[0].state.valid,
+                "second tied BBO event closes the filled order");
 }
 
 bool testBboTouchBurnsQueueAheadWithoutFillUntilNextTouch() {
@@ -236,11 +242,11 @@ bool testBboTouchBurnsQueueAheadWithoutFillUntilNextTouch() {
   const bool capturedQueueAhead = engine.open[0].queueAheadQtyRaw == 70000000ll;
 
   setTop(engine, 10100000000ll, 40000000ll, 10200000000ll, kQty1, 2000u);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
   const bool burnedOnly = engine.fills.empty() && engine.open[0].queueAheadQtyRaw == 30000000ll;
 
   setTop(engine, 10100000000ll, 50000000ll, 10200000000ll, kQty1, 3000u);
-  tryFillOnTop(engine, 3000);
+  tryFillOnTop(engine, 3000, true);
 
   return expect(capturedQueueAhead, "BBO-touch burn test captures queue ahead at activation") &&
          expect(burnedOnly, "first BBO-touch only burns queue ahead") &&
@@ -258,7 +264,7 @@ bool testRestingNonPostOnlyLimitFillsOnLaterBboTouchAsMaker() {
   const bool initiallyResting = engine.fills.empty() && engine.open[0].state.valid;
 
   setTop(engine, 10000000000ll, kQty1, 10100000000ll, 45000000ll, 2000u);
-  tryFillOnTop(engine, 2000);
+  tryFillOnTop(engine, 2000, true);
 
   return expect(initiallyResting, "non-postonly non-crossing limit rests after activation") &&
          expect(engine.fills.size() == 1u, "resting non-postonly limit fills on later BBO-touch") &&
@@ -267,17 +273,19 @@ bool testRestingNonPostOnlyLimitFillsOnLaterBboTouchAsMaker() {
          expect(engine.fills[0].qtyE8 == 45000000ll, "later BBO-touch is capped by opposite top qty");
 }
 
-bool testPassiveBboTouchRequiresMatchingBboTimestamp() {
+bool testPassiveBboTouchRequiresVenueBboUpdate() {
   EngineState engine{};
   setTop(engine, 10000000000ll, kQty1, 10200000000ll, kQty1, 1000u);
   auto order = postOnlyOrderIntent(10u, Side::Sell(), 10100000000ll);
   submitOne(engine, order, 1000);
 
   setTop(engine, 10100000000ll, kQty1, 10200000000ll, kQty1, 2000u);
-  tryFillOnTop(engine, 2500);
+  tryFillOnTop(engine, 2500, false);
 
-  return expect(engine.fills.empty(), "BBO-touch ignores stale top when event timestamp does not match BBO") &&
-         expect(engine.open[0].state.valid, "timestamp-mismatched BBO-touch leaves order open");
+  return expect(engine.fills.empty(),
+                "non-BBO execution event does not reuse retained top as a touch") &&
+         expect(engine.open[0].state.valid,
+                "non-BBO execution event leaves passive order open");
 }
 
 }  // namespace
@@ -290,9 +298,9 @@ int main() {
   ok = testPassiveBboTouchConsumesKnownQueueAheadBeforeFill() && ok;
   ok = testPassiveBboTouchIgnoresTradeThroughMinCrossTicks() && ok;
   ok = testFreshCrossingNonPostOnlyLimitStaysTaker() && ok;
-  ok = testRepeatedSameBboTimestampDoesNotDoubleFill() && ok;
+  ok = testDistinctBboEventsAtSameVenueTimestampRemainDistinct() && ok;
   ok = testBboTouchBurnsQueueAheadWithoutFillUntilNextTouch() && ok;
   ok = testRestingNonPostOnlyLimitFillsOnLaterBboTouchAsMaker() && ok;
-  ok = testPassiveBboTouchRequiresMatchingBboTimestamp() && ok;
+  ok = testPassiveBboTouchRequiresVenueBboUpdate() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

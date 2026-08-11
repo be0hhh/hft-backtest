@@ -1,5 +1,6 @@
 #include "hft_backtest/backtest.hpp"
 #include "hft_backtest/status.hpp"
+#include "../support/CapturedSessionFixture.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -41,16 +42,16 @@ std::string bookTickerRow(std::int64_t bid,
                           std::int64_t askQty,
                           std::int64_t tsNs,
                           std::int64_t seq) {
-  return "[" + std::to_string(bid) + "," + std::to_string(bidQty) + "," +
-         std::to_string(ask) + "," + std::to_string(askQty) + "," +
-         std::to_string(tsNs) + ",1," + std::to_string(seq) + "]\n";
+  return hft_backtest::test_support::bookTickerRow(
+      bid, bidQty, ask, askQty, tsNs, static_cast<std::uint64_t>(seq),
+      "H_USDT", "okx");
 }
 
 std::string priceLimitRow(std::int64_t tsNs,
                           std::int64_t lowerSellLimit,
                           std::int64_t upperBuyLimit) {
-  return "[" + std::to_string(tsNs) + "," + std::to_string(upperBuyLimit) + "," +
-         std::to_string(lowerSellLimit) + ",1]\n";
+  return hft_backtest::test_support::priceLimitRow(
+      tsNs, upperBuyLimit, lowerSellLimit, 4u);
 }
 
 std::string tradeRow(std::int64_t price,
@@ -58,32 +59,38 @@ std::string tradeRow(std::int64_t price,
                      std::int64_t side,
                      std::int64_t tsNs,
                      std::int64_t seq) {
-  return "[" + std::to_string(price) + "," + std::to_string(qty) + "," +
-         std::to_string(side) + "," + std::to_string(tsNs) +
-         ",1,1,1," + std::to_string(price) +
-         ",0,\"H_USDT\",\"okx\",\"futures\",1," + std::to_string(seq) + "]\n";
+  return hft_backtest::test_support::tradeRow(
+      price, qty, side, tsNs, static_cast<std::uint64_t>(seq), "H_USDT",
+      "okx");
 }
 
 void writeUptickSession(const std::filesystem::path& dir) {
-  writeText(dir / "manifest.json",
-            "{\n"
-            "  \"identity\": {\"exchange\": \"okx\", \"market\": \"futures\", \"symbols\": [\"H_USDT\"]},\n"
-            "  \"channels\": {\n"
-            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
-            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"},\n"
-            "    \"price_limit\": {\"path\": \"jsonl/price_limit.jsonl\"},\n"
-            "    \"depth\": {\"path\": \"jsonl/depth.jsonl\"}\n"
-            "  },\n"
-            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
-            "}\n");
+  writeText(
+      dir / "manifest.json",
+      hft_backtest::test_support::capturedManifestJson(
+          "okx",
+          "futures",
+          "H_USDT",
+          hft_backtest::test_support::CapturedChannelCounts{
+              .trades = 2u,
+              .bookTickers = 2u,
+              .priceLimits = 1u,
+              .depth = 3u}));
   writeText(dir / "instrument_metadata.json",
             "{\"tick_size_e8\":1000000,\"lot_size_e8\":100000000,\"contract_base_qty_e8\":100000000}\n");
   writeText(dir / "jsonl" / "price_limit.jsonl",
             priceLimitRow(1000000ll, 9500000000ll, 10500000000ll));
-  writeText(dir / "jsonl" / "depth.jsonl",
-            "[[9500000000,5000000000,0],[9600000000,5000000000,1],1000000,1,1]\n"
-            "[[9500000000,5000000000,0],[9600000000,5000000000,1],2000000,2,2]\n"
-            "[[9500000000,5000000000,0],[9600000000,5000000000,1],3000000,3,3]\n");
+  const auto depthLevels = std::initializer_list<hft_backtest::test_support::DepthLevel>{
+      {9500000000ll, 5000000000ll, 0},
+      {9600000000ll, 5000000000ll, 1}};
+  writeText(dir / "jsonl" / "depth_tape.jsonl",
+            hft_backtest::test_support::depthTapeRow(1000000ll, 1u, depthLevels) +
+                hft_backtest::test_support::depthTapeRow(2000000ll, 2u, depthLevels) +
+                hft_backtest::test_support::depthTapeRow(3000000ll, 3u, depthLevels));
+  writeText(dir / "jsonl" / "depth_sidecar.jsonl",
+            hft_backtest::test_support::depthSidecarRow(1000000ll, 1u, depthLevels) +
+                hft_backtest::test_support::depthSidecarRow(2000000ll, 2u, depthLevels) +
+                hft_backtest::test_support::depthSidecarRow(3000000ll, 3u, depthLevels));
   writeText(dir / "jsonl" / "bookticker.jsonl",
             bookTickerRow(9500000000ll, 5000000000ll, 9600000000ll, 5000000000ll, 2000000ll, 10) +
                 bookTickerRow(9500000000ll, 5000000000ll, 9600000000ll, 5000000000ll, 3000000ll, 20));
@@ -125,7 +132,6 @@ bool testUptickReplayPlacesAndFillsFromValidFlatStart() {
   request.takerFeeBpsE8 = 0;
   request.hasMakerFeeBps = true;
   request.hasTakerFeeBps = true;
-  request.marketDataLatency.baseUs = 0;
   request.marketOrderLatency.baseUs = 0;
   request.limitOrderLatency.baseUs = 0;
   request.cancelOrderLatency.baseUs = 0;

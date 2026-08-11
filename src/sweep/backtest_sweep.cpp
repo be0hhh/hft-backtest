@@ -75,8 +75,16 @@ bool writePointConfig(const std::string& baseConfig,
 }
 
 bool validateSweepRequest(const BacktestSweepRequest& request, std::string& error) {
-  if ((request.baseRun.sessionPath.empty() && request.baseRun.sessions.empty()) || request.baseRun.configPath.empty()) {
-    error = "session_path and config_path are required";
+  const bool binaryCorpus = !request.baseRun.corpusPath.empty() ||
+      !request.baseRun.corpusSources.empty();
+  const bool recorderSessions = !request.baseRun.sessionPath.empty() ||
+      !request.baseRun.sessions.empty();
+  if ((binaryCorpus && recorderSessions) ||
+      (binaryCorpus && (request.baseRun.corpusPath.empty() ||
+                        request.baseRun.corpusSources.empty())) ||
+      (!binaryCorpus && !recorderSessions) ||
+      request.baseRun.configPath.empty()) {
+    error = "select either recorder sessions or a corpus path with source selections, plus config_path";
     return false;
   }
   if (request.ranges.empty()) {

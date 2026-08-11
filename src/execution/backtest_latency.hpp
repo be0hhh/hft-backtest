@@ -7,15 +7,13 @@
 namespace hft_backtest::detail {
 
 enum class BacktestLatencyChannel : std::uint8_t {
-  MarketData = 0,
-  MarketOrder = 1,
-  LimitOrder = 2,
-  CancelOrder = 3,
-  UserData = 4,
+  MarketOrder = 0,
+  LimitOrder = 1,
+  CancelOrder = 2,
+  UserData = 3,
 };
 
 struct BacktestLatencyConfig {
-  BacktestLatencyProfile marketData{};
   BacktestLatencyProfile marketOrder{1000u, 0u};
   BacktestLatencyProfile limitOrder{1000u, 0u};
   BacktestLatencyProfile cancelOrder{1000u, 0u};
@@ -25,7 +23,6 @@ struct BacktestLatencyConfig {
 
 struct BacktestLatencyRuntime {
   BacktestLatencyConfig config{};
-  std::uint64_t marketDataState{0u};
   std::uint64_t marketOrderState{0u};
   std::uint64_t limitOrderState{0u};
   std::uint64_t cancelOrderState{0u};

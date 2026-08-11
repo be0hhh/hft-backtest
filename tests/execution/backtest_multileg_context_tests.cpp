@@ -1,6 +1,7 @@
 #include "engine/backtest_engine.hpp"
 #include "runner/backtest_run_error.hpp"
 #include "strategy/backtest_strategy_runtime.hpp"
+#include "../support/CapturedSessionFixture.hpp"
 
 #include <cstdlib>
 #include <cstdint>
@@ -31,10 +32,10 @@ std::string bookTickerRow(std::int64_t bid,
                           std::int64_t ask,
                           std::int64_t askQty,
                           std::int64_t tsNs,
-                          std::int64_t seq) {
-  return "[" + std::to_string(bid) + "," + std::to_string(bidQty) + "," +
-         std::to_string(ask) + "," + std::to_string(askQty) + "," +
-         std::to_string(tsNs) + ",1," + std::to_string(seq) + "]\n";
+                          std::uint64_t seq,
+                          std::string_view exchange) {
+  return hft_backtest::test_support::bookTickerRow(
+      bid, bidQty, ask, askQty, tsNs, seq, "BTC_USDT", exchange);
 }
 
 std::filesystem::path makePairwiseReplayRoot() {
@@ -47,25 +48,26 @@ void writePairwiseReplaySession(const std::filesystem::path& dir,
                                 std::int64_t priceOffset,
                                 std::int64_t secondTsNs,
                                 std::int64_t seqBase) {
-  std::string manifest =
-      "{\n"
-      "  \"identity\": {\"exchange\": \"";
-  manifest.append(exchange);
-  manifest +=
-      "\", \"market\": \"futures\", \"symbols\": [\"BTC_USDT\"]},\n"
-      "  \"channels\": {\n"
-      "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"}\n"
-      "  },\n"
-      "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
-      "}\n";
-  writeText(dir / "manifest.json", manifest);
+  writeText(
+      dir / "manifest.json",
+      hft_backtest::test_support::capturedManifestJson(
+          std::string{exchange},
+          "futures",
+          "BTC_USDT",
+          hft_backtest::test_support::CapturedChannelCounts{
+              .bookTickers = 2u}));
   writeText(dir / "instrument_metadata.json",
             "{\"tick_size_e8\":1000000,\"lot_size_e8\":100000000,\"contract_base_qty_e8\":100000000}\n");
   const std::int64_t bid = kPx100 + priceOffset;
   const std::int64_t ask = bid + 100000000ll;
   writeText(dir / "jsonl" / "bookticker.jsonl",
-            bookTickerRow(bid, 100000000ll, ask, 100000000ll, 1000000000ll, seqBase) +
-                bookTickerRow(bid + 1000000ll, 100000000ll, ask + 1000000ll, 100000000ll, secondTsNs, seqBase + 1ll));
+            bookTickerRow(bid, 100000000ll, ask, 100000000ll,
+                          1000000000ll,
+                          static_cast<std::uint64_t>(seqBase), exchange) +
+                bookTickerRow(bid + 1000000ll, 100000000ll,
+                              ask + 1000000ll, 100000000ll, secondTsNs,
+                              static_cast<std::uint64_t>(seqBase + 1ll),
+                              exchange));
 }
 
 void writePairwiseReplayConfig(const std::filesystem::path& path) {
@@ -637,7 +639,6 @@ bool testPairwiseTakerMultiLegReplayRunsCycleForEveryDeliveredBookTicker() {
   request.hasTakerFeeBps = true;
   request.makerFeeBpsE8 = 0;
   request.takerFeeBpsE8 = 0;
-  request.marketDataLatency.baseUs = 0;
   request.marketOrderLatency.baseUs = 0;
   request.limitOrderLatency.baseUs = 0;
   request.cancelOrderLatency.baseUs = 0;

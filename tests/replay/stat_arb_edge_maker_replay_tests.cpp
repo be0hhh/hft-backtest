@@ -1,5 +1,6 @@
 #include "hft_backtest/backtest.hpp"
 #include "hft_backtest/status.hpp"
+#include "../support/CapturedSessionFixture.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -33,24 +34,29 @@ std::filesystem::path makeRoot() {
 
 void writeSessionManifest(const std::filesystem::path& dir,
                           std::string_view exchange,
-                          std::string_view symbol) {
-  writeText(dir / "manifest.json",
-            "{\n"
-            "  \"identity\": {\"exchange\": \"" + std::string{exchange} +
-                "\", \"market\": \"futures\", \"symbols\": [\"" + std::string{symbol} + "\"]},\n"
-            "  \"channels\": {\n"
-            "    \"trades\": {\"path\": \"jsonl/trades.jsonl\"},\n"
-            "    \"bookticker\": {\"path\": \"jsonl/bookticker.jsonl\"}\n"
-            "  },\n"
-            "  \"artifacts\": {\"instrument_metadata_path\": \"instrument_metadata.json\"}\n"
-            "}\n");
+                          std::string_view symbol,
+                          std::uint64_t tradeCount) {
+  writeText(
+      dir / "manifest.json",
+      hft_backtest::test_support::capturedManifestJson(
+          std::string{exchange},
+          "futures",
+          std::string{symbol},
+          hft_backtest::test_support::CapturedChannelCounts{
+              .trades = tradeCount,
+              .bookTickers = 2u}));
   writeText(dir / "instrument_metadata.json",
             "{\"tick_size_e8\":1000000,\"lot_size_e8\":1000000,\"contract_base_qty_e8\":100000000}\n");
 }
 
-std::string bookTickerRow(std::int64_t bid, std::int64_t ask, std::int64_t tsNs, std::int64_t seq) {
-  return "[" + std::to_string(bid) + ",100000000," + std::to_string(ask) +
-         ",100000000," + std::to_string(tsNs) + ",1," + std::to_string(seq) + "]\n";
+std::string bookTickerRow(std::int64_t bid,
+                          std::int64_t ask,
+                          std::int64_t tsNs,
+                          std::int64_t seq,
+                          std::string_view exchange) {
+  return hft_backtest::test_support::bookTickerRow(
+      bid, 100000000ll, ask, 100000000ll, tsNs,
+      static_cast<std::uint64_t>(seq), "BTC_USDT", exchange);
 }
 
 std::string tradeRow(std::int64_t price,
@@ -60,18 +66,17 @@ std::string tradeRow(std::int64_t price,
                      std::int64_t seq,
                      std::string_view symbol,
                      std::string_view exchange) {
-  return "[" + std::to_string(price) + "," + std::to_string(qty) + "," + std::to_string(side) +
-         "," + std::to_string(tsNs) + ",1,1,1," + std::to_string(price) + ",0,\"" +
-         std::string{symbol} + "\",\"" + std::string{exchange} + "\",\"futures\",1," +
-         std::to_string(seq) + "]\n";
+  return hft_backtest::test_support::tradeRow(
+      price, qty, side, tsNs, static_cast<std::uint64_t>(seq), symbol,
+      exchange);
 }
 
 void writeLeg0Session(const std::filesystem::path& dir) {
-  writeSessionManifest(dir, "binance", "BTC_USDT");
+  writeSessionManifest(dir, "binance", "BTC_USDT", 51u);
   std::string book;
   std::string trades;
-  book += bookTickerRow(10000000000ll, 10010000000ll, 1000000ll, 10);
-  book += bookTickerRow(10000000000ll, 10010000000ll, 3000000ll, 20);
+  book += bookTickerRow(10000000000ll, 10010000000ll, 1000000ll, 10, "binance");
+  book += bookTickerRow(10000000000ll, 10010000000ll, 3000000ll, 20, "binance");
   trades += tradeRow(10005000000ll, kQty1, 1, 1000000ll, 11, "BTC_USDT", "binance");
   for (std::int64_t i = 0; i < 50; ++i) {
     const std::int64_t ts = 600000000ll + i * 1000000ll;
@@ -82,11 +87,11 @@ void writeLeg0Session(const std::filesystem::path& dir) {
 }
 
 void writeLeg1Session(const std::filesystem::path& dir) {
-  writeSessionManifest(dir, "bybit", "BTC_USDT");
+  writeSessionManifest(dir, "bybit", "BTC_USDT", 1u);
   std::string book;
   std::string trades;
-  book += bookTickerRow(10200000000ll, 10210000000ll, 1000000ll, 10);
-  book += bookTickerRow(10200000000ll, 10210000000ll, 3000000ll, 20);
+  book += bookTickerRow(10200000000ll, 10210000000ll, 1000000ll, 10, "bybit");
+  book += bookTickerRow(10200000000ll, 10210000000ll, 3000000ll, 20, "bybit");
   trades += tradeRow(10205000000ll, kQty1, 1, 1000000ll, 11, "BTC_USDT", "bybit");
   writeText(dir / "jsonl" / "bookticker.jsonl", book);
   writeText(dir / "jsonl" / "trades.jsonl", trades);
@@ -146,7 +151,6 @@ hft_backtest::BacktestRunRequest makeReplayRequest(const std::filesystem::path& 
   request.runId = std::string{runId};
   request.initialBalanceE8 = 10000000000ll;
   request.legInitialBalancesE8 = {5000000000ll, 5000000000ll};
-  request.marketDataLatency.baseUs = 500000;
   request.limitOrderLatency.baseUs = 0;
   request.marketOrderLatency.baseUs = 0;
   request.cancelOrderLatency.baseUs = 0;

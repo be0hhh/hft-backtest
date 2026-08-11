@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "hft_backtest/status.hpp"
+#include "core/replay/EventRows.hpp"
 
 namespace hft_backtest::detail {
 
@@ -25,6 +26,7 @@ struct TradeRow {
   std::int64_t side{0};
   std::int64_t tsNs{0};
   std::int64_t ingestSeq{0};
+  hftrec::replay::EventArrival arrival{};
 };
 
 struct BookTickerRow {
@@ -34,6 +36,12 @@ struct BookTickerRow {
   std::int64_t askQtyE8{0};
   std::int64_t tsNs{0};
   std::int64_t ingestSeq{0};
+  hftrec::replay::EventArrival arrival{};
+  bool bidPresent{true};
+  bool askPresent{true};
+  // A caught-up parser consumer refreshes receive evidence for this retained
+  // BBO without emitting another replaceable-state strategy event.
+  bool freshnessOnly{false};
 };
 
 struct PriceLimitRow {
@@ -42,6 +50,7 @@ struct PriceLimitRow {
   std::int64_t sellLimitE8{0};
   std::uint8_t enabled{0};
   std::int64_t ingestSeq{0};
+  hftrec::replay::EventArrival arrival{};
 };
 
 struct LiquidationRow {
@@ -56,18 +65,21 @@ struct LiquidationRow {
   std::int64_t status{0};
   std::int64_t sourceMode{0};
   std::int64_t ingestSeq{0};
+  hftrec::replay::EventArrival arrival{};
 };
 
 struct MarkPriceRow {
   std::int64_t tsNs{0};
   std::int64_t markPriceE8{0};
   std::int64_t ingestSeq{0};
+  hftrec::replay::EventArrival arrival{};
 };
 
 struct IndexPriceRow {
   std::int64_t tsNs{0};
   std::int64_t indexPriceE8{0};
   std::int64_t ingestSeq{0};
+  hftrec::replay::EventArrival arrival{};
 };
 
 struct FundingRow {
@@ -76,6 +88,7 @@ struct FundingRow {
   std::int64_t fundingTsNs{0};
   std::int64_t nextFundingTsNs{0};
   std::int64_t ingestSeq{0};
+  hftrec::replay::EventArrival arrival{};
 };
 
 struct OpenInterestRow {
@@ -83,12 +96,20 @@ struct OpenInterestRow {
   std::int64_t openInterestE8{0};
   std::int64_t openInterestValueE8{0};
   std::int64_t ingestSeq{0};
+  hftrec::replay::EventArrival arrival{};
 };
 
 struct DepthRow {
   std::int64_t tsNs{0};
   std::int64_t ingestSeq{0};
+  hftrec::replay::EventArrival arrival{};
   std::vector<PriceLevelRow> levels{};
+  bool resetBookBeforeApply{false};
+  // Snapshot plus replay deltas were committed by the parser as one local
+  // recovery transaction. The venue-side replay must apply that recovery at
+  // its captured application arrival, not reorder its parts by their distinct
+  // original exchange timestamps.
+  bool applicationAtomicRebase{false};
 };
 
 struct CandleRow {
@@ -101,6 +122,7 @@ struct CandleRow {
   std::int64_t closeE8{0};
   std::int64_t volumeE8{0};
   bool hasOhlc{false};
+  hftrec::replay::EventArrival arrival{};
 };
 
 struct InstrumentMetadata {
@@ -157,8 +179,19 @@ struct SessionData {
   std::int64_t tradeHistoryRows{0};
   std::int64_t firstTsNs{0};
   std::int64_t lastTsNs{0};
+  std::uint64_t firstReceiveMonotonicNs{0u};
+  std::uint64_t lastReceiveMonotonicNs{0u};
+  std::int64_t firstReceiveRealtimeNs{0};
+  std::int64_t lastReceiveRealtimeNs{0};
+  std::uint64_t replayAnchorMonotonicNs{0u};
+  std::int64_t replayAnchorReceiveNs{0};
+  std::uint64_t realtimeRegressionCount{0u};
+  std::uint64_t monotonicNonIncreasingCount{0u};
+  std::uint64_t exchangeAheadOfReceiveCount{0u};
+  std::uint64_t exchangeTimestampMissingCount{0u};
   std::array<bool, kSessionTimelineKindCount> timelineChannelSorted{};
   bool timelineOrderKnown{false};
+  bool binaryMarketCorpus{false};
   std::vector<std::string> warnings{};
 };
 

@@ -62,12 +62,11 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
 }
 
 [[nodiscard]] bool passiveBboTouchEligible(const OpenOrder& order,
-                                           std::int64_t bboTsNs) noexcept {
+                                           std::int64_t venueTsNs) noexcept {
   if (order.state.orderType != canon::OrderType::Limit) return false;
-  if (order.lastAggressiveBookTsNs == bboTsNs) return false;
   if (order.postOnly) return true;
   if (order.lastAggressiveBookTsNs != 0 || order.filledQtyRaw > 0) return true;
-  return bboTsNs > order.activeTsNs;
+  return venueTsNs > order.activeTsNs;
 }
 
 [[nodiscard]] hft_trader::core::BookSide passiveBookSide(const OpenOrder& order) noexcept {
@@ -313,13 +312,7 @@ PassiveBboTouchFill consumePassiveQueueForBboTouch(EngineState& engine,
                                                    std::int64_t tsNs) noexcept {
   PassiveBboTouchFill out{};
   if (!order.state.valid || !order.active || order.state.orderType != canon::OrderType::Limit) return out;
-  if (tsNs <= 0 || top.ts.raw == 0u ||
-      top.ts.raw > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-    return out;
-  }
-  const std::int64_t bboTsNs = static_cast<std::int64_t>(top.ts.raw);
-  if (bboTsNs != tsNs || order.lastPassiveBboTouchTsNs == bboTsNs ||
-      !passiveBboTouchEligible(order, bboTsNs)) {
+  if (tsNs <= 0 || !passiveBboTouchEligible(order, tsNs)) {
     return out;
   }
   if (!order.queueInitialized) {
@@ -328,7 +321,6 @@ PassiveBboTouchFill consumePassiveQueueForBboTouch(EngineState& engine,
   }
   std::int64_t oppositeQtyE8 = 0;
   if (!makerBboTouchesOrder(order, top, oppositeQtyE8)) return out;
-  order.lastPassiveBboTouchTsNs = bboTsNs;
   out.queueAheadBeforeE8 = order.queueAheadQtyRaw;
   out.queueAheadAfterE8 = order.queueAheadQtyRaw;
   if (oppositeQtyE8 <= order.queueAheadQtyRaw) {

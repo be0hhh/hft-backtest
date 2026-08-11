@@ -53,6 +53,7 @@ void writeRunPerformance(std::ofstream& out, const BacktestStageTimings& perform
 }
 
 std::filesystem::path baseSessionPath(const BacktestSweepRequest& request) {
+  if (!request.baseRun.corpusPath.empty()) return request.baseRun.corpusPath;
   if (!request.baseRun.sessionPath.empty()) return request.baseRun.sessionPath;
   if (!request.baseRun.sessions.empty()) return request.baseRun.sessions[0].path;
   return {};
@@ -139,22 +140,33 @@ void writeSweepManifestLegs(std::ofstream& out,
 
   out << "  " << q << "legs" << q << ": [";
   bool wrote = false;
-  auto writeFallbackLeg = [&](std::size_t index, const std::filesystem::path& path, const std::string& symbol) {
+  auto writeFallbackLeg = [&](std::size_t index,
+                              const std::filesystem::path& path,
+                              const std::string& exchange,
+                              const std::string& market,
+                              const std::string& symbol) {
     if (path.empty()) return;
     if (wrote) out << ", ";
     out << '{'
         << q << "leg_index" << q << ": " << index << ", "
         << q << "session_path" << q << ": " << quote(path.generic_string()) << ", "
-        << q << "exchange" << q << ": " << quote(std::string{}) << ", "
-        << q << "market" << q << ": " << quote(std::string{}) << ", "
+        << q << "exchange" << q << ": " << quote(exchange) << ", "
+        << q << "market" << q << ": " << quote(market) << ", "
         << q << "symbol" << q << ": " << quote(symbol)
         << '}';
     wrote = true;
   };
   std::size_t index = 0u;
-  if (!request.baseRun.sessionPath.empty()) writeFallbackLeg(index++, request.baseRun.sessionPath, std::string{});
+  for (const BacktestCorpusSourceRequest& source :
+       request.baseRun.corpusSources) {
+    writeFallbackLeg(index++, request.baseRun.corpusPath,
+                     source.exchange, source.market,
+                     source.canonicalSymbol);
+  }
+  if (!request.baseRun.sessionPath.empty())
+    writeFallbackLeg(index++, request.baseRun.sessionPath, {}, {}, {});
   for (const BacktestSessionRequest& session : request.baseRun.sessions) {
-    writeFallbackLeg(index++, session.path, session.symbol);
+    writeFallbackLeg(index++, session.path, session.venue, {}, session.symbol);
   }
   out << "],\n";
 }

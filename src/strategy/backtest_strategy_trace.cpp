@@ -410,7 +410,16 @@ void recordExecutionQualityFill(
     return;
   }
   if (!hft_trader::strategy::isUserFillEvent(event)) return;
-  const Amount qty = event.lastFilledQty.raw != 0 ? event.lastFilledQty : event.filledQty;
+  Amount qty{};
+  const bool hasLastFilledQty = cxet::composite::userDataFieldPresent(
+      event, cxet::composite::UserDataField::LastFilledQty);
+  const bool hasFilledQty = cxet::composite::userDataFieldPresent(
+      event, cxet::composite::UserDataField::FilledQty);
+  if (hasLastFilledQty && event.lastFilledQty.raw > 0) {
+    qty = event.lastFilledQty;
+  } else if (hasFilledQty) {
+    qty = event.filledQty;
+  }
   Price price = hft_trader::strategy::userOrderFillPrice(event);
   price = hft_trader::core::nativeToUnderlyingPrice(price, instrument);
   if (qty.raw <= 0 || price.raw <= 0) return;

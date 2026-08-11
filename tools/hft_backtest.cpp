@@ -14,7 +14,27 @@
 namespace {
 
 void printUsage() {
-  std::cerr << "Usage: hft-backtest --session DIR --config INI [--leg-session DIR] [--strategy NAME] [--indicator-profile NAME] [--primary-leg-index N] [--trade-mode all|primary] [--strategy-spread] [--no-rate-limits] [--strict-rate-limits] [--output DIR] [--run-id ID] [--sweep-id ID] [--sweep-budget N] [--sweep-seed N] [--sweep-param key:min:max:step[:grid|sweep]] [--latency-seed N] [--market-data-latency-us N] [--market-data-jitter-us N] [--market-order-latency-us N] [--market-order-jitter-us N] [--limit-order-latency-us N] [--limit-order-jitter-us N] [--cancel-order-latency-us N] [--cancel-order-jitter-us N] [--user-data-latency-us N] [--user-data-jitter-us N] [--order-latency-us N] [--cancel-latency-us N] [--maker-fill-min-cross-ticks N] [--initial-balance-usdt N] [--maker-fee-bps N] [--taker-fee-bps N] [--fee exchange:market:maker_bps:taker_bps] [--latency exchange:market:md_base:md_jitter:mkt_base:mkt_jitter:limit_base:limit_jitter[:cancel_base:cancel_jitter:user_base:user_jitter]]\n";
+  std::cerr
+      << "Usage: hft-backtest (--session DIR [--leg-session DIR] | "
+         "--corpus DIR --source exchange:market:canonical_symbol "
+         "[--source ...] --from-receive-ns N --to-receive-ns N) "
+         "--config INI [--strategy NAME] [--indicator-profile NAME] "
+         "[--primary-leg-index N] [--trade-mode all|primary] "
+         "[--strategy-spread] [--no-rate-limits] [--strict-rate-limits] "
+         "[--output DIR] [--run-id ID] [--sweep-id ID] "
+         "[--sweep-budget N] [--sweep-seed N] "
+         "[--sweep-param key:min:max:step[:grid|sweep]] "
+         "[--latency-seed N] [--market-order-latency-us N] "
+         "[--market-order-jitter-us N] [--limit-order-latency-us N] "
+         "[--limit-order-jitter-us N] [--cancel-order-latency-us N] "
+         "[--cancel-order-jitter-us N] [--user-data-latency-us N] "
+         "[--user-data-jitter-us N] [--order-latency-us N] "
+         "[--cancel-latency-us N] [--maker-fill-min-cross-ticks N] "
+         "[--initial-balance-usdt N] [--maker-fee-bps N] "
+         "[--taker-fee-bps N] "
+         "[--fee exchange:market:maker_bps:taker_bps] "
+         "[--latency exchange:market:mkt_base:mkt_jitter:limit_base:"
+         "limit_jitter[:cancel_base:cancel_jitter:user_base:user_jitter]]\n";
 }
 
 bool progress(const hft_backtest::BacktestProgress& value, void*) noexcept {
@@ -54,6 +74,26 @@ bool parseI64Text(const char* first, const char* last, std::int64_t& out) noexce
   if (!first || first == last) return false;
   const auto parsed = std::from_chars(first, last, out);
   return parsed.ec == std::errc{} && parsed.ptr == last;
+}
+
+bool parseCorpusSource(
+    const char* text,
+    hft_backtest::BacktestCorpusSourceRequest& output) {
+  if (!text || *text == '\0') return false;
+  const char* exchangeEnd = std::strchr(text, ':');
+  if (!exchangeEnd || exchangeEnd == text) return false;
+  const char* marketFirst = exchangeEnd + 1;
+  const char* marketEnd = std::strchr(marketFirst, ':');
+  if (!marketEnd || marketEnd == marketFirst || marketEnd[1] == '\0' ||
+      std::strchr(marketEnd + 1, ':') != nullptr) {
+    return false;
+  }
+  output.exchange.assign(
+      text, static_cast<std::size_t>(exchangeEnd - text));
+  output.market.assign(
+      marketFirst, static_cast<std::size_t>(marketEnd - marketFirst));
+  output.canonicalSymbol.assign(marketEnd + 1);
+  return true;
 }
 
 bool parseDecimalE8(const char* text, std::int64_t& out) noexcept;
@@ -118,13 +158,13 @@ bool parseU64Text(const char* first, const char* last, std::uint64_t& out) noexc
 
 bool parseLatencySchedule(const char* text, hft_backtest::BacktestLatencySchedule& out) noexcept {
   if (!text || *text == '\0') return false;
-  const char* parts[12]{};
-  const char* ends[12]{};
+  const char* parts[10]{};
+  const char* ends[10]{};
   const char* cursor = text;
   const char* textEnd = text + std::strlen(text);
   std::uint32_t partCount = 0u;
   bool consumedAll = false;
-  for (; partCount < 12u; ++partCount) {
+  for (; partCount < 10u; ++partCount) {
     if (cursor >= textEnd) return false;
     parts[partCount] = cursor;
     const char* end = std::strchr(cursor, ':');
@@ -138,25 +178,23 @@ bool parseLatencySchedule(const char* text, hft_backtest::BacktestLatencySchedul
     ends[partCount] = end;
     cursor = end + 1;
   }
-  if (partCount != 8u && partCount != 12u) return false;
+  if (partCount != 6u && partCount != 10u) return false;
   if (!consumedAll) return false;
-  std::uint64_t values[10]{};
+  std::uint64_t values[8]{};
   for (std::uint32_t i = 0u; i < partCount - 2u; ++i) {
     if (!parseU64Text(parts[i + 2u], ends[i + 2u], values[i])) return false;
   }
   out.exchange.assign(parts[0], static_cast<std::size_t>(ends[0] - parts[0]));
   out.market.assign(parts[1], static_cast<std::size_t>(ends[1] - parts[1]));
-  out.marketData.baseUs = values[0];
-  out.marketData.jitterUs = values[1];
-  out.marketOrder.baseUs = values[2];
-  out.marketOrder.jitterUs = values[3];
-  out.limitOrder.baseUs = values[4];
-  out.limitOrder.jitterUs = values[5];
-  if (partCount == 12u) {
-    out.cancelOrder.baseUs = values[6];
-    out.cancelOrder.jitterUs = values[7];
-    out.userData.baseUs = values[8];
-    out.userData.jitterUs = values[9];
+  out.marketOrder.baseUs = values[0];
+  out.marketOrder.jitterUs = values[1];
+  out.limitOrder.baseUs = values[2];
+  out.limitOrder.jitterUs = values[3];
+  if (partCount == 10u) {
+    out.cancelOrder.baseUs = values[4];
+    out.cancelOrder.jitterUs = values[5];
+    out.userData.baseUs = values[6];
+    out.userData.jitterUs = values[7];
   }
   return true;
 }
@@ -200,6 +238,8 @@ bool parseDecimalE8(const char* text, std::int64_t& out) noexcept {
 
 int main(int argc, char** argv) {
   hft_backtest::BacktestRunRequest request{};
+  std::int64_t corpusBeginReceiveNs = 0;
+  std::int64_t corpusEndReceiveNs = 0;
   std::vector<hft_backtest::BacktestSweepParamRange> sweepRanges{};
   std::uint64_t sweepBudget = 0u;
   std::uint64_t sweepSeed = 0u;
@@ -221,6 +261,24 @@ int main(int argc, char** argv) {
         session.path = value;
         request.sessions.push_back(session);
       }
+    } else if (std::strcmp(arg, "--corpus") == 0) {
+      if (const char* value = needValue(arg)) request.corpusPath = value;
+    } else if (std::strcmp(arg, "--source") == 0) {
+      if (const char* value = needValue(arg)) {
+        hft_backtest::BacktestCorpusSourceRequest source{};
+        if (!parseCorpusSource(value, source)) return 2;
+        request.corpusSources.push_back(std::move(source));
+      }
+    } else if (std::strcmp(arg, "--from-receive-ns") == 0) {
+      const char* value = needValue(arg);
+      if (!value ||
+          !parseI64Text(value, value + std::strlen(value),
+                        corpusBeginReceiveNs)) return 2;
+    } else if (std::strcmp(arg, "--to-receive-ns") == 0) {
+      const char* value = needValue(arg);
+      if (!value ||
+          !parseI64Text(value, value + std::strlen(value),
+                        corpusEndReceiveNs)) return 2;
     } else if (std::strcmp(arg, "--config") == 0) {
       if (const char* value = needValue(arg)) request.configPath = value;
     } else if (std::strcmp(arg, "--strategy") == 0) {
@@ -260,10 +318,6 @@ int main(int argc, char** argv) {
       }
     } else if (std::strcmp(arg, "--latency-seed") == 0) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.latencySeed)) return 2;
-    } else if (std::strcmp(arg, "--market-data-latency-us") == 0) {
-      if (const char* value = needValue(arg); value && !parseU64(value, request.marketDataLatency.baseUs)) return 2;
-    } else if (std::strcmp(arg, "--market-data-jitter-us") == 0) {
-      if (const char* value = needValue(arg); value && !parseU64(value, request.marketDataLatency.jitterUs)) return 2;
     } else if (std::strcmp(arg, "--market-order-latency-us") == 0) {
       if (const char* value = needValue(arg); value && !parseU64(value, request.marketOrderLatency.baseUs)) return 2;
     } else if (std::strcmp(arg, "--market-order-jitter-us") == 0) {
@@ -319,7 +373,24 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if ((request.sessionPath.empty() && request.sessions.empty()) || request.configPath.empty()) {
+  const bool binaryCorpus = !request.corpusPath.empty() ||
+      !request.corpusSources.empty() || corpusBeginReceiveNs != 0 ||
+      corpusEndReceiveNs != 0;
+  const bool recorderSessions = !request.sessionPath.empty() ||
+      !request.sessions.empty();
+  if (binaryCorpus) {
+    if (recorderSessions || request.corpusPath.empty() ||
+        request.corpusSources.empty() || corpusBeginReceiveNs <= 0 ||
+        corpusEndReceiveNs <= corpusBeginReceiveNs) {
+      printUsage();
+      return 2;
+    }
+    for (auto& source : request.corpusSources) {
+      source.beginReceiveNs = corpusBeginReceiveNs;
+      source.endReceiveNs = corpusEndReceiveNs;
+    }
+  }
+  if ((!binaryCorpus && !recorderSessions) || request.configPath.empty()) {
     printUsage();
     return 2;
   }

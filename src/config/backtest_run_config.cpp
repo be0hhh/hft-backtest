@@ -137,30 +137,6 @@ void appendSessionWarnings(BacktestRunResult& result, const std::vector<detail::
   }
 }
 
-bool marketDataLatencyKeepsOrder(const detail::BacktestLatencyConfig& config) noexcept {
-  return config.marketData.jitterUs == 0u;
-}
-
-bool hasMarketDataLatency(const BacktestRunRequest& request,
-                          const detail::BacktestLatencyConfig& fallback) noexcept {
-  if (fallback.marketData.baseUs != 0u || fallback.marketData.jitterUs != 0u) return true;
-  for (const BacktestLatencySchedule& schedule : request.latencySchedules) {
-    if (schedule.marketData.baseUs != 0u || schedule.marketData.jitterUs != 0u) return true;
-  }
-  return false;
-}
-
-bool marketDataLatencyKeepsOrder(const BacktestRunRequest& request,
-                                 const detail::BacktestLatencyConfig& fallback) noexcept {
-  if (!marketDataLatencyKeepsOrder(fallback)) return false;
-  const std::uint64_t baseUs = fallback.marketData.baseUs;
-  for (const BacktestLatencySchedule& schedule : request.latencySchedules) {
-    if (schedule.marketData.jitterUs != 0u) return false;
-    if (schedule.marketData.baseUs != baseUs) return false;
-  }
-  return true;
-}
-
 std::string makeRunId() {
   const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count();
@@ -169,6 +145,8 @@ std::string makeRunId() {
 
 std::filesystem::path resultPathFor(const BacktestRunRequest& request, const std::string& runId) {
   if (!request.outputPath.empty()) return request.outputPath;
+  if (!request.corpusPath.empty())
+    return request.corpusPath / "backtests" / runId;
   if (!request.sessionPath.empty()) return request.sessionPath / "backtests" / runId;
   if (!request.sessions.empty() && !request.sessions[0].path.empty()) return request.sessions[0].path / "backtests" / runId;
   return request.sessionPath / "backtests" / runId;
@@ -298,7 +276,6 @@ detail::BacktestLatencyConfig resolveLatencyConfig(const BacktestRunRequest& req
   for (const BacktestLatencySchedule& schedule : request.latencySchedules) {
     if (detail::exchangeFromText(schedule.exchange).raw != exchange.raw) continue;
     if (detail::marketFromText(schedule.market).raw != market.raw) continue;
-    fallback.marketData = schedule.marketData;
     fallback.marketOrder = schedule.marketOrder;
     fallback.limitOrder = schedule.limitOrder;
     fallback.cancelOrder = schedule.cancelOrder.baseUs != 0u || schedule.cancelOrder.jitterUs != 0u ? schedule.cancelOrder : fallback.cancelOrder;
@@ -321,7 +298,7 @@ detail::BacktestLatencyConfig latencyConfigForLeg(const BacktestRunRequest& requ
 
 std::uint64_t maxLatencyUs(const BacktestRunRequest& request) noexcept {
   const detail::BacktestLatencyConfig config = detail::latencyConfigFromRequest(request);
-  std::uint64_t out = detail::latencyProfileMaxUs(config.marketData);
+  std::uint64_t out = detail::latencyProfileMaxUs(config.marketOrder);
   const std::uint64_t marketOrder = detail::latencyProfileMaxUs(config.marketOrder);
   const std::uint64_t limitOrder = detail::latencyProfileMaxUs(config.limitOrder);
   const std::uint64_t cancelOrder = detail::latencyProfileMaxUs(config.cancelOrder);
@@ -331,12 +308,10 @@ std::uint64_t maxLatencyUs(const BacktestRunRequest& request) noexcept {
   if (cancelOrder > out) out = cancelOrder;
   if (userData > out) out = userData;
   for (const BacktestLatencySchedule& schedule : request.latencySchedules) {
-    const std::uint64_t md = detail::latencyProfileMaxUs(schedule.marketData);
     const std::uint64_t mo = detail::latencyProfileMaxUs(schedule.marketOrder);
     const std::uint64_t lo = detail::latencyProfileMaxUs(schedule.limitOrder);
     const std::uint64_t co = detail::latencyProfileMaxUs(schedule.cancelOrder);
     const std::uint64_t ud = detail::latencyProfileMaxUs(schedule.userData);
-    if (md > out) out = md;
     if (mo > out) out = mo;
     if (lo > out) out = lo;
     if (co > out) out = co;
