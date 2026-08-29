@@ -1,8 +1,8 @@
 #include "execution/backtest_execution_depth.hpp"
 
 #include "engine/backtest_replay_clock.hpp"
-#include "core/capture/SessionManifest.hpp"
-#include "core/replay/JsonLineParser.hpp"
+#include "hftrec/corpus_contract/JsonLineParser.hpp"
+#include "hftrec/corpus_contract/SessionManifest.hpp"
 #include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
 
 #include <chrono>
@@ -182,7 +182,7 @@ struct ExecutionDepthCheckpoint {
   std::uint64_t sourceRows{0u};
   DepthScheduleKey lastSourceKey{};
   bool lastSourceRowValid{false};
-  hft_trader::core::LocalOrderBookState book{};
+  trading_core::LocalOrderBookState book{};
 };
 
 }  // namespace
@@ -191,7 +191,7 @@ class ExecutionDepthCheckpointCache {
  public:
   bool restore(std::int64_t tsNs,
                ExecutionDepthProviderImpl& impl,
-               hft_trader::core::LocalOrderBookState& book) const noexcept {
+               trading_core::LocalOrderBookState& book) const noexcept {
     std::lock_guard lock{mutex_};
     const auto it = std::upper_bound(
         checkpoints_.begin(), checkpoints_.end(), tsNs,
@@ -212,7 +212,7 @@ class ExecutionDepthCheckpointCache {
 
   void publish(const ExecutionDepthProviderImpl& impl,
                std::int64_t tsNs,
-               const hft_trader::core::LocalOrderBookState& book) noexcept {
+               const trading_core::LocalOrderBookState& book) noexcept {
     if (impl.sourceRows == 0u || (impl.sourceRows % kDepthCheckpointRows) != 0u) return;
     try {
       std::lock_guard lock{mutex_};
@@ -263,13 +263,13 @@ ExecutionDepthProvider::~ExecutionDepthProvider() {
 ExecutionDepthOpenStatus ExecutionDepthProvider::open(
     const std::filesystem::path& sessionPath,
     const Symbol& symbol,
-    const hft_trader::core::LocalOrderBookConfig& config,
-    const hft_trader::core::LocalOrderBookState& initialBook,
+    const trading_core::LocalOrderBookConfig& config,
+    const trading_core::LocalOrderBookState& initialBook,
     std::shared_ptr<ExecutionDepthCheckpointCache> cache) noexcept {
   delete impl_;
   impl_ = nullptr;
   CountVal bookCapacity =
-      hft_trader::core::boundedMaxStoredLevels(
+      trading_core::boundedMaxStoredLevels(
           config.maxStoredLevelsPerSide);
   if (config.maxStoredLevelsPerSide.raw == 0u &&
       initialBook.capacityLevelsPerSide().raw != 0u) {
@@ -277,7 +277,7 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
   }
   if (!book_.reserveLevelsPerSide(bookCapacity) ||
       (initialBook.initialized.raw ==
-           hft_trader::core::kAlgoFlagTrue.raw &&
+           trading_core::kAlgoFlagTrue.raw &&
        !book_.copyFromBounded(initialBook))) {
     available_ = false;
     failed_ = true;
@@ -415,7 +415,7 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
 }
 
 bool ExecutionDepthProvider::ready() const noexcept {
-  return available_ && hft_trader::core::orderBook(book_).initialized();
+  return available_ && trading_core::orderBook(book_).initialized();
 }
 
 bool depthScheduleLess(const CursorDepthRow& lhs,
@@ -495,13 +495,13 @@ ReadDepthRowResult readNextDepthRow(ExecutionDepthProviderImpl& impl, CursorDept
   return readTapeSidecarRow(impl, out);
 }
 
-bool applyDepthRow(hft_trader::core::LocalOrderBookState& book,
+bool applyDepthRow(trading_core::LocalOrderBookState& book,
                    const Symbol& symbol,
-                   const hft_trader::core::LocalOrderBookConfig& config,
+                   const trading_core::LocalOrderBookConfig& config,
                    const CursorDepthRow& row,
                    cxet::composite::OrderBookTapeRuntimeV1& tapeScratch,
                    cxet::composite::OrderBookTapeSidesRuntimeV1& sideScratch) noexcept {
-  if (!hft_trader::core::orderBook(book).initialized()) {
+  if (!trading_core::orderBook(book).initialized()) {
     book.symbol = symbol;
     book.config = config;
     if (book.config.maxStoredLevelsPerSide.raw == 0u) {
@@ -510,7 +510,7 @@ bool applyDepthRow(hft_trader::core::LocalOrderBookState& book,
     }
   }
   toRuntime(row, tapeScratch, sideScratch);
-  return hft_trader::core::applyTapeDelta(book, tapeScratch, sideScratch);
+  return trading_core::applyTapeDelta(book, tapeScratch, sideScratch);
 }
 
 bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {

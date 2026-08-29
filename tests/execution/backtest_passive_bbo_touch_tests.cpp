@@ -32,25 +32,25 @@ Amount amount(std::int64_t raw) noexcept {
   return out;
 }
 
-hft_trader::core::OrderIntent postOnlyOrderIntent(std::uint64_t orderId,
+trading_core::OrderIntent postOnlyOrderIntent(std::uint64_t orderId,
                                                   Side side,
                                                   std::int64_t px,
                                                   std::int64_t qty = kQty1) noexcept {
-  hft_trader::core::OrderIntent out{};
+  trading_core::OrderIntent out{};
   out.clientIntentId = id(orderId);
   out.side = side;
   out.orderType = canon::OrderType::Limit;
   out.price = price(px);
   out.qty = amount(qty);
-  out.limitTimeInForcePolicy = hft_trader::core::LimitTimeInForcePolicy::PostOnlyPrefer;
+  out.limitTimeInForcePolicy = trading_core::LimitTimeInForcePolicy::PostOnlyPrefer;
   return out;
 }
 
-hft_trader::core::OrderIntent limitOrderIntent(std::uint64_t orderId,
+trading_core::OrderIntent limitOrderIntent(std::uint64_t orderId,
                                                Side side,
                                                std::int64_t px,
                                                std::int64_t qty = kQty1) noexcept {
-  hft_trader::core::OrderIntent out{};
+  trading_core::OrderIntent out{};
   out.clientIntentId = id(orderId);
   out.side = side;
   out.orderType = canon::OrderType::Limit;
@@ -71,8 +71,8 @@ void setTop(EngineState& engine,
   top.ask.px.raw = ask;
   top.ask.qty.raw = askQty;
   top.ts.raw = tsNs;
-  hft_trader::core::copyBookTickerSnapshot(engine.snapshot, top);
-  hft_trader::core::copyBookTickerSnapshot(engine.venueSnapshot, top);
+  trading_core::copyBookTickerSnapshot(engine.snapshot, top);
+  trading_core::copyBookTickerSnapshot(engine.venueSnapshot, top);
 }
 
 void seedVenueBook(EngineState& engine,
@@ -86,16 +86,16 @@ void seedVenueBook(EngineState& engine,
   for (const auto& level : asks) {
     (void)cxet::composite::appendOrderBookLevel(snapshot, price(level.first), amount(level.second), Side::Sell());
   }
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = static_cast<std::uint32_t>(
       std::max(bids.size(), asks.size()));
   if (!engine.venueOrderBook.reserveLevelsPerSide(
           config.maxStoredLevelsPerSide) ||
-      !hft_trader::core::applySnapshot(
+      !trading_core::applySnapshot(
           engine.venueOrderBook, snapshot, engine.symbol, config)) {
     return;
   }
-  hft_trader::core::bindOrderBookSnapshot(engine.venueSnapshot, engine.venueOrderBook);
+  trading_core::bindOrderBookSnapshot(engine.venueSnapshot, engine.venueOrderBook);
   engine.venueOrderBookExecutionEnabled = true;
   if (!bids.size() || !asks.size()) return;
   setTop(engine, bids.begin()->first, bids.begin()->second, asks.begin()->first, asks.begin()->second, 1000u);
@@ -107,9 +107,9 @@ bool expect(bool value, std::string_view message) {
   return false;
 }
 
-void submitOne(EngineState& engine, hft_trader::core::OrderIntent& order, std::int64_t tsNs) {
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(&order, 1u);
+void submitOne(EngineState& engine, trading_core::OrderIntent& order, std::int64_t tsNs) {
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(&order, 1u);
   io.orderCount = 1u;
   applyIntents(engine, io, tsNs, 0u, 0u);
 }

@@ -1,8 +1,9 @@
 #include "config/backtest_run_config.hpp"
 
-#include "hft_trader/core/fees/FeePresets.hpp"
-#include "hft_trader/core/rate_limit/RateLimitPresets.hpp"
-#include "hft_trader/runtime/runner/StrategyMarketDataRuntime.hpp"
+#include "trading_core/core/fees/FeePresets.hpp"
+#include "trading_core/core/math/NotionalQty.hpp"
+#include "trading_core/core/rate_limit/RateLimitPresets.hpp"
+#include "trading_core/strategy/StrategyMarketData.hpp"
 
 #include <chrono>
 #include <string>
@@ -18,8 +19,8 @@ BacktestRateLimitSchedule scheduleFromPreset(ExchangeId exchange,
   BacktestRateLimitSchedule out{};
   out.exchange = exchangeText;
   out.market = marketText;
-  hft_trader::core::RateLimitPreset preset = hft_trader::core::defaultExchangeRateLimitPreset(exchange, market);
-  (void)hft_trader::core::addDefaultRateLimitActions(preset);
+  trading_core::RateLimitPreset preset = trading_core::defaultExchangeRateLimitPreset(exchange, market);
+  (void)trading_core::addDefaultRateLimitActions(preset);
   out.buckets.reserve(preset.bucketCount);
   out.actions.reserve(preset.actionCount);
   for (std::uint8_t i = 0u; i < preset.bucketCount; ++i) out.buckets.push_back(preset.buckets[i]);
@@ -29,9 +30,9 @@ BacktestRateLimitSchedule scheduleFromPreset(ExchangeId exchange,
 
 void overlayRateLimitSchedule(BacktestRateLimitSchedule& base,
                               const BacktestRateLimitSchedule& overlay) {
-  for (const hft_trader::core::RateLimitBucketConfig& bucket : overlay.buckets) {
+  for (const trading_core::RateLimitBucketConfig& bucket : overlay.buckets) {
     bool replaced = false;
-    for (hft_trader::core::RateLimitBucketConfig& existing : base.buckets) {
+    for (trading_core::RateLimitBucketConfig& existing : base.buckets) {
       if (existing.kind != bucket.kind ||
           existing.intervalNs != bucket.intervalNs ||
           existing.windowMode != bucket.windowMode) {
@@ -43,9 +44,9 @@ void overlayRateLimitSchedule(BacktestRateLimitSchedule& base,
     }
     if (!replaced) base.buckets.push_back(bucket);
   }
-  for (const hft_trader::core::RateLimitActionConfig& action : overlay.actions) {
+  for (const trading_core::RateLimitActionConfig& action : overlay.actions) {
     bool replaced = false;
-    for (hft_trader::core::RateLimitActionConfig& existing : base.actions) {
+    for (trading_core::RateLimitActionConfig& existing : base.actions) {
       if (existing.action != action.action) continue;
       existing = action;
       replaced = true;
@@ -152,7 +153,7 @@ std::filesystem::path resultPathFor(const BacktestRunRequest& request, const std
   return request.sessionPath / "backtests" / runId;
 }
 
-bool buildSessionLoadPlan(const hft_trader::runtime::StrategyDescriptor& descriptor,
+bool buildSessionLoadPlan(const trading_core::StrategyDescriptor& descriptor,
                           detail::SessionLoadPlan& out,
                           std::string& error) noexcept {
   out = detail::SessionLoadPlan{};
@@ -163,10 +164,10 @@ bool buildSessionLoadPlan(const hft_trader::runtime::StrategyDescriptor& descrip
   out.loadCandles = descriptor.seedHistory != nullptr || descriptor.loadCandleHistory;
   out.requireCandles = descriptor.seedHistory != nullptr || descriptor.requireCandleHistory;
   if (descriptor.resolveTradeHistory && descriptor.seedTrades) out.loadTrades = true;
-  const std::size_t streamCount = hft_trader::runtime::descriptorStreamCount(descriptor);
+  const std::size_t streamCount = trading_core::strategy::descriptorStreamCount(descriptor);
   for (std::size_t i = 0u; i < streamCount; ++i) {
-    const cxet::api::market::PublicMarketDataStream stream = hft_trader::runtime::descriptorStreamAt(descriptor, i);
-    const bool required = hft_trader::runtime::descriptorStreamRequired(descriptor, i);
+    const cxet::api::market::PublicMarketDataStream stream = trading_core::strategy::descriptorStreamAt(descriptor, i);
+    const bool required = trading_core::strategy::descriptorStreamRequired(descriptor, i);
     if (stream == cxet::api::market::PublicMarketDataStream::Trades) {
       out.loadTrades = true;
       out.requireTrades = out.requireTrades || required;
@@ -224,7 +225,7 @@ BacktestFeeSchedule resolveFeeSchedule(const BacktestRunRequest& request,
   BacktestFeeSchedule out{};
   out.exchange = exchangeText;
   out.market = marketText;
-  const hft_trader::core::ExchangeFeePreset preset = hft_trader::core::defaultExchangeFeePreset(exchange, market);
+  const trading_core::ExchangeFeePreset preset = trading_core::defaultExchangeFeePreset(exchange, market);
   if (preset.available) {
     out.makerFeeBpsE8 = preset.makerFeeBpsE8;
     out.takerFeeBpsE8 = preset.takerFeeBpsE8;
@@ -263,7 +264,10 @@ std::int64_t legInitialBalanceE8(const BacktestRunRequest& request, std::size_t 
 std::int64_t portfolioInitialBalanceE8(const BacktestRunRequest& request, std::size_t legCount) noexcept {
   if (request.legInitialBalancesE8.empty()) return request.initialBalanceE8;
   std::int64_t out = 0;
-  for (std::size_t i = 0u; i < legCount; ++i) out += legInitialBalanceE8(request, i);
+  for (std::size_t i = 0u; i < legCount; ++i) {
+    out = trading_core::saturatingAddI64(
+        out, legInitialBalanceE8(request, i));
+  }
   return out;
 }
 

@@ -1,8 +1,8 @@
 #include "input/session_loader.hpp"
 
 #include "api/resolve/LocalSymbolValidation.hpp"
-#include "core/capture/SessionManifest.hpp"
-#include "core/replay/JsonLineParser.hpp"
+#include "hftrec/corpus_contract/JsonLineParser.hpp"
+#include "hftrec/corpus_contract/SessionManifest.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -365,12 +365,11 @@ Status loadJsonl(const std::filesystem::path& path,
     error += path.generic_string();
     return Status::CorruptData;
   }
-  if (!sorted) {
-    std::stable_sort(out.begin(), out.end(), [](const Row& lhs, const Row& rhs) noexcept {
-      return rowKeyLess(rowKey(lhs), rowKey(rhs));
-    });
-  }
-  if (sortedOut) *sortedOut = true;
+  // Preserve the recorder channel exactly as captured.  buildTimeline() owns
+  // the replay ordering step and uses sortedOut to select either the bounded
+  // merge path or the stable-sort path.  Sorting here loses capture-order
+  // evidence and makes the flag below lie about the source channel.
+  if (sortedOut) *sortedOut = sorted;
   return Status::Ok;
 }
 

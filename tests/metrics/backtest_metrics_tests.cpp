@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string_view>
 #include <vector>
 
@@ -83,6 +84,38 @@ bool testPortfolioExcursionMetricsFallbackToEquityWhenRiskSnapshotsAreMixed() {
          expect(metrics.maxDrawdownE8 == 600000000ll, "mixed risk snapshots fallback keeps both legs in drawdown");
 }
 
+bool testAccountingBoundsSaturatePortfolioAndDrawdownMath() {
+  constexpr std::int64_t kMin = std::numeric_limits<std::int64_t>::min();
+  constexpr std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
+  EngineState engine{};
+  engine.riskSnapshots.push_back(JsonRiskSnapshot{
+      100, 0, 0, 0, 0, kMax, 0, 0, 0, 0, 0, 0, 0,
+      kRiskSnapshotReasonStart});
+  engine.riskSnapshots.push_back(JsonRiskSnapshot{
+      200, 0, 0, 0, 0, kMin, 0, 0, 0, 0, 0, 0, 0,
+      kRiskSnapshotReasonFinal});
+  const BacktestExcursionMetrics single = calculateExcursionMetrics(engine);
+
+  std::vector<EngineState> engines(2u);
+  for (EngineState& leg : engines) {
+    leg.equityPoints.push_back(
+        JsonEquityPoint{100, 0, 0, 0, 0, kMax, kMax, 0, 0, 0, 0});
+    leg.equityPoints.push_back(
+        JsonEquityPoint{200, 0, 0, 0, 0, kMin, kMin, 0, 0, 0, 0});
+  }
+  const std::vector<std::int64_t> curve =
+      buildPortfolioTotalPnlCurveE8(engines);
+  const BacktestExcursionMetrics portfolio =
+      calculatePortfolioExcursionMetrics(engines);
+
+  return expect(single.maxDrawdownE8 == kMax,
+                "single-leg drawdown saturates at INT64_MAX") &&
+         expect(curve.size() == 2u && curve[0] == kMax && curve[1] == kMin,
+                "portfolio sum saturates at both accounting bounds") &&
+         expect(portfolio.maxDrawdownE8 == kMax,
+                "portfolio drawdown saturates at INT64_MAX");
+}
+
 }  // namespace
 
 int main() {
@@ -92,5 +125,6 @@ int main() {
   ok = testPortfolioExcursionMetricsMergeLegRiskSnapshots() && ok;
   ok = testPortfolioPnlCurveMergesLegEquityPoints() && ok;
   ok = testPortfolioExcursionMetricsFallbackToEquityWhenRiskSnapshotsAreMixed() && ok;
+  ok = testAccountingBoundsSaturatePortfolioAndDrawdownMath() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

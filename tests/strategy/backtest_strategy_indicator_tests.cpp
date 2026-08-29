@@ -20,10 +20,6 @@ bool metadataHasParam(const hft_backtest::StrategyMetadata& metadata, std::strin
   return false;
 }
 
-bool metadataDisplayNameIs(const hft_backtest::StrategyMetadata& metadata, std::string_view expected) noexcept {
-  return metadata.displayNameRu != nullptr && expected == metadata.displayNameRu;
-}
-
 bool metadataHasIndicator(const hft_backtest::StrategyMetadata& metadata, std::string_view id) noexcept {
   for (std::size_t i = 0; i < metadata.indicatorCount; ++i) {
     if (metadata.indicators[i].id && id == metadata.indicators[i].id) return true;
@@ -31,19 +27,10 @@ bool metadataHasIndicator(const hft_backtest::StrategyMetadata& metadata, std::s
   return false;
 }
 
-bool testBasisConvergenceMetadataRequiresTwoSessions() {
-  const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("basis_convergence_probe");
-  return expect(metadata != nullptr, "basis_convergence_probe metadata is exported") &&
-         expect(metadata->configTemplateFile != nullptr &&
-                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/basis_convergence_probe.ini",
-                "basis_convergence_probe metadata discovers strategy profile") &&
-         expect(metadataDisplayNameIs(*metadata, "Базис spot/futures"),
-                "basis convergence display name comes from ini metadata") &&
-         expect(metadata->minSessionCount == 2u, "basis convergence probe requires spot and futures sessions") &&
-         expect(metadata->maxSessionCount == 2u, "basis convergence probe allows exactly two sessions") &&
-         expect(!metadataHasParam(*metadata, "source"), "basis convergence metadata keeps source auto-resolved") &&
-         expect(!metadataHasParam(*metadata, "timeframe_sec"), "basis convergence metadata keeps timeframe defaulted") &&
-         expect(!metadataHasParam(*metadata, "expiry_utc_ns"), "basis convergence metadata keeps expiry auto-resolved");
+bool testStaleBasisConvergenceProfileDoesNotCreateMetadata() {
+  return expect(
+      hft_backtest::findStrategyMetadata("basis_convergence_probe") == nullptr,
+      "basis_convergence_probe metadata stays hidden without descriptor");
 }
 
 bool testStaleToxicFlowPairProbeProfileDoesNotCreateMetadata() {
@@ -68,7 +55,7 @@ bool testRecursiveStatArbMetadataIsFixedTwoLegProfile() {
 
 int main() {
   bool ok = true;
-  ok = testBasisConvergenceMetadataRequiresTwoSessions() && ok;
+  ok = testStaleBasisConvergenceProfileDoesNotCreateMetadata() && ok;
   ok = testStaleToxicFlowPairProbeProfileDoesNotCreateMetadata() && ok;
   ok = testRecursiveStatArbMetadataIsFixedTwoLegProfile() && ok;
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;

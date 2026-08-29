@@ -117,9 +117,18 @@ bool parseDecimalBpsE8(std::string_view value, std::int64_t& out) noexcept {
   }
   if (value.empty()) return false;
 
-  std::int64_t whole = 0;
-  std::int64_t fraction = 0;
-  std::int64_t fractionScale = kBpsE8Scale / 10;
+  using WideMagnitude = unsigned __int128;
+  constexpr WideMagnitude kPositiveLimit =
+      static_cast<WideMagnitude>(std::numeric_limits<std::int64_t>::max());
+  const WideMagnitude magnitudeLimit =
+      negative ? kPositiveLimit + 1u : kPositiveLimit;
+  const WideMagnitude wholeLimit =
+      magnitudeLimit / static_cast<WideMagnitude>(kBpsE8Scale);
+
+  WideMagnitude whole = 0;
+  WideMagnitude fraction = 0;
+  WideMagnitude fractionScale =
+      static_cast<WideMagnitude>(kBpsE8Scale / 10);
   bool sawDigit = false;
   bool fractional = false;
   for (const char ch : value) {
@@ -130,20 +139,31 @@ bool parseDecimalBpsE8(std::string_view value, std::int64_t& out) noexcept {
     }
     if (ch < '0' || ch > '9') return false;
     sawDigit = true;
-    const std::int64_t digit = static_cast<std::int64_t>(ch - '0');
+    const WideMagnitude digit = static_cast<unsigned>(ch - '0');
     if (fractional) {
       if (fractionScale > 0) {
         fraction += digit * fractionScale;
         fractionScale /= 10;
       }
     } else {
-      if (whole > (std::numeric_limits<std::int64_t>::max() / 10)) return false;
+      if (whole > wholeLimit / 10u ||
+          (whole == wholeLimit / 10u && digit > wholeLimit % 10u)) {
+        return false;
+      }
       whole = whole * 10 + digit;
     }
   }
-  if (!sawDigit || whole > (std::numeric_limits<std::int64_t>::max() / kBpsE8Scale)) return false;
-  out = whole * kBpsE8Scale + fraction;
-  if (negative) out = -out;
+  if (!sawDigit) return false;
+  const WideMagnitude magnitude =
+      whole * static_cast<WideMagnitude>(kBpsE8Scale) + fraction;
+  if (magnitude > magnitudeLimit) return false;
+  if (!negative) {
+    out = static_cast<std::int64_t>(magnitude);
+  } else if (magnitude == kPositiveLimit + 1u) {
+    out = std::numeric_limits<std::int64_t>::min();
+  } else {
+    out = -static_cast<std::int64_t>(magnitude);
+  }
   return true;
 }
 
@@ -738,8 +758,10 @@ JsonEquityPoint syntheticLegEquityPoint(const BacktestLegSummary& leg) noexcept 
   out.grossRealizedPnlE8 = leg.grossRealizedPnlE8;
   out.realizedPnlE8 = leg.netRealizedPnlE8;
   out.unrealizedPnlE8 = leg.unrealizedPnlE8;
-  out.grossTotalPnlE8 = leg.grossRealizedPnlE8 + leg.unrealizedPnlE8;
-  out.netTotalPnlE8 = leg.netRealizedPnlE8 + leg.unrealizedPnlE8;
+  out.grossTotalPnlE8 = trading_core::saturatingAddI64(
+      leg.grossRealizedPnlE8, leg.unrealizedPnlE8);
+  out.netTotalPnlE8 = trading_core::saturatingAddI64(
+      leg.netRealizedPnlE8, leg.unrealizedPnlE8);
   out.totalPnlE8 = leg.totalPnlE8;
   out.feesPaidE8 = leg.feesPaidE8;
   out.walletBalanceE8 = leg.walletBalanceE8;
@@ -854,13 +876,13 @@ bool writeExecutionQuality(const std::filesystem::path& path, const EngineState&
   if (!out.is_open()) return false;
   for (const JsonExecutionQualityAction& row : engine.executionQuality) {
     std::uint8_t status = row.statusRaw;
-    if (row.anchorRaw != static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionAnchor::MakerQuote) &&
-        (status == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Proposed) ||
-        status == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Accepted))) {
+    if (row.anchorRaw != static_cast<std::uint8_t>(trading_core::StrategyExecutionAnchor::MakerQuote) &&
+        (status == static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Proposed) ||
+        status == static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Accepted))) {
       const bool anyFill = row.legs[0].filledQtyE8 > 0 || row.legs[1].filledQtyE8 > 0;
       status = static_cast<std::uint8_t>(anyFill
-          ? hft_trader::core::StrategyExecutionStatus::Partial
-          : hft_trader::core::StrategyExecutionStatus::Uncertain);
+          ? trading_core::StrategyExecutionStatus::Partial
+          : trading_core::StrategyExecutionStatus::Uncertain);
     }
     out << '[' << row.actionId
         << ',' << row.positionCycleId
@@ -1204,9 +1226,9 @@ bool writeManifest(const std::filesystem::path& path,
     std::size_t incompleteRows = 0u;
     std::size_t rejectedRows = 0u;
     for (const JsonExecutionQualityAction& row : engine.executionQuality) {
-      if (row.anchorRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionAnchor::MakerQuote)) continue;
-      if (row.statusRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Completed)) ++completedRows;
-      else if (row.statusRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Rejected)) ++rejectedRows;
+      if (row.anchorRaw == static_cast<std::uint8_t>(trading_core::StrategyExecutionAnchor::MakerQuote)) continue;
+      if (row.statusRaw == static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Completed)) ++completedRows;
+      else if (row.statusRaw == static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Rejected)) ++rejectedRows;
       else ++incompleteRows;
     }
     out << ",\n    " << q << "execution_quality" << q << ": {" << q << "path" << q

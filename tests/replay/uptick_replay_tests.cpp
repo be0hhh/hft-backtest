@@ -12,6 +12,9 @@
 
 namespace {
 
+constexpr std::int64_t kReplayEpochNs =
+    hft_backtest::test_support::kReceiveRealtimeBaseNs;
+
 bool expect(bool value, std::string_view message) {
   if (value) return true;
   std::cerr << "FAIL: " << message << "\n";
@@ -51,7 +54,7 @@ std::string priceLimitRow(std::int64_t tsNs,
                           std::int64_t lowerSellLimit,
                           std::int64_t upperBuyLimit) {
   return hft_backtest::test_support::priceLimitRow(
-      tsNs, upperBuyLimit, lowerSellLimit, 4u);
+      tsNs, upperBuyLimit, lowerSellLimit, 1001u);
 }
 
 std::string tradeRow(std::int64_t price,
@@ -79,24 +82,29 @@ void writeUptickSession(const std::filesystem::path& dir) {
   writeText(dir / "instrument_metadata.json",
             "{\"tick_size_e8\":1000000,\"lot_size_e8\":100000000,\"contract_base_qty_e8\":100000000}\n");
   writeText(dir / "jsonl" / "price_limit.jsonl",
-            priceLimitRow(1000000ll, 9500000000ll, 10500000000ll));
+            priceLimitRow(kReplayEpochNs + 1000000ll,
+                          9500000000ll, 10500000000ll));
   const auto depthLevels = std::initializer_list<hft_backtest::test_support::DepthLevel>{
       {9500000000ll, 5000000000ll, 0},
       {9600000000ll, 5000000000ll, 1}};
   writeText(dir / "jsonl" / "depth_tape.jsonl",
-            hft_backtest::test_support::depthTapeRow(1000000ll, 1u, depthLevels) +
-                hft_backtest::test_support::depthTapeRow(2000000ll, 2u, depthLevels) +
-                hft_backtest::test_support::depthTapeRow(3000000ll, 3u, depthLevels));
+            hft_backtest::test_support::depthTapeRow(kReplayEpochNs + 1000000ll, 1000u, depthLevels) +
+                hft_backtest::test_support::depthTapeRow(kReplayEpochNs + 2000000ll, 2000u, depthLevels) +
+                hft_backtest::test_support::depthTapeRow(kReplayEpochNs + 3000000ll, 3000u, depthLevels));
   writeText(dir / "jsonl" / "depth_sidecar.jsonl",
-            hft_backtest::test_support::depthSidecarRow(1000000ll, 1u, depthLevels) +
-                hft_backtest::test_support::depthSidecarRow(2000000ll, 2u, depthLevels) +
-                hft_backtest::test_support::depthSidecarRow(3000000ll, 3u, depthLevels));
+            hft_backtest::test_support::depthSidecarRow(kReplayEpochNs + 1000000ll, 1000u, depthLevels) +
+                hft_backtest::test_support::depthSidecarRow(kReplayEpochNs + 2000000ll, 2000u, depthLevels) +
+                hft_backtest::test_support::depthSidecarRow(kReplayEpochNs + 3000000ll, 3000u, depthLevels));
   writeText(dir / "jsonl" / "bookticker.jsonl",
-            bookTickerRow(9500000000ll, 5000000000ll, 9600000000ll, 5000000000ll, 2000000ll, 10) +
-                bookTickerRow(9500000000ll, 5000000000ll, 9600000000ll, 5000000000ll, 3000000ll, 20));
+            bookTickerRow(9500000000ll, 5000000000ll, 9600000000ll, 5000000000ll,
+                          kReplayEpochNs + 2000000ll, 2001) +
+                bookTickerRow(9500000000ll, 5000000000ll, 9600000000ll, 5000000000ll,
+                              kReplayEpochNs + 3000000ll, 3001));
   writeText(dir / "jsonl" / "trades.jsonl",
-            tradeRow(9600000000ll, 6000000000ll, 1, 4000000ll, 30) +
-                tradeRow(9600000000ll, 6000000000ll, 1, 5000000ll, 40));
+            tradeRow(9600000000ll, 6000000000ll, 1,
+                     kReplayEpochNs + 4000000ll, 4000) +
+                tradeRow(9600000000ll, 6000000000ll, 1,
+                         kReplayEpochNs + 5000000ll, 5000));
 }
 
 void writeConfig(const std::filesystem::path& path) {

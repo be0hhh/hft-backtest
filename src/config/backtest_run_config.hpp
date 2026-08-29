@@ -6,7 +6,7 @@
 #include "engine/backtest_prepared.hpp"
 #include "input/session_loader.hpp"
 
-#include "hft_trader/runtime/runner/StrategyDescriptor.hpp"
+#include "trading_core/api/descriptor/StrategyDescriptor.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -36,7 +36,7 @@ void appendSessionWarnings(BacktestRunResult& result, const std::vector<detail::
 [[nodiscard]] std::string makeRunId();
 [[nodiscard]] std::filesystem::path resultPathFor(const BacktestRunRequest& request,
                                                   const std::string& runId);
-[[nodiscard]] bool buildSessionLoadPlan(const hft_trader::runtime::StrategyDescriptor& descriptor,
+[[nodiscard]] bool buildSessionLoadPlan(const trading_core::StrategyDescriptor& descriptor,
                                         detail::SessionLoadPlan& out,
                                         std::string& error) noexcept;
 [[nodiscard]] std::uint64_t hashRunSeed(const std::string& text) noexcept;

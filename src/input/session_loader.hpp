@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "hft_backtest/status.hpp"
-#include "core/replay/EventRows.hpp"
+#include "hftrec/corpus_contract/EventRows.hpp"
 
 namespace hft_backtest::detail {
 

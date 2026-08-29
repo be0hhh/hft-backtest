@@ -25,13 +25,13 @@ struct PassiveBboTouchFill {
 void initializePassiveQueue(OpenOrder& order, const EngineState& engine) noexcept;
 void initializePassiveQueue(OpenOrder& order,
                             const EngineState& engine,
-                            const hft_trader::core::LocalOrderBookState& book) noexcept;
+                            const trading_core::LocalOrderBookState& book) noexcept;
 [[nodiscard]] bool buildAggressiveBookFillPlan(const EngineState& engine,
                                                const OpenOrder& order,
                                                AggressiveFillPlan& out) noexcept;
 [[nodiscard]] bool buildAggressiveBookFillPlan(const EngineState& engine,
                                                const OpenOrder& order,
-                                               const hft_trader::core::LocalOrderBookState& book,
+                                               const trading_core::LocalOrderBookState& book,
                                                AggressiveFillPlan& out) noexcept;
 [[nodiscard]] PassiveQueueTradeFill consumePassiveQueueForTrade(
     EngineState& engine,

@@ -169,7 +169,8 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
   out.feesPaidE8 = engine.feesPaidE8;
   out.netRealizedPnlE8 = engine.netRealizedPnlE8;
   out.unrealizedPnlE8 = detail::unrealizedPnlE8(engine);
-  out.totalPnlE8 = out.netRealizedPnlE8 + out.unrealizedPnlE8;
+  out.totalPnlE8 = trading_core::saturatingAddI64(
+      out.netRealizedPnlE8, out.unrealizedPnlE8);
   out.walletDeltaE8 = engine.netRealizedPnlE8;
   out.openPositionQtyE8 = engine.netQtyRaw;
   out.totalPnlCurveE8.reserve(engine.equityPoints.size());
@@ -213,10 +214,14 @@ void populateAggregateArtifactEngine(const std::vector<detail::EngineState>& eng
     out.timerWakeEvents += engine.timerWakeEvents;
     out.reduceOnlyOrders += engine.reduceOnlyOrders;
     out.reduceOnlyFills += engine.reduceOnlyFills;
-    out.netQtyRaw += engine.netQtyRaw;
-    out.grossRealizedPnlE8 += engine.grossRealizedPnlE8;
-    out.netRealizedPnlE8 += engine.netRealizedPnlE8;
-    out.feesPaidE8 += engine.feesPaidE8;
+    out.netQtyRaw = trading_core::saturatingAddI64(
+        out.netQtyRaw, engine.netQtyRaw);
+    out.grossRealizedPnlE8 = trading_core::saturatingAddI64(
+        out.grossRealizedPnlE8, engine.grossRealizedPnlE8);
+    out.netRealizedPnlE8 = trading_core::saturatingAddI64(
+        out.netRealizedPnlE8, engine.netRealizedPnlE8);
+    out.feesPaidE8 = trading_core::saturatingAddI64(
+        out.feesPaidE8, engine.feesPaidE8);
     if (engine.liquidated) {
       out.liquidated = true;
       out.liquidationTsNs = engine.liquidationTsNs;
@@ -232,9 +237,11 @@ void populateAggregateArtifactEngine(const std::vector<detail::EngineState>& eng
   if (out.liquidated && initialBalanceE8 > 0) {
     out.netQtyRaw = 0;
     out.netRealizedPnlE8 = -initialBalanceE8;
-    out.grossRealizedPnlE8 = out.netRealizedPnlE8 + out.feesPaidE8;
+    out.grossRealizedPnlE8 = trading_core::saturatingAddI64(
+        out.netRealizedPnlE8, out.feesPaidE8);
   }
-  out.walletBalanceE8 = initialBalanceE8 + out.netRealizedPnlE8;
+  out.walletBalanceE8 = trading_core::saturatingAddI64(
+      initialBalanceE8, out.netRealizedPnlE8);
   if (out.liquidated) out.walletBalanceE8 = 0;
   if (!engines.empty()) {
     out.strategyIndicatorProfile = engines[0].strategyIndicatorProfile;
@@ -259,7 +266,8 @@ void populateResultPnl(BacktestRunResult& result, const detail::EngineState& eng
   result.maeE8 = metrics.maeE8;
   result.realizedPnlE8 = engine.netRealizedPnlE8;
   result.unrealizedPnlE8 = detail::unrealizedPnlE8(engine);
-  result.totalPnlE8 = result.realizedPnlE8 + result.unrealizedPnlE8;
+  result.totalPnlE8 = trading_core::saturatingAddI64(
+      result.realizedPnlE8, result.unrealizedPnlE8);
   result.openPositionQtyE8 = engine.netQtyRaw;
   result.strategyClosed = engine.netQtyRaw == 0;
   result.liquidated = engine.liquidated;
@@ -314,11 +322,16 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
   std::int64_t riskStopThresholdEquityE8 = 0;
   for (std::size_t i = 0u; i < engines.size(); ++i) {
     const detail::EngineState& engine = engines[i];
-    result.grossRealizedPnlE8 += engine.grossRealizedPnlE8;
-    result.feesPaidE8 += engine.feesPaidE8;
-    result.netRealizedPnlE8 += engine.netRealizedPnlE8;
-    result.unrealizedPnlE8 += detail::unrealizedPnlE8(engine);
-    result.openPositionQtyE8 += engine.netQtyRaw;
+    result.grossRealizedPnlE8 = trading_core::saturatingAddI64(
+        result.grossRealizedPnlE8, engine.grossRealizedPnlE8);
+    result.feesPaidE8 = trading_core::saturatingAddI64(
+        result.feesPaidE8, engine.feesPaidE8);
+    result.netRealizedPnlE8 = trading_core::saturatingAddI64(
+        result.netRealizedPnlE8, engine.netRealizedPnlE8);
+    result.unrealizedPnlE8 = trading_core::saturatingAddI64(
+        result.unrealizedPnlE8, detail::unrealizedPnlE8(engine));
+    result.openPositionQtyE8 = trading_core::saturatingAddI64(
+        result.openPositionQtyE8, engine.netQtyRaw);
     result.orders += engine.orders.size();
     result.fills += engine.fills.size();
     result.userEvents += engine.userEvents.size();
@@ -342,8 +355,10 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
     if (i < sessions.size()) result.legs.push_back(legSummaryFromEngine(sessions[i], engine));
   }
   result.realizedPnlE8 = result.netRealizedPnlE8;
-  result.totalPnlE8 = result.realizedPnlE8 + result.unrealizedPnlE8;
-  result.walletBalanceE8 = initialBalanceE8 + result.netRealizedPnlE8;
+  result.totalPnlE8 = trading_core::saturatingAddI64(
+      result.realizedPnlE8, result.unrealizedPnlE8);
+  result.walletBalanceE8 = trading_core::saturatingAddI64(
+      initialBalanceE8, result.netRealizedPnlE8);
   const detail::BacktestExcursionMetrics metrics = detail::calculatePortfolioExcursionMetrics(engines);
   result.maxDrawdownE8 = metrics.maxDrawdownE8;
   result.mfeE8 = metrics.mfeE8;
@@ -351,7 +366,8 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
   result.totalPnlCurveE8 = detail::buildPortfolioTotalPnlCurveE8(engines);
   if (liquidated && initialBalanceE8 > 0) {
     result.walletBalanceE8 = 0;
-    result.grossRealizedPnlE8 = -initialBalanceE8 + result.feesPaidE8;
+    result.grossRealizedPnlE8 = trading_core::saturatingAddI64(
+        -initialBalanceE8, result.feesPaidE8);
     result.netRealizedPnlE8 = -initialBalanceE8;
     result.realizedPnlE8 = result.netRealizedPnlE8;
     result.unrealizedPnlE8 = 0;

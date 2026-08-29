@@ -13,7 +13,9 @@ namespace {
 
 constexpr std::int64_t kQty1 = 100000000ll;
 constexpr std::int64_t kPartialQty = 2000000ll;
-constexpr std::int64_t kLeg0PassiveBidFillPx = 9989000000ll;
+constexpr std::int64_t kLeg0PassiveBidFillPx = 9980000000ll;
+constexpr std::int64_t kReplayEpochNs =
+    hft_backtest::test_support::kReceiveRealtimeBaseNs;
 
 bool expect(bool value, std::string_view message) {
   if (value) return true;
@@ -72,15 +74,23 @@ std::string tradeRow(std::int64_t price,
 }
 
 void writeLeg0Session(const std::filesystem::path& dir) {
-  writeSessionManifest(dir, "binance", "BTC_USDT", 51u);
+  writeSessionManifest(dir, "binance", "BTC_USDT", 52u);
   std::string book;
   std::string trades;
-  book += bookTickerRow(10000000000ll, 10010000000ll, 1000000ll, 10, "binance");
-  book += bookTickerRow(10000000000ll, 10010000000ll, 3000000ll, 20, "binance");
-  trades += tradeRow(10005000000ll, kQty1, 1, 1000000ll, 11, "BTC_USDT", "binance");
-  for (std::int64_t i = 0; i < 50; ++i) {
-    const std::int64_t ts = 600000000ll + i * 1000000ll;
-    trades += tradeRow(kLeg0PassiveBidFillPx, kPartialQty, 0, ts, 100 + i, "BTC_USDT", "binance");
+  book += bookTickerRow(10000000000ll, 10010000000ll,
+                        kReplayEpochNs + 1000000ll, 1000, "binance");
+  book += bookTickerRow(10000000000ll, 10010000000ll,
+                        kReplayEpochNs + 2000000ll, 2000, "binance");
+  trades += tradeRow(10005000000ll, kQty1, 1,
+                     kReplayEpochNs + 1500000ll, 1500,
+                     "BTC_USDT", "binance");
+  // The first crossing delivery completes order-path warmup and publishes the
+  // resting quote. The following 50 rows exercise partial maker-fill deltas.
+  for (std::int64_t i = 0; i < 51; ++i) {
+    const std::int64_t ts = kReplayEpochNs + 2500000ll + i * 100000ll;
+    trades += tradeRow(kLeg0PassiveBidFillPx, kPartialQty, 0, ts,
+                       static_cast<std::int64_t>(2500 + i * 100),
+                       "BTC_USDT", "binance");
   }
   writeText(dir / "jsonl" / "bookticker.jsonl", book);
   writeText(dir / "jsonl" / "trades.jsonl", trades);
@@ -90,9 +100,13 @@ void writeLeg1Session(const std::filesystem::path& dir) {
   writeSessionManifest(dir, "bybit", "BTC_USDT", 1u);
   std::string book;
   std::string trades;
-  book += bookTickerRow(10200000000ll, 10210000000ll, 1000000ll, 10, "bybit");
-  book += bookTickerRow(10200000000ll, 10210000000ll, 3000000ll, 20, "bybit");
-  trades += tradeRow(10205000000ll, kQty1, 1, 1000000ll, 11, "BTC_USDT", "bybit");
+  book += bookTickerRow(10200000000ll, 10210000000ll,
+                        kReplayEpochNs + 1000000ll, 1000, "bybit");
+  book += bookTickerRow(10200000000ll, 10210000000ll,
+                        kReplayEpochNs + 2000000ll, 2000, "bybit");
+  trades += tradeRow(10205000000ll, kQty1, 1,
+                     kReplayEpochNs + 1600000ll, 1600,
+                     "BTC_USDT", "bybit");
   writeText(dir / "jsonl" / "bookticker.jsonl", book);
   writeText(dir / "jsonl" / "trades.jsonl", trades);
 }
@@ -183,14 +197,14 @@ bool testBurstPartialMakerFillReplayKeepsPairExposureBounded() {
   }
 
   return expect(result.legs.size() == 2u, "replay returns two leg summaries") &&
-         expect(result.legs[0].fills == 50u + result.legs[0].reduceOnlyFills,
-                "leg0 receives 50 partial maker fills plus optional close") &&
+         expect(result.legs[0].fills == 1u + result.legs[0].reduceOnlyFills,
+                "first partial maker fill is followed by bounded cancellation and optional close") &&
          expect(result.legs[0].userEvents >= result.legs[0].fills, "leg0 publishes fill plus terminal order user events") &&
          expect(result.legs[0].reduceOnlyFills <= 1u, "leg0 close fill is bounded") &&
          expect(result.legs[1].fills > result.legs[1].reduceOnlyFills,
                 "leg1 receives reactive hedge fills before final close") &&
-         expect(result.legs[1].fills <= 50u + result.legs[1].reduceOnlyFills,
-                "leg1 hedge fills are bounded by maker deltas plus optional close") &&
+         expect(result.legs[1].fills <= 1u + result.legs[1].reduceOnlyFills,
+                "leg1 hedge fills are bounded by the admitted maker delta plus optional close") &&
          expect(result.legs[1].userEvents >= result.legs[1].fills, "leg1 publishes fill plus terminal order user events") &&
          expect(result.legs[1].reduceOnlyFills <= 1u, "leg1 close fill is bounded") &&
          expect(result.legs[0].openPositionQtyE8 == 0, "leg0 final exposure is closed") &&

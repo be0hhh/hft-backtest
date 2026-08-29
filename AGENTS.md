@@ -1,6 +1,7 @@
 # Agent rules - hft-backtest
 
-`hft-backtest` is an app-layer replay/backtest module above CXETCPP, hft-trader, and hft-recorder session corpora.
+`hft-backtest` is the deterministic replay/simulation consumer of CXET,
+trading-core and hft-recorder session corpora.
 
 ## Project-owned versioning
 
@@ -13,10 +14,16 @@
 
 ## Boundaries
 
-- Do not change strategy code to make backtests work. Link the prebuilt hft-trader runtime shared library and adapt at the app boundary.
+- Do not change strategy semantics to make backtests pass. Compile and link the
+  canonical `trading_core::*` targets directly and keep simulation adapters at
+  the Backtest boundary.
 - Keep recorder as the owner of captured corpus files and UI launch/display.
 - Backtest owns replay execution, fills, accounting, latency simulation, sweeps, metrics, and result JSON.
-- Build from WSL/Linux only. The module links Linux `.so` artifacts from hft-trader and CXETCPP.
+- Build from WSL/Linux only through the CXET root source graph. Link public CXET,
+  trading-core and `hftrec::corpus_contract` targets; never import an HFT Trader
+  runtime `.so`, copy HFT Trader runtime sources, or stage a sibling SDK.
+- Backtest must remain independent of live HFT Trader and Trader session,
+  readiness, reconnect and terminal-order owners.
 - Keep hot replay state integer-scaled and deterministic. No floating point in execution/accounting code.
 
 ## Build/test restraint

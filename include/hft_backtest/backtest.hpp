@@ -8,7 +8,7 @@
 #include "hft_backtest/api.hpp"
 #include "hft_backtest/status.hpp"
 #include "hft_backtest/strategy_metadata.hpp"
-#include "hft_trader/core/rate_limit/RateLimit.hpp"
+#include "trading_core/core/rate_limit/RateLimit.hpp"
 
 namespace hft_backtest {
 
@@ -79,8 +79,8 @@ struct BacktestLatencySchedule {
 struct BacktestRateLimitSchedule {
   std::string exchange{};
   std::string market{};
-  std::vector<hft_trader::core::RateLimitBucketConfig> buckets{};
-  std::vector<hft_trader::core::RateLimitActionConfig> actions{};
+  std::vector<trading_core::RateLimitBucketConfig> buckets{};
+  std::vector<trading_core::RateLimitActionConfig> actions{};
 };
 
 enum class BacktestTradeMode : std::uint8_t {

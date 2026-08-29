@@ -1,8 +1,8 @@
 #include "strategy/backtest_strategy_trace.hpp"
 
 #include "hft_backtest/strategy_metadata.hpp"
-#include "hft_trader/api/StrategyApi.hpp"
-#include "hft_trader/core/math/PriceBasis.hpp"
+#include "trading_core/api/StrategyApi.hpp"
+#include "trading_core/core/math/PriceBasis.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -21,20 +21,20 @@ constexpr std::size_t kInitialRiskReserve = 64u;
 constexpr std::size_t kInitialRiskReserveCap = 65536u;
 constexpr std::size_t kInitialTraceReserveCap = 262144u;
 
-bool hasWallDrop(const hft_trader::core::StrategyDecisionTrace& trace) noexcept {
-  for (std::size_t side = 0; side < hft_trader::core::kStrategyDecisionWallSideCount; ++side) {
-    for (std::size_t rank = 0; rank < hft_trader::core::kStrategyDecisionWallRankCount; ++rank) {
+bool hasWallDrop(const trading_core::StrategyDecisionTrace& trace) noexcept {
+  for (std::size_t side = 0; side < trading_core::kStrategyDecisionWallSideCount; ++side) {
+    for (std::size_t rank = 0; rank < trading_core::kStrategyDecisionWallRankCount; ++rank) {
       if (trace.wallDropped[side][rank] != 0u) return true;
     }
   }
   return false;
 }
 
-std::uint8_t indicatorEventCode(const hft_trader::core::StrategyDecisionTrace& trace) noexcept {
+std::uint8_t indicatorEventCode(const trading_core::StrategyDecisionTrace& trace) noexcept {
   if (hasWallDrop(trace)) return 2u;
-  if (trace.decisionKind == static_cast<std::uint8_t>(hft_trader::core::StrategyDecisionKind::Skip) && trace.reasonRaw != 0u) return 4u;
-  if (trace.decisionKind == static_cast<std::uint8_t>(hft_trader::core::StrategyDecisionKind::Enter) ||
-      trace.decisionKind == static_cast<std::uint8_t>(hft_trader::core::StrategyDecisionKind::Close) ||
+  if (trace.decisionKind == static_cast<std::uint8_t>(trading_core::StrategyDecisionKind::Skip) && trace.reasonRaw != 0u) return 4u;
+  if (trace.decisionKind == static_cast<std::uint8_t>(trading_core::StrategyDecisionKind::Enter) ||
+      trace.decisionKind == static_cast<std::uint8_t>(trading_core::StrategyDecisionKind::Close) ||
       trace.bidTriggered != 0u || trace.askTriggered != 0u) return 1u;
   return 0u;
 }
@@ -51,7 +51,7 @@ std::int64_t absI64(std::int64_t value) noexcept {
 }
 
 detail::JsonStrategySpreadPoint makeStrategySpreadPoint(std::int64_t tsNs,
-                                                        const hft_trader::core::StrategyDecisionTrace& trace) noexcept {
+                                                        const trading_core::StrategyDecisionTrace& trace) noexcept {
   detail::JsonStrategySpreadPoint row{};
   row.tsNs = tsNs;
   row.spreadBpsE8 = trace.arbSpreadBpsE8;
@@ -66,7 +66,7 @@ detail::JsonStrategySpreadPoint makeStrategySpreadPoint(std::int64_t tsNs,
 }
 
 void recordStrategySpreadDiagnostics(detail::JsonStrategySpreadDiagnostics& out,
-                                     const hft_trader::core::StrategyDecisionTrace& trace) noexcept {
+                                     const trading_core::StrategyDecisionTrace& trace) noexcept {
   if (out.rows == 0u) {
     out.minEdgeAfterCostBpsE8 = trace.arbEdgeAfterCostBpsE8;
     out.maxEdgeAfterCostBpsE8 = trace.arbEdgeAfterCostBpsE8;
@@ -75,8 +75,8 @@ void recordStrategySpreadDiagnostics(detail::JsonStrategySpreadDiagnostics& out,
     out.maxEdgeAfterCostBpsE8 = std::max(out.maxEdgeAfterCostBpsE8, trace.arbEdgeAfterCostBpsE8);
   }
   out.maxAbsDeviationBpsE8 = std::max(out.maxAbsDeviationBpsE8, absI64(trace.arbDeviationBpsE8));
-  if (trace.decisionKind < hft_trader::core::kStrategyDecisionKindCount &&
-      trace.reasonRaw < hft_trader::core::kStrategyDecisionReasonCapacity) {
+  if (trace.decisionKind < trading_core::kStrategyDecisionKindCount &&
+      trace.reasonRaw < trading_core::kStrategyDecisionReasonCapacity) {
     ++out.decisionCounts[trace.decisionKind][trace.reasonRaw];
   }
   ++out.rows;
@@ -137,11 +137,11 @@ void configureStrategyIndicator(detail::EngineState& engine, const StrategyIndic
   engine.strategyIndicatorUnit = std::string{profile.unit};
 }
 
-bool emitsArbSpreadTrace(const hft_trader::runtime::StrategyDescriptor& descriptor) noexcept {
+bool emitsArbSpreadTrace(const trading_core::StrategyDescriptor& descriptor) noexcept {
   return descriptor.emitsArbSpreadTrace;
 }
 
-bool emitsPriceRangeTrace(const hft_trader::runtime::StrategyDescriptor& descriptor) noexcept {
+bool emitsPriceRangeTrace(const trading_core::StrategyDescriptor& descriptor) noexcept {
   return descriptor.emitsPriceRangeTrace;
 }
 
@@ -172,7 +172,7 @@ void reserveEngineStorage(detail::EngineState& engine,
 
 void appendStrategyIndicator(detail::EngineState& engine,
                              std::int64_t tsNs,
-                             const hft_trader::core::StrategyDecisionTrace& trace) {
+                             const trading_core::StrategyDecisionTrace& trace) {
   if (!strategyIndicatorEnabled(engine)) return;
   detail::JsonStrategyIndicatorPoint row{};
   row.tsNs = tsNs;
@@ -212,7 +212,7 @@ void appendStrategyIndicator(detail::EngineState& engine,
     row.featureRaw[5] = static_cast<std::int64_t>(trace.volatilityConfidencePct);
     row.featureRaw[6] = static_cast<std::int64_t>(trace.volatilityQuoteConfidencePct);
   } else if (engine.strategyIndicatorProfile == "recursive_stat_arb") {
-    row.valueRaw = hft_trader::core::saturatingSubI64(trace.recursiveResidualBpsE8,
+    row.valueRaw = trading_core::saturatingSubI64(trace.recursiveResidualBpsE8,
                                                      trace.recursiveMeanBpsE8);
     row.auxRaw = trace.recursiveEntryThresholdBpsE8;
     row.featureRaw[0] = trace.recursiveRlsBetaQ32;
@@ -243,7 +243,7 @@ void appendStrategyIndicator(detail::EngineState& engine,
 
 void appendStrategyRange(detail::EngineState& engine,
                          std::int64_t tsNs,
-                         const hft_trader::core::StrategyDecisionTrace& trace) {
+                         const trading_core::StrategyDecisionTrace& trace) {
   if (trace.rangeReady == 0u || trace.rangeLowRaw <= 0 || trace.rangeHighRaw <= trace.rangeLowRaw) return;
   detail::JsonStrategyRangePoint row{};
   row.tsNs = tsNs;
@@ -255,14 +255,14 @@ void appendStrategyRange(detail::EngineState& engine,
 
 void appendStrategySpread(detail::EngineState& engine,
                           std::int64_t tsNs,
-                          const hft_trader::core::StrategyDecisionTrace& trace) {
+                          const trading_core::StrategyDecisionTrace& trace) {
   if (trace.arbReady == 0u) return;
   engine.strategySpread.push_back(makeStrategySpreadPoint(tsNs, trace));
 }
 
 void recordStrategySpread(detail::EngineState& engine,
                           std::int64_t tsNs,
-                          const hft_trader::core::StrategyDecisionTrace& trace,
+                          const trading_core::StrategyDecisionTrace& trace,
                           bool captureRows) {
   if (trace.arbReady == 0u) return;
   recordStrategySpreadDiagnostics(engine.strategySpreadDiagnostics, trace);
@@ -271,19 +271,19 @@ void recordStrategySpread(detail::EngineState& engine,
 
 void recordInputCoverage(detail::EngineState& engine) noexcept {
   ++engine.inputCoverage.strategyCycles;
-  if (engine.snapshot.hasTrade.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithTrade;
-  if (engine.snapshot.hasBookTicker.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithBookTicker;
-  if (engine.snapshot.hasPriceLimit.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithPriceLimit;
-  if (engine.snapshot.hasDepth.raw == hft_trader::core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithDepth;
-  if (engine.snapshot.hasOrderBook.raw == hft_trader::core::kAlgoFlagTrue.raw && engine.snapshot.orderBook) ++engine.inputCoverage.cyclesWithOrderBook;
+  if (engine.snapshot.hasTrade.raw == trading_core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithTrade;
+  if (engine.snapshot.hasBookTicker.raw == trading_core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithBookTicker;
+  if (engine.snapshot.hasPriceLimit.raw == trading_core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithPriceLimit;
+  if (engine.snapshot.hasDepth.raw == trading_core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithDepth;
+  if (engine.snapshot.hasOrderBook.raw == trading_core::kAlgoFlagTrue.raw && engine.snapshot.orderBook) ++engine.inputCoverage.cyclesWithOrderBook;
 }
 
 void recordExecutionQualityActions(
     detail::EngineState& engine,
     std::int64_t tsNs,
-    const hft_trader::core::StrategyExecutionTraceBatch& batch) {
+    const trading_core::StrategyExecutionTraceBatch& batch) {
   for (std::size_t i = 0u; i < batch.count; ++i) {
-    const hft_trader::core::StrategyExecutionActionTrace& source = batch.actions[i];
+    const trading_core::StrategyExecutionActionTrace& source = batch.actions[i];
     if (!source.valid || source.actionId.raw == 0u) continue;
     detail::JsonExecutionQualityAction row{};
     row.actionId = source.actionId.raw;
@@ -311,16 +311,16 @@ void recordExecutionQualityActions(
       row.legs[leg].expectedQtyE8 = source.legs[leg].expectedQty.raw;
       row.legs[leg].decisionPriceE8 = source.legs[leg].decisionPrice.raw;
     }
-    if (source.anchor == hft_trader::core::StrategyExecutionAnchor::MakerCommitment && row.legCount > 0u) {
+    if (source.anchor == trading_core::StrategyExecutionAnchor::MakerCommitment && row.legCount > 0u) {
       for (auto it = engine.executionQuality.rbegin(); it != engine.executionQuality.rend(); ++it) {
-        if (it->anchorRaw != static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionAnchor::MakerQuote) ||
+        if (it->anchorRaw != static_cast<std::uint8_t>(trading_core::StrategyExecutionAnchor::MakerQuote) ||
             it->legCount == 0u ||
             it->legs[0].clientIntentId != row.legs[0].clientIntentId) continue;
         row.quoteDecisionEdgeAfterCostBpsE8 = it->decisionEdgeAfterCostBpsE8;
         break;
       }
     }
-    if (source.anchor == hft_trader::core::StrategyExecutionAnchor::MakerCommitment &&
+    if (source.anchor == trading_core::StrategyExecutionAnchor::MakerCommitment &&
         row.legCount > 0u && row.legs[0].expectedQtyE8 > 0 && row.legs[0].decisionPriceE8 > 0) {
       row.legs[0].filledQtyE8 = row.legs[0].expectedQtyE8;
       row.legs[0].fillVwapE8 = row.legs[0].decisionPriceE8;
@@ -355,7 +355,7 @@ void updateExecutionQualityLeg(detail::JsonExecutionQualityLeg& leg,
 }
 
 void finishExecutionQualityAction(detail::JsonExecutionQualityAction& row) noexcept {
-  if (row.anchorRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionAnchor::MakerQuote)) return;
+  if (row.anchorRaw == static_cast<std::uint8_t>(trading_core::StrategyExecutionAnchor::MakerQuote)) return;
   if (row.legCount != 2u) return;
   for (std::uint8_t i = 0u; i < 2u; ++i) {
     if (row.legs[i].expectedQtyE8 <= 0 || row.legs[i].filledQtyE8 < row.legs[i].expectedQtyE8 ||
@@ -368,12 +368,12 @@ void finishExecutionQualityAction(detail::JsonExecutionQualityAction& row) noexc
       ? &row.legs[0]
       : (row.legs[1].sideRaw == Side::Sell().raw ? &row.legs[1] : nullptr);
   if (!buy || !sell || buy->fillVwapE8 <= 0 || sell->fillVwapE8 <= 0) return;
-  const std::int64_t spread = hft_trader::core::bpsE8(
-      hft_trader::core::saturatingSubI64(sell->fillVwapE8, buy->fillVwapE8),
+  const std::int64_t spread = trading_core::bpsE8(
+      trading_core::saturatingSubI64(sell->fillVwapE8, buy->fillVwapE8),
       buy->fillVwapE8);
-  const std::int64_t deviation = hft_trader::core::saturatingSubI64(spread, row.fairBpsE8);
-  row.fillEdgeAfterCostBpsE8 = hft_trader::core::saturatingSubI64(deviation, row.costBandBpsE8);
-  row.edgeLossBpsE8 = hft_trader::core::saturatingSubI64(
+  const std::int64_t deviation = trading_core::saturatingSubI64(spread, row.fairBpsE8);
+  row.fillEdgeAfterCostBpsE8 = trading_core::saturatingSubI64(deviation, row.costBandBpsE8);
+  row.edgeLossBpsE8 = trading_core::saturatingSubI64(
       row.decisionEdgeAfterCostBpsE8, row.fillEdgeAfterCostBpsE8);
   const std::int64_t firstFill = std::min(row.legs[0].firstFillTsNs, row.legs[1].firstFillTsNs);
   const std::int64_t lastFill = std::max(row.legs[0].lastFillTsNs, row.legs[1].lastFillTsNs);
@@ -383,7 +383,7 @@ void finishExecutionQualityAction(detail::JsonExecutionQualityAction& row) noexc
   row.fillLegSkewNs = row.legs[0].lastFillTsNs >= row.legs[1].lastFillTsNs
       ? row.legs[0].lastFillTsNs - row.legs[1].lastFillTsNs
       : row.legs[1].lastFillTsNs - row.legs[0].lastFillTsNs;
-  row.statusRaw = static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Completed);
+  row.statusRaw = static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Completed);
 }
 
 }  // namespace
@@ -393,23 +393,23 @@ void recordExecutionQualityFill(
     const cxet::composite::UserDataEvent& event,
     std::uint32_t legIndex,
     std::int64_t deliveryTsNs,
-    const hft_trader::core::StrategyInstrumentSpec& instrument) noexcept {
+    const trading_core::StrategyInstrumentSpec& instrument) noexcept {
   Id clientIntentId{};
-  if (!hft_trader::strategy::clientIntentId(event, clientIntentId) || clientIntentId.raw == 0u) return;
-  if (hft_trader::strategy::isUserOrderRejected(event) || hft_trader::strategy::isUserOrderCanceled(event)) {
+  if (!trading_core::strategy::clientIntentId(event, clientIntentId) || clientIntentId.raw == 0u) return;
+  if (trading_core::strategy::isUserOrderRejected(event) || trading_core::strategy::isUserOrderCanceled(event)) {
     for (auto it = ledger.executionQuality.rbegin(); it != ledger.executionQuality.rend(); ++it) {
       for (std::uint8_t leg = 0u; leg < it->legCount; ++leg) {
         if (it->legs[leg].clientIntentId != clientIntentId.raw) continue;
         it->statusRaw = static_cast<std::uint8_t>(
             it->legs[leg].filledQtyE8 > 0
-                ? hft_trader::core::StrategyExecutionStatus::Partial
-                : hft_trader::core::StrategyExecutionStatus::Rejected);
+                ? trading_core::StrategyExecutionStatus::Partial
+                : trading_core::StrategyExecutionStatus::Rejected);
         return;
       }
     }
     return;
   }
-  if (!hft_trader::strategy::isUserFillEvent(event)) return;
+  if (!trading_core::strategy::isUserFillEvent(event)) return;
   Amount qty{};
   const bool hasLastFilledQty = cxet::composite::userDataFieldPresent(
       event, cxet::composite::UserDataField::LastFilledQty);
@@ -420,11 +420,11 @@ void recordExecutionQualityFill(
   } else if (hasFilledQty) {
     qty = event.filledQty;
   }
-  Price price = hft_trader::strategy::userOrderFillPrice(event);
-  price = hft_trader::core::nativeToUnderlyingPrice(price, instrument);
+  Price price = trading_core::strategy::userOrderFillPrice(event);
+  price = trading_core::nativeToUnderlyingPrice(price, instrument);
   if (qty.raw <= 0 || price.raw <= 0) return;
   for (auto it = ledger.executionQuality.rbegin(); it != ledger.executionQuality.rend(); ++it) {
-    if (it->statusRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Completed)) continue;
+    if (it->statusRaw == static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Completed)) continue;
     for (std::uint8_t leg = 0u; leg < it->legCount; ++leg) {
       if (it->legs[leg].clientIntentId != clientIntentId.raw || it->legs[leg].legIndex != legIndex) continue;
       updateExecutionQualityLeg(it->legs[leg], qty.raw, price.raw, deliveryTsNs);
@@ -436,25 +436,25 @@ void recordExecutionQualityFill(
 
 void finalizeExecutionQuality(detail::EngineState& engine) noexcept {
   for (detail::JsonExecutionQualityAction& row : engine.executionQuality) {
-    if (row.anchorRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionAnchor::MakerQuote)) continue;
-    if (row.statusRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Completed) ||
-        row.statusRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionStatus::Rejected)) continue;
+    if (row.anchorRaw == static_cast<std::uint8_t>(trading_core::StrategyExecutionAnchor::MakerQuote)) continue;
+    if (row.statusRaw == static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Completed) ||
+        row.statusRaw == static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Rejected)) continue;
     bool anyFill = false;
     for (std::uint8_t leg = 0u; leg < row.legCount; ++leg) anyFill = anyFill || row.legs[leg].filledQtyE8 > 0;
     row.statusRaw = static_cast<std::uint8_t>(
-        anyFill ? hft_trader::core::StrategyExecutionStatus::Partial
-                : hft_trader::core::StrategyExecutionStatus::Uncertain);
+        anyFill ? trading_core::StrategyExecutionStatus::Partial
+                : trading_core::StrategyExecutionStatus::Uncertain);
   }
 }
 
 void calculateExecutionQualityDeadlines(
     detail::EngineState& engine,
     const detail::SessionData* sessions,
-    const hft_trader::core::StrategyInstrumentSpec* instruments,
+    const trading_core::StrategyInstrumentSpec* instruments,
     std::size_t legCount) noexcept {
   if (!sessions || !instruments || legCount == 0u) return;
   for (detail::JsonExecutionQualityAction& action : engine.executionQuality) {
-    if (action.anchorRaw == static_cast<std::uint8_t>(hft_trader::core::StrategyExecutionAnchor::MakerQuote) ||
+    if (action.anchorRaw == static_cast<std::uint8_t>(trading_core::StrategyExecutionAnchor::MakerQuote) ||
         action.legCount != 2u || action.decisionTsNs <= 0) continue;
     const detail::JsonExecutionQualityLeg* buy = action.legs[0].sideRaw == Side::Buy().raw
         ? &action.legs[0]
@@ -497,13 +497,13 @@ void calculateExecutionQualityDeadlines(
       if (sellTs == ts) sellBid = sellRows[sellIndex++].bidPriceE8;
       Price buyPrice{buyAsk};
       Price sellPrice{sellBid};
-      buyPrice = hft_trader::core::nativeToUnderlyingPrice(buyPrice, instruments[buy->legIndex]);
-      sellPrice = hft_trader::core::nativeToUnderlyingPrice(sellPrice, instruments[sell->legIndex]);
+      buyPrice = trading_core::nativeToUnderlyingPrice(buyPrice, instruments[buy->legIndex]);
+      sellPrice = trading_core::nativeToUnderlyingPrice(sellPrice, instruments[sell->legIndex]);
       if (buyPrice.raw <= 0 || sellPrice.raw <= 0) continue;
-      const std::int64_t spread = hft_trader::core::bpsE8(
-          hft_trader::core::saturatingSubI64(sellPrice.raw, buyPrice.raw), buyPrice.raw);
-      const std::int64_t edge = hft_trader::core::saturatingSubI64(
-          hft_trader::core::saturatingSubI64(spread, action.fairBpsE8),
+      const std::int64_t spread = trading_core::bpsE8(
+          trading_core::saturatingSubI64(sellPrice.raw, buyPrice.raw), buyPrice.raw);
+      const std::int64_t edge = trading_core::saturatingSubI64(
+          trading_core::saturatingSubI64(spread, action.fairBpsE8),
           action.costBandBpsE8);
       const std::int64_t elapsed = ts >= action.decisionTsNs ? ts - action.decisionTsNs : 0;
       if (action.thresholdDeadlineNs < 0 && edge < action.requiredEdgeBpsE8) {

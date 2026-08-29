@@ -1,8 +1,8 @@
 #include "input/session_loader.hpp"
 #include "input/binary_corpus_loader.hpp"
 #include "engine/backtest_engine.hpp"
-#include "core/capture/SessionManifest.hpp"
-#include "core/corpus/BinaryMarketCorpusWriter.hpp"
+#include "hftrec/corpus_contract/BinaryMarketCorpusWriter.hpp"
+#include "hftrec/corpus_contract/SessionManifest.hpp"
 
 #include <algorithm>
 #include <array>
@@ -672,8 +672,9 @@ bool testLoadSessionRejectsWrongArrivalBoundary() {
 
   return expect(status == hft_backtest::Status::CorruptData,
                 "non-application arrival boundary fails closed") &&
-         expect(error.find("arrival-clock boundary") != std::string::npos,
-                "arrival boundary rejection is explicit");
+         expect(error.find("malformed or incompatible recorder manifest") !=
+                    std::string::npos,
+                "non-canonical recorder boundary is rejected by the manifest contract");
 }
 
 bool testLoadSessionRejectsCorruptCapturedDepthPair() {

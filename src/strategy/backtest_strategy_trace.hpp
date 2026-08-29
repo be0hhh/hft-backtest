@@ -4,8 +4,8 @@
 
 #include "engine/backtest_engine.hpp"
 
-#include "hft_trader/core/strategy/StrategyContract.hpp"
-#include "hft_trader/runtime/runner/StrategyDescriptor.hpp"
+#include "trading_core/core/strategy/StrategyContract.hpp"
+#include "trading_core/api/descriptor/StrategyDescriptor.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -28,8 +28,8 @@ struct StrategyIndicatorProfileInfo {
 [[nodiscard]] bool strategyIndicatorEnabled(const detail::EngineState& engine) noexcept;
 void configureStrategyIndicator(detail::EngineState& engine,
                                 const StrategyIndicatorProfileInfo& profile);
-[[nodiscard]] bool emitsArbSpreadTrace(const hft_trader::runtime::StrategyDescriptor& descriptor) noexcept;
-[[nodiscard]] bool emitsPriceRangeTrace(const hft_trader::runtime::StrategyDescriptor& descriptor) noexcept;
+[[nodiscard]] bool emitsArbSpreadTrace(const trading_core::StrategyDescriptor& descriptor) noexcept;
+[[nodiscard]] bool emitsPriceRangeTrace(const trading_core::StrategyDescriptor& descriptor) noexcept;
 void reserveEngineStorage(detail::EngineState& engine,
                           std::size_t events,
                           std::uint64_t replayDurationNs,
@@ -38,34 +38,34 @@ void reserveEngineStorage(detail::EngineState& engine,
                           bool captureSpreadRows);
 void appendStrategyIndicator(detail::EngineState& engine,
                              std::int64_t tsNs,
-                             const hft_trader::core::StrategyDecisionTrace& trace);
+                             const trading_core::StrategyDecisionTrace& trace);
 void appendStrategyRange(detail::EngineState& engine,
                          std::int64_t tsNs,
-                         const hft_trader::core::StrategyDecisionTrace& trace);
+                         const trading_core::StrategyDecisionTrace& trace);
 void appendStrategySpread(detail::EngineState& engine,
                           std::int64_t tsNs,
-                          const hft_trader::core::StrategyDecisionTrace& trace);
+                          const trading_core::StrategyDecisionTrace& trace);
 void recordStrategySpread(detail::EngineState& engine,
                           std::int64_t tsNs,
-                          const hft_trader::core::StrategyDecisionTrace& trace,
+                          const trading_core::StrategyDecisionTrace& trace,
                           bool captureRows);
 void recordInputCoverage(detail::EngineState& engine) noexcept;
 void recordExecutionQualityActions(
     detail::EngineState& engine,
     std::int64_t tsNs,
-    const hft_trader::core::StrategyExecutionTraceBatch& batch);
+    const trading_core::StrategyExecutionTraceBatch& batch);
 void recordExecutionQualityFill(
     detail::EngineState& ledger,
     const cxet::composite::UserDataEvent& event,
     std::uint32_t legIndex,
     std::int64_t deliveryTsNs,
-    const hft_trader::core::StrategyInstrumentSpec& instrument) noexcept;
+    const trading_core::StrategyInstrumentSpec& instrument) noexcept;
 void finalizeExecutionQuality(detail::EngineState& engine) noexcept;
 
 void calculateExecutionQualityDeadlines(
     detail::EngineState& engine,
     const detail::SessionData* sessions,
-    const hft_trader::core::StrategyInstrumentSpec* instruments,
+    const trading_core::StrategyInstrumentSpec* instruments,
     std::size_t legCount) noexcept;
 
 }  // namespace hft_backtest

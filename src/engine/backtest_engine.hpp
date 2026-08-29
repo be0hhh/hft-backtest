@@ -5,12 +5,14 @@
 #include "execution/backtest_latency.hpp"
 #include "input/session_loader.hpp"
 
-#include "hft_trader/core/market/BboReconstruction.hpp"
-#include "hft_trader/core/market/LocalOrderBook.hpp"
-#include "hft_trader/core/intents/OrderState.hpp"
-#include "hft_trader/core/intents/PositionState.hpp"
-#include "hft_trader/core/strategy/StrategyContract.hpp"
-#include "hft_trader/core/strategy/StrategyDecisionTrace.hpp"
+#include "api/market/PublicMarketDataTypes.hpp"
+#include "primitives/composite/BboReconstruction.hpp"
+#include "trading_core/core/market/LocalOrderBook.hpp"
+#include "trading_core/core/intents/OrderState.hpp"
+#include "trading_core/core/intents/PositionState.hpp"
+#include "trading_core/core/strategy/StrategyContract.hpp"
+#include "trading_core/core/strategy/StrategyDecisionTrace.hpp"
+#include "trading_core/execution/FillPositionAccounting.hpp"
 
 #include "canon/PositionAndExchange.hpp"
 #include "canon/Subtypes.hpp"
@@ -267,8 +269,8 @@ struct JsonStrategySpreadDiagnostics {
   std::int64_t minEdgeAfterCostBpsE8{0};
   std::int64_t maxEdgeAfterCostBpsE8{0};
   std::int64_t maxAbsDeviationBpsE8{0};
-  std::array<std::array<std::uint64_t, hft_trader::core::kStrategyDecisionReasonCapacity>,
-             hft_trader::core::kStrategyDecisionKindCount> decisionCounts{};
+  std::array<std::array<std::uint64_t, trading_core::kStrategyDecisionReasonCapacity>,
+             trading_core::kStrategyDecisionKindCount> decisionCounts{};
 };
 
 struct JsonExecutionQualityLeg {
@@ -319,14 +321,14 @@ struct JsonRateLimitUsagePoint {
   std::int64_t minRemainingPctE4{0};
   std::int64_t remaining{0};
   std::int64_t limit{0};
-  hft_trader::core::RateLimitBucketKind bucketKind{hft_trader::core::RateLimitBucketKind::Unknown};
+  trading_core::RateLimitBucketKind bucketKind{trading_core::RateLimitBucketKind::Unknown};
   std::uint64_t intervalNs{0u};
   bool exhausted{false};
 };
 
 struct OpenOrder {
-  hft_trader::core::StrategyOrderState state{};
-  hft_trader::core::ExecutionRouteHandle routeHandle{hft_trader::core::kDefaultExecutionRouteHandle};
+  trading_core::StrategyOrderState state{};
+  trading_core::ExecutionRouteHandle routeHandle{trading_core::kDefaultExecutionRouteHandle};
   std::size_t recordIndex{kNoRecordIndex};
   std::int64_t createdTsNs{0};
   std::int64_t activeTsNs{0};
@@ -358,20 +360,6 @@ struct PendingAction {
   Id commandClientIntentId{};
 };
 
-enum class IntentApplyDisposition : std::uint8_t {
-  Applied = 0,
-  RestoreStrategyState = 1,
-  PreserveAcceptedSequence = 2,
-};
-
-struct IntentApplyResult {
-  IntentApplyDisposition disposition{IntentApplyDisposition::Applied};
-
-  [[nodiscard]] bool shouldRestoreStrategyState() const noexcept {
-    return disposition == IntentApplyDisposition::RestoreStrategyState;
-  }
-};
-
 struct EngineState {
   std::vector<JsonOrder> orders{};
   std::vector<JsonFill> fills{};
@@ -391,14 +379,14 @@ struct EngineState {
   std::vector<PendingAction> pending{};
   std::uint64_t nextPendingSubmitSequence{1u};
   std::array<OpenOrder, kMaxOrderStates> open{};
-  hft_trader::core::StrategyPositionState position{};
-  hft_trader::core::StrategyMarketSnapshot snapshot{};
-  hft_trader::core::StrategyCandleSnapshot candle{};
-  hft_trader::core::StrategyMarketSnapshot venueSnapshot{};
-  hft_trader::core::StrategyCandleSnapshot venueCandle{};
-  hft_trader::core::LocalOrderBookState orderBook{};
-  hft_trader::core::LocalOrderBookState venueOrderBook{};
-  hft_trader::core::LocalOrderBookState topExecutionOverlayScratch{};
+  trading_core::StrategyPositionState position{};
+  trading_core::StrategyMarketSnapshot snapshot{};
+  trading_core::StrategyCandleSnapshot candle{};
+  trading_core::StrategyMarketSnapshot venueSnapshot{};
+  trading_core::StrategyCandleSnapshot venueCandle{};
+  trading_core::LocalOrderBookState orderBook{};
+  trading_core::LocalOrderBookState venueOrderBook{};
+  trading_core::LocalOrderBookState topExecutionOverlayScratch{};
   std::vector<AggressiveFillPlan> topExecutionFillPlanScratch{};
   ExecutionDepthProvider* executionDepthProvider{nullptr};
   bool venueOrderBookExecutionEnabled{false};
@@ -406,10 +394,12 @@ struct EngineState {
   std::uint64_t depthFallbackFills{0};
   std::int64_t firstDepthFallbackTsNs{0};
   std::string depthFallbackReason{};
-  hft_trader::core::BboReconstructionState bboReconstruction{};
-  hft_trader::core::BboReconstructionState venueBboReconstruction{};
+  cxet::composite::BboReconstructionState bboReconstruction{};
+  cxet::composite::BboReconstructionState venueBboReconstruction{};
   std::uint64_t contextRevision{1u};
-  std::int64_t lastStrategySourceMarketDataTsNs{0};
+  std::array<std::int64_t,
+             cxet::api::market::kPublicMarketDataStreamCount>
+      strategySourceDeliveryTsNs{};
   // Difference between the captured realtime clock and the replay monotonic
   // coordinate at the most recently delivered market-data boundary.
   std::int64_t replayUtcOffsetNs{0};
@@ -427,7 +417,7 @@ struct EngineState {
   std::vector<cxet::composite::UserDataEvent> userEvents{};
   std::vector<std::int64_t> userEventDeliveryTsNs{};
   BacktestLatencyRuntime latency{};
-  hft_trader::core::RateLimitState rateLimits{};
+  trading_core::RateLimitState rateLimits{};
   std::uint64_t rateLimitRejectedOrders{0};
   std::uint64_t rateLimitRejectedCancels{0};
   std::int64_t firstRateLimitRejectTsNs{0};
@@ -440,7 +430,7 @@ struct EngineState {
   TimeNs lastOrderPathHotMono{};
   std::uint64_t nextServiceClientIntentRaw{0x8000000000000000ull};
   std::uint8_t lastWarmupSkipReason{0u};
-  hft_trader::core::StrategyProblemEvent pendingProblem{};
+  trading_core::StrategyProblemEvent pendingProblem{};
   bool hasPendingProblem{false};
   bool rateLimitSnapshotRequested{false};
   bool warmupInFlight{false};
@@ -470,14 +460,35 @@ struct EngineState {
   bool riskStopped{false};
 };
 
+inline void setStrategySourceDeliveryTimestamp(
+    EngineState& engine,
+    cxet::api::market::PublicMarketDataStream stream,
+    std::int64_t timestampNs) noexcept {
+  const std::size_t index =
+      cxet::api::market::publicMarketDataStreamIndex(stream);
+  if (index < engine.strategySourceDeliveryTsNs.size()) {
+    engine.strategySourceDeliveryTsNs[index] = timestampNs;
+  }
+}
+
+[[nodiscard]] inline std::int64_t strategySourceDeliveryTimestamp(
+    const EngineState& engine,
+    cxet::api::market::PublicMarketDataStream stream) noexcept {
+  const std::size_t index =
+      cxet::api::market::publicMarketDataStreamIndex(stream);
+  return index < engine.strategySourceDeliveryTsNs.size()
+      ? engine.strategySourceDeliveryTsNs[index]
+      : 0;
+}
+
 inline void bumpContextRevision(EngineState& engine) noexcept {
   ++engine.contextRevision;
   if (engine.contextRevision == 0u) engine.contextRevision = 1u;
 }
 
 inline const cxet::composite::BookTickerRuntimeV1& effectiveBookTicker(
-    const hft_trader::core::StrategyMarketSnapshot& snapshot) noexcept {
-  return snapshot.hasReconstructedBbo.raw == hft_trader::core::kAlgoFlagTrue.raw
+    const trading_core::StrategyMarketSnapshot& snapshot) noexcept {
+  return snapshot.hasReconstructedBbo.raw == trading_core::kAlgoFlagTrue.raw
              ? snapshot.reconstructedBookTicker
              : snapshot.lastBookTicker;
 }
@@ -527,7 +538,7 @@ cxet::composite::MarkPriceRuntimeV1 toRuntime(const MarkPriceRow& row) noexcept;
 cxet::composite::IndexPriceRuntimeV1 toRuntime(const IndexPriceRow& row) noexcept;
 cxet::composite::FundingRuntimeV1 toRuntime(const FundingRow& row) noexcept;
 cxet::composite::OpenInterestRuntimeV1 toRuntime(const OpenInterestRow& row) noexcept;
-hft_trader::core::StrategyCandleSnapshot toRuntime(const CandleRow& row) noexcept;
+trading_core::StrategyCandleSnapshot toRuntime(const CandleRow& row) noexcept;
 void toRuntime(const DepthRow& row,
                cxet::composite::OrderBookTapeRuntimeV1& tape,
                cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept;
@@ -535,10 +546,14 @@ cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const DepthRow& row) noexce
 bool buildTieredCandleHistory(const std::vector<CandleRow>& rows,
                               cxet::composite::TieredCandleHistory& out) noexcept;
 
-std::int64_t mulPriceQtyE8(std::int64_t px, std::int64_t qty) noexcept;
-std::int64_t feeForFillE8(std::int64_t priceE8, std::int64_t qtyE8, std::int64_t feeBpsE8) noexcept;
 void initializeAccounting(EngineState& engine, const BacktestRunRequest& request) noexcept;
-void updatePosition(EngineState& engine, Side side, std::int64_t priceE8, std::int64_t qtyE8, std::int64_t tsNs, std::int64_t feeBpsE8, std::int64_t& netRealized) noexcept;
+[[nodiscard]] trading_core::FillPositionAccountingResult updatePosition(
+    EngineState& engine,
+    Side side,
+    std::int64_t priceE8,
+    std::int64_t qtyE8,
+    std::int64_t tsNs,
+    std::int64_t feeBpsE8) noexcept;
 std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept;
 std::int64_t equityE8(const EngineState& engine) noexcept;
 void appendEquityPoint(EngineState& engine, std::int64_t tsNs);
@@ -551,7 +566,7 @@ void stopForTraderRisk(EngineState& engine,
                        std::int64_t thresholdEquityE8) noexcept;
 
 std::size_t visibleOrders(const EngineState& engine,
-                          hft_trader::core::StrategyOrderState* out,
+                          trading_core::StrategyOrderState* out,
                           std::size_t capacity) noexcept;
 std::int64_t delayedTs(std::int64_t tsNs, std::uint64_t latencyUs) noexcept;
 bool fillOrder(EngineState& engine, OpenOrder& order, std::int64_t priceE8, std::int64_t tsNs, bool taker);
@@ -588,15 +603,15 @@ bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t or
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency);
 void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, std::uint64_t cancelLatencyUs);
 void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency);
-IntentApplyResult applyIntents(EngineState& engine,
-                               const hft_trader::core::StrategyIo& io,
-                               std::int64_t tsNs,
-                               std::uint64_t orderLatencyUs,
-                               std::uint64_t cancelLatencyUs);
-IntentApplyResult applyIntents(EngineState& engine,
-                               const hft_trader::core::StrategyIo& io,
-                               std::int64_t tsNs,
-                               BacktestLatencyRuntime& latency);
+void applyIntents(EngineState& engine,
+                  const trading_core::StrategyIo& io,
+                  std::int64_t tsNs,
+                  std::uint64_t orderLatencyUs,
+                  std::uint64_t cancelLatencyUs);
+void applyIntents(EngineState& engine,
+                  const trading_core::StrategyIo& io,
+                  std::int64_t tsNs,
+                  BacktestLatencyRuntime& latency);
 void appendRateLimitUsageSnapshot(EngineState& engine, std::int64_t tsNs);
 
 void buildTimeline(const SessionData& session, std::vector<TimelineEvent>& out);

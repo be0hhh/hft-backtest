@@ -1,7 +1,7 @@
 #pragma once
 
-#include "core/capture/SessionManifest.hpp"
-#include "core/replay/EventRows.hpp"
+#include "hftrec/corpus_contract/EventRows.hpp"
+#include "hftrec/corpus_contract/SessionManifest.hpp"
 
 #include <cstdint>
 #include <initializer_list>

@@ -1,25 +1,10 @@
 #include "engine/backtest_engine.hpp"
 
+#include <limits>
+
+#include "trading_core/core/math/NotionalQty.hpp"
+
 namespace hft_backtest::detail {
-
-std::int64_t mulPriceQtyE8(std::int64_t px, std::int64_t qty) noexcept {
-  if (px == 0 || qty <= 0) return 0;
-  const bool negative = px < 0;
-  const std::uint64_t absPx = static_cast<std::uint64_t>(negative ? -px : px);
-  const unsigned __int128 product = static_cast<unsigned __int128>(absPx) *
-                                    static_cast<unsigned __int128>(static_cast<std::uint64_t>(qty));
-  const std::int64_t value = static_cast<std::int64_t>(product / 100000000ull);
-  return negative ? -value : value;
-}
-
-std::int64_t feeForFillE8(std::int64_t priceE8, std::int64_t qtyE8, std::int64_t feeBpsE8) noexcept {
-  if (priceE8 <= 0 || qtyE8 <= 0 || feeBpsE8 <= 0) return 0;
-  const std::int64_t notionalE8 = mulPriceQtyE8(priceE8, qtyE8);
-  if (notionalE8 <= 0) return 0;
-  const unsigned __int128 product = static_cast<unsigned __int128>(static_cast<std::uint64_t>(notionalE8)) *
-                                    static_cast<unsigned __int128>(static_cast<std::uint64_t>(feeBpsE8));
-  return static_cast<std::int64_t>(product / 1000000000000ull);
-}
 
 void initializeAccounting(EngineState& engine, const BacktestRunRequest& request) noexcept {
   engine.initialBalanceE8 = request.initialBalanceE8;
@@ -33,34 +18,33 @@ void initializeAccounting(EngineState& engine, const BacktestRunRequest& request
   bumpContextRevision(engine);
 }
 
-void updatePosition(EngineState& engine, Side side, std::int64_t priceE8, std::int64_t qtyE8, std::int64_t tsNs, std::int64_t feeBpsE8, std::int64_t& netRealized) noexcept {
-  std::int64_t grossRealized = 0;
-  const std::int64_t signedQty = side.raw == Side::Buy().raw ? qtyE8 : -qtyE8;
-  if (engine.netQtyRaw == 0 || (engine.netQtyRaw > 0 && signedQty > 0) || (engine.netQtyRaw < 0 && signedQty < 0)) {
-    const std::int64_t oldAbs = engine.netQtyRaw < 0 ? -engine.netQtyRaw : engine.netQtyRaw;
-    const std::int64_t addAbs = signedQty < 0 ? -signedQty : signedQty;
-    const std::int64_t newAbs = oldAbs + addAbs;
-    if (newAbs > 0) {
-      const unsigned __int128 oldNotional = static_cast<unsigned __int128>(static_cast<std::uint64_t>(engine.entryPriceE8 > 0 ? engine.entryPriceE8 : priceE8)) * static_cast<unsigned __int128>(static_cast<std::uint64_t>(oldAbs));
-      const unsigned __int128 addNotional = static_cast<unsigned __int128>(static_cast<std::uint64_t>(priceE8)) * static_cast<unsigned __int128>(static_cast<std::uint64_t>(addAbs));
-      engine.entryPriceE8 = static_cast<std::int64_t>((oldNotional + addNotional) / static_cast<unsigned __int128>(static_cast<std::uint64_t>(newAbs)));
-    }
-    engine.netQtyRaw += signedQty;
-  } else {
-    const std::int64_t oldAbs = engine.netQtyRaw < 0 ? -engine.netQtyRaw : engine.netQtyRaw;
-    const std::int64_t closeAbs = (signedQty < 0 ? -signedQty : signedQty) < oldAbs ? (signedQty < 0 ? -signedQty : signedQty) : oldAbs;
-    if (engine.netQtyRaw > 0) grossRealized = mulPriceQtyE8(priceE8 - engine.entryPriceE8, closeAbs);
-    else grossRealized = mulPriceQtyE8(engine.entryPriceE8 - priceE8, closeAbs);
-    engine.grossRealizedPnlE8 += grossRealized;
-    engine.netQtyRaw += signedQty;
-    if (engine.netQtyRaw == 0) engine.entryPriceE8 = 0;
-    if ((engine.netQtyRaw > 0 && signedQty > oldAbs) || (engine.netQtyRaw < 0 && -signedQty > oldAbs)) engine.entryPriceE8 = priceE8;
-  }
-  const std::int64_t fee = feeForFillE8(priceE8, qtyE8, feeBpsE8);
-  engine.feesPaidE8 += fee;
-  netRealized = grossRealized - fee;
-  engine.netRealizedPnlE8 += netRealized;
-  engine.walletBalanceE8 += netRealized;
+trading_core::FillPositionAccountingResult updatePosition(
+    EngineState& engine,
+    Side side,
+    std::int64_t priceE8,
+    std::int64_t qtyE8,
+    std::int64_t tsNs,
+    std::int64_t feeBpsE8) noexcept {
+  const trading_core::FillPositionAccountingResult result =
+      trading_core::applyFillPositionAccounting(
+          trading_core::FillPositionAccountingState{engine.netQtyRaw,
+                                                     engine.entryPriceE8},
+          side,
+          priceE8,
+          qtyE8,
+          feeBpsE8);
+  if (!result.applied) return result;
+
+  engine.netQtyRaw = result.position.netQtyRaw;
+  engine.entryPriceE8 = result.position.entryPriceE8;
+  engine.grossRealizedPnlE8 = trading_core::saturatingAddI64(
+      engine.grossRealizedPnlE8, result.grossRealizedPnlE8);
+  engine.feesPaidE8 =
+      trading_core::saturatingAddI64(engine.feesPaidE8, result.feeE8);
+  engine.netRealizedPnlE8 = trading_core::saturatingAddI64(
+      engine.netRealizedPnlE8, result.netRealizedPnlE8);
+  engine.walletBalanceE8 = trading_core::saturatingAddI64(
+      engine.walletBalanceE8, result.netRealizedPnlE8);
   engine.position.netQty.raw = engine.netQtyRaw;
   engine.position.entryPrice.raw = engine.entryPriceE8;
   engine.position.lastPrice.raw = priceE8;
@@ -68,21 +52,21 @@ void updatePosition(EngineState& engine, Side side, std::int64_t priceE8, std::i
   engine.position.lastUpdateUtc.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   engine.position.valid = true;
   bumpContextRevision(engine);
+  return result;
 }
 
 std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
-  if (engine.netQtyRaw == 0 || engine.entryPriceE8 <= 0) return 0;
-  const bool longPosition = engine.netQtyRaw > 0;
-  const std::int64_t qty = longPosition ? engine.netQtyRaw : -engine.netQtyRaw;
   const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
-  const std::int64_t bid = top.bid.px.raw;
-  const std::int64_t ask = top.ask.px.raw;
-  if (longPosition) return bid > 0 ? mulPriceQtyE8(bid - engine.entryPriceE8, qty) : 0;
-  return ask > 0 ? mulPriceQtyE8(engine.entryPriceE8 - ask, qty) : 0;
+  return trading_core::markToMarketPnlE8(
+      trading_core::FillPositionAccountingState{engine.netQtyRaw,
+                                                 engine.entryPriceE8},
+      top.bid.px.raw,
+      top.ask.px.raw);
 }
 
 std::int64_t equityE8(const EngineState& engine) noexcept {
-  return engine.walletBalanceE8 + unrealizedPnlE8(engine);
+  return trading_core::saturatingAddI64(engine.walletBalanceE8,
+                                        unrealizedPnlE8(engine));
 }
 
 void appendEquityPoint(EngineState& engine, std::int64_t tsNs) {
@@ -101,8 +85,10 @@ void appendEquityPoint(EngineState& engine, std::int64_t tsNs) {
 
 void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t reason) {
   const std::int64_t unrealized = unrealizedPnlE8(engine);
-  const std::int64_t grossTotal = engine.grossRealizedPnlE8 + unrealized;
-  const std::int64_t netTotal = engine.netRealizedPnlE8 + unrealized;
+  const std::int64_t grossTotal = trading_core::saturatingAddI64(
+      engine.grossRealizedPnlE8, unrealized);
+  const std::int64_t netTotal = trading_core::saturatingAddI64(
+      engine.netRealizedPnlE8, unrealized);
   const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
   engine.riskSnapshots.push_back(JsonRiskSnapshot{tsNs,
                                                   engine.grossRealizedPnlE8,
@@ -127,7 +113,16 @@ bool appendRiskSnapshotIfDue(EngineState& engine, std::int64_t tsNs) {
   if (engine.netQtyRaw == 0) return false;
   const std::int64_t unrealized = unrealizedPnlE8(engine);
   if (engine.hasRiskSnapshot && unrealized == engine.lastRiskSnapshotUnrealizedPnlE8) return false;
-  if (engine.hasRiskSnapshot && tsNs < engine.lastRiskSnapshotTsNs + kRiskSnapshotIntervalNs) return false;
+  if (engine.hasRiskSnapshot) {
+    if (engine.lastRiskSnapshotTsNs >
+        std::numeric_limits<std::int64_t>::max() -
+            kRiskSnapshotIntervalNs) {
+      return false;
+    }
+    const std::int64_t deadline = trading_core::saturatingAddI64(
+        engine.lastRiskSnapshotTsNs, kRiskSnapshotIntervalNs);
+    if (tsNs < deadline) return false;
+  }
   appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonInterval);
   return true;
 }
@@ -150,7 +145,8 @@ void hardLiquidate(EngineState& engine, std::int64_t tsNs, std::int64_t breached
   engine.walletBalanceE8 = 0;
   if (engine.initialBalanceE8 > 0) {
     engine.netRealizedPnlE8 = -engine.initialBalanceE8;
-    engine.grossRealizedPnlE8 = engine.netRealizedPnlE8 + engine.feesPaidE8;
+    engine.grossRealizedPnlE8 = trading_core::saturatingAddI64(
+        engine.netRealizedPnlE8, engine.feesPaidE8);
   }
   engine.position.valid = true;
   engine.position.netQty.raw = 0;

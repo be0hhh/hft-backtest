@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/replay/EventRows.hpp"
+#include "hftrec/corpus_contract/EventRows.hpp"
 
 #include <cstdint>
 

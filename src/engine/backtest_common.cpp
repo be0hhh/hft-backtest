@@ -157,8 +157,8 @@ cxet::composite::OpenInterestRuntimeV1 toRuntime(const OpenInterestRow& row) noe
   return out;
 }
 
-hft_trader::core::StrategyCandleSnapshot toRuntime(const CandleRow& row) noexcept {
-  hft_trader::core::StrategyCandleSnapshot out{};
+trading_core::StrategyCandleSnapshot toRuntime(const CandleRow& row) noexcept {
+  trading_core::StrategyCandleSnapshot out{};
   out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
   out.tier.raw = static_cast<std::uint64_t>(row.tier > 0 ? row.tier : 0);
   out.high.raw = row.highE8;
@@ -168,10 +168,10 @@ hft_trader::core::StrategyCandleSnapshot toRuntime(const CandleRow& row) noexcep
   out.close.raw = row.hasOhlc ? row.closeE8 : fallbackClose;
   out.volume.raw = row.volumeE8;
   out.quoteAmount.raw = row.quoteAmountE8;
-  out.hasOhlc = row.hasOhlc ? hft_trader::core::kAlgoFlagTrue : hft_trader::core::kAlgoFlagFalse;
+  out.hasOhlc = row.hasOhlc ? trading_core::kAlgoFlagTrue : trading_core::kAlgoFlagFalse;
   out.valid = row.tsNs > 0 && out.close.raw > 0 && out.high.raw >= out.low.raw
-      ? hft_trader::core::kAlgoFlagTrue
-      : hft_trader::core::kAlgoFlagFalse;
+      ? trading_core::kAlgoFlagTrue
+      : trading_core::kAlgoFlagFalse;
   return out;
 }
 

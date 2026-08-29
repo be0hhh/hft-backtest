@@ -30,12 +30,12 @@ class ExecutionDepthProvider {
 
   [[nodiscard]] ExecutionDepthOpenStatus open(const std::filesystem::path& sessionPath,
                                               const Symbol& symbol,
-                                              const hft_trader::core::LocalOrderBookConfig& config,
-                                              const hft_trader::core::LocalOrderBookState& initialBook,
+                                              const trading_core::LocalOrderBookConfig& config,
+                                              const trading_core::LocalOrderBookState& initialBook,
                                               std::shared_ptr<ExecutionDepthCheckpointCache> cache = {}) noexcept;
   [[nodiscard]] bool advanceTo(std::int64_t tsNs) noexcept;
 
-  [[nodiscard]] const hft_trader::core::LocalOrderBookState& book() const noexcept { return book_; }
+  [[nodiscard]] const trading_core::LocalOrderBookState& book() const noexcept { return book_; }
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::uint64_t rowsRead() const noexcept { return rowsRead_; }
   [[nodiscard]] std::uint64_t readNs() const noexcept { return readNs_; }
@@ -44,9 +44,9 @@ class ExecutionDepthProvider {
 
  private:
   ExecutionDepthProviderImpl* impl_{nullptr};
-  hft_trader::core::LocalOrderBookState book_{};
+  trading_core::LocalOrderBookState book_{};
   Symbol symbol_{};
-  hft_trader::core::LocalOrderBookConfig config_{};
+  trading_core::LocalOrderBookConfig config_{};
   std::uint64_t rowsRead_{0};
   std::uint64_t readNs_{0};
   bool available_{false};

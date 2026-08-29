@@ -1,6 +1,6 @@
 #include "input/binary_corpus_loader.hpp"
 
-#include "core/corpus/BinaryMarketCorpusReader.hpp"
+#include "hftrec/corpus_contract/BinaryMarketCorpusReader.hpp"
 #include "primitives/buf/CanonConstants.hpp"
 
 #include <algorithm>

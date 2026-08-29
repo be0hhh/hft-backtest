@@ -69,14 +69,14 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
   return venueTsNs > order.activeTsNs;
 }
 
-[[nodiscard]] hft_trader::core::BookSide passiveBookSide(const OpenOrder& order) noexcept {
-  return order.state.side.raw == Side::Buy().raw ? hft_trader::core::BookSide::Bid
-                                                 : hft_trader::core::BookSide::Ask;
+[[nodiscard]] trading_core::BookSide passiveBookSide(const OpenOrder& order) noexcept {
+  return order.state.side.raw == Side::Buy().raw ? trading_core::BookSide::Bid
+                                                 : trading_core::BookSide::Ask;
 }
 
-[[nodiscard]] hft_trader::core::BookSide aggressiveBookSide(const OpenOrder& order) noexcept {
-  return order.state.side.raw == Side::Buy().raw ? hft_trader::core::BookSide::Ask
-                                                 : hft_trader::core::BookSide::Bid;
+[[nodiscard]] trading_core::BookSide aggressiveBookSide(const OpenOrder& order) noexcept {
+  return order.state.side.raw == Side::Buy().raw ? trading_core::BookSide::Ask
+                                                 : trading_core::BookSide::Bid;
 }
 
 [[nodiscard]] bool levelExecutableByLimit(const OpenOrder& order, std::int64_t levelPriceE8) noexcept {
@@ -95,14 +95,14 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
 
 [[nodiscard]] std::int64_t visibleQtyAtPassivePrice(const EngineState& engine,
                                                     const OpenOrder& order,
-                                                    const hft_trader::core::LocalOrderBookState& book) noexcept {
+                                                    const trading_core::LocalOrderBookState& book) noexcept {
   (void)engine;
   if (order.state.price.raw <= 0) return 0;
-  const hft_trader::core::LocalOrderBookView view = hft_trader::core::orderBook(book);
-  const hft_trader::core::LocalOrderBookSideState* side = view.side(passiveBookSide(order));
+  const trading_core::LocalOrderBookView view = trading_core::orderBook(book);
+  const trading_core::LocalOrderBookSideState* side = view.side(passiveBookSide(order));
   if (side == nullptr) return 0;
   for (std::uint32_t i = 0u; i < side->activeCount.raw; ++i) {
-    const hft_trader::core::LocalOrderBookLevel& level = side->levels[i];
+    const trading_core::LocalOrderBookLevel& level = side->levels[i];
     if (level.px.raw == order.state.price.raw) return level.qty.raw > 0 ? level.qty.raw : 0;
   }
   return 0;
@@ -200,7 +200,7 @@ void initializePassiveQueue(OpenOrder& order, const EngineState& engine) noexcep
 
 void initializePassiveQueue(OpenOrder& order,
                             const EngineState& engine,
-                            const hft_trader::core::LocalOrderBookState& book) noexcept {
+                            const trading_core::LocalOrderBookState& book) noexcept {
   if (!order.state.valid || !order.active || order.state.orderType != canon::OrderType::Limit) return;
   if (order.queueInitialized) return;
   order.queueAheadQtyRaw = visibleQtyAtPassivePrice(engine, order, book);
@@ -215,7 +215,7 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
 
 bool buildAggressiveBookFillPlan(const EngineState& engine,
                                  const OpenOrder& order,
-                                 const hft_trader::core::LocalOrderBookState& book,
+                                 const trading_core::LocalOrderBookState& book,
                                  AggressiveFillPlan& out) noexcept {
   resetAggressivePlan(out);
   if (!order.state.valid || !order.active) return false;
@@ -230,8 +230,8 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
   if (!marketOrder && !limitOrder) return false;
   if (limitOrder && order.lastAggressiveBookTsNs != 0) return false;
 
-  const hft_trader::core::LocalOrderBookView view = hft_trader::core::orderBook(book);
-  const hft_trader::core::LocalOrderBookSideState* side = view.side(aggressiveBookSide(order));
+  const trading_core::LocalOrderBookView view = trading_core::orderBook(book);
+  const trading_core::LocalOrderBookSideState* side = view.side(aggressiveBookSide(order));
   if (side == nullptr) return false;
   out.bookTsNs = book.ts.raw <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
                      ? static_cast<std::int64_t>(book.ts.raw)
@@ -240,7 +240,7 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
 
   std::int64_t visibleExecutableQty = 0;
   for (std::uint32_t i = 0u; i < side->activeCount.raw; ++i) {
-    const hft_trader::core::LocalOrderBookLevel& level = side->levels[i];
+    const trading_core::LocalOrderBookLevel& level = side->levels[i];
     if (level.px.raw <= 0 || level.qty.raw <= 0) continue;
     if (!levelExecutableByLimit(order, level.px.raw)) break;
     if (visibleExecutableQty > std::numeric_limits<std::int64_t>::max() - level.qty.raw) {
@@ -259,7 +259,7 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
   __int128 notionalSum = 0;
   std::int64_t remaining = out.requestedQtyE8;
   for (std::uint32_t i = 0u; i < side->activeCount.raw && remaining > 0 && out.count < out.chunks.size(); ++i) {
-    const hft_trader::core::LocalOrderBookLevel& level = side->levels[i];
+    const trading_core::LocalOrderBookLevel& level = side->levels[i];
     if (level.px.raw <= 0 || level.qty.raw <= 0) continue;
     if (!levelExecutableByLimit(order, level.px.raw)) break;
     const std::int64_t fillQty = level.qty.raw < remaining ? level.qty.raw : remaining;

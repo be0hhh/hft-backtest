@@ -10,10 +10,10 @@ namespace {
 
 bool buildTradeWarmupRows(const detail::SessionData& session,
                           std::vector<cxet::composite::TradeRuntimeV1>& out,
-                          hft_trader::runtime::StrategyTradeHistorySeedStats& stats) {
+                          trading_core::StrategyTradeHistorySeedStats& stats) {
   out.clear();
   out.reserve(session.tradeWarmup.size());
-  stats = hft_trader::runtime::StrategyTradeHistorySeedStats{};
+  stats = trading_core::StrategyTradeHistorySeedStats{};
   stats.rowsFetched = static_cast<std::uint64_t>(session.tradeHistoryRows > 0 ? session.tradeHistoryRows : static_cast<std::int64_t>(session.tradeWarmup.size()));
   stats.rowsProvided = static_cast<std::uint64_t>(session.tradeWarmup.size());
   stats.firstTs = timeNsFromI64(session.tradeWarmup.empty() ? 0 : session.tradeWarmup.front().tsNs);
@@ -24,14 +24,14 @@ bool buildTradeWarmupRows(const detail::SessionData& session,
 
 }  // namespace
 
-bool seedTradeWarmupFromSession(const hft_trader::runtime::StrategyDescriptor& descriptor,
+bool seedTradeWarmupFromSession(const trading_core::StrategyDescriptor& descriptor,
                                 void* state,
-                                const hft_trader::runtime::StrategyParamStorage& params,
+                                const trading_core::StrategyParamStorage& params,
                                 const detail::SessionData& session,
                                 std::string& error) {
   if (!descriptor.resolveTradeHistory || !descriptor.seedTrades) return true;
   const TimeNs seedEnd = timeNsFromI64(session.tradeHistoryRequestedEndNs > 0 ? session.tradeHistoryRequestedEndNs : session.firstTsNs);
-  hft_trader::runtime::StrategyTradeHistoryRequest request{};
+  trading_core::StrategyTradeHistoryRequest request{};
   if (!descriptor.resolveTradeHistory(params, seedEnd, request)) {
     error = "strategy trade history request failed";
     return false;
@@ -48,19 +48,19 @@ bool seedTradeWarmupFromSession(const hft_trader::runtime::StrategyDescriptor& d
     return false;
   }
   std::vector<cxet::composite::TradeRuntimeV1> rows{};
-  hft_trader::runtime::StrategyTradeHistorySeedStats stats{};
+  trading_core::StrategyTradeHistorySeedStats stats{};
   if (!buildTradeWarmupRows(session, rows, stats)) {
     if (!request.required) return true;
     error = "strategy requires trade warmup but warmup trades are empty";
     return false;
   }
-  const hft_trader::runtime::StrategySeedTradesStatus seedStatus = descriptor.seedTrades(state, rows.data(), rows.size(), stats);
-  if (seedStatus == hft_trader::runtime::StrategySeedTradesStatus::BadData) {
+  const trading_core::StrategySeedTradesStatus seedStatus = descriptor.seedTrades(state, rows.data(), rows.size(), stats);
+  if (seedStatus == trading_core::StrategySeedTradesStatus::BadData) {
     if (!request.required) return true;
     error = "strategy seedTrades rejected warmup data; calculated warmup metrics are not ready";
     return false;
   }
-  if (seedStatus == hft_trader::runtime::StrategySeedTradesStatus::WarmupNotReady && request.required) {
+  if (seedStatus == trading_core::StrategySeedTradesStatus::WarmupNotReady && request.required) {
     error = "strategy seedTrades did not produce ready warmup metrics";
     return false;
   }

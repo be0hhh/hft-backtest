@@ -1,6 +1,6 @@
 #pragma once
 
-#include "hft_trader/runtime/runner/StrategyDescriptor.hpp"
+#include "trading_core/api/descriptor/StrategyDescriptor.hpp"
 
 #include <cstdint>
 #include <string>
@@ -9,7 +9,7 @@
 namespace hft_backtest {
 
 [[nodiscard]] inline std::string formatStrategyRunCycleError(
-    const hft_trader::runtime::StrategyDescriptor& descriptor,
+    const trading_core::StrategyDescriptor& descriptor,
     const void* state,
     std::string_view phase,
     std::int64_t tsNs,
@@ -20,10 +20,10 @@ namespace hft_backtest {
   error += ": strategy=";
   error += descriptor.name ? descriptor.name : "unknown";
   if (descriptor.captureState) {
-    hft_trader::runtime::StrategyStateSnapshot snapshot{};
+    trading_core::StrategyStateSnapshot snapshot{};
     descriptor.captureState(state, snapshot);
     error += " reject_reason=";
-    error += hft_trader::runtime::strategyRejectReasonName(&descriptor, snapshot.rejectReasonRaw);
+    error += trading_core::strategyRejectReasonName(&descriptor, snapshot.rejectReasonRaw);
     error += " reject_reason_raw=";
     error += std::to_string(static_cast<unsigned>(snapshot.rejectReasonRaw));
   }

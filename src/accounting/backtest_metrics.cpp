@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "trading_core/core/math/NotionalQty.hpp"
+
 namespace hft_backtest::detail {
 namespace {
 
@@ -18,7 +20,8 @@ BacktestExcursionMetrics calculateFromPnlSeries(const std::vector<std::int64_t>&
       continue;
     }
     if (pnl > peak) peak = pnl;
-    const std::int64_t drawdown = peak > pnl ? peak - pnl : 0;
+    const std::int64_t drawdown =
+        peak > pnl ? trading_core::saturatingSubI64(peak, pnl) : 0;
     if (drawdown > out.maxDrawdownE8) out.maxDrawdownE8 = drawdown;
     if (pnl > out.mfeE8) out.mfeE8 = pnl;
     if (pnl < out.maeE8) out.maeE8 = pnl;
@@ -49,7 +52,7 @@ std::vector<std::int64_t> buildPortfolioPnlSeries(const std::vector<EngineState>
         current[leg] = rows[indexes[leg]].netTotalPnlE8;
         ++indexes[leg];
       }
-      total += current[leg];
+      total = trading_core::saturatingAddI64(total, current[leg]);
     }
     out.push_back(total);
   }
@@ -71,7 +74,8 @@ BacktestExcursionMetrics calculateExcursionMetrics(const EngineState& engine) no
       return;
     }
     if (pnl > peak) peak = pnl;
-    const std::int64_t drawdown = peak > pnl ? peak - pnl : 0;
+    const std::int64_t drawdown =
+        peak > pnl ? trading_core::saturatingSubI64(peak, pnl) : 0;
     if (drawdown > out.maxDrawdownE8) out.maxDrawdownE8 = drawdown;
     if (pnl > out.mfeE8) out.mfeE8 = pnl;
     if (pnl < out.maeE8) out.maeE8 = pnl;

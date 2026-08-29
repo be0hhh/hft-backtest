@@ -2,14 +2,15 @@
 
 #include "hft_backtest/backtest.hpp"
 
+#include "config/backtest_strategy_config.hpp"
 #include "engine/backtest_engine.hpp"
 #include "input/session_loader.hpp"
+#include "strategy/backtest_strategy_input_freshness.hpp"
 
-#include "hft_trader/core/control/ControlState.hpp"
-#include "hft_trader/core/market/LocalOrderBook.hpp"
-#include "hft_trader/core/strategy/StrategyContract.hpp"
-#include "hft_trader/runtime/config/RuntimeConfig.hpp"
-#include "hft_trader/runtime/runner/StrategyDescriptor.hpp"
+#include "trading_core/core/control/ControlState.hpp"
+#include "trading_core/core/market/LocalOrderBook.hpp"
+#include "trading_core/core/strategy/StrategyContract.hpp"
+#include "trading_core/api/descriptor/StrategyDescriptor.hpp"
 
 #include <array>
 #include <cstddef>
@@ -18,7 +19,7 @@
 
 namespace hft_backtest {
 
-using StrategyInstrumentSpec = hft_trader::runtime::StrategyInstrumentSpec;
+using StrategyInstrumentSpec = trading_core::StrategyInstrumentSpec;
 
 enum class RunUntilBoundary : std::uint8_t {
   Inclusive,
@@ -26,29 +27,41 @@ enum class RunUntilBoundary : std::uint8_t {
 };
 
 struct SingleLegCycleScratch {
-  std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
-  std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
-  std::array<hft_trader::core::StrategyCommandIntent, detail::kIntentCapacity> commandBuf{};
-  std::array<hft_trader::core::StrategyTransactionIntent, detail::kIntentCapacity> transactionBuf{};
-  std::array<hft_trader::core::StrategyOrderState, detail::kMaxOrderStates> orderStorage{};
-  std::array<hft_trader::core::StrategyOrderPathWarmupView, 1> warmupViews{};
+  std::array<trading_core::OrderIntent, detail::kIntentCapacity> orderBuf{};
+  std::array<trading_core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
+  std::array<trading_core::StrategyDesiredOrderSlot,
+             trading_core::kStrategyRuntimeMaxDesiredOrders> desiredOrderBuf{};
+  std::array<trading_core::StrategyCommandIntent,
+             trading_core::kStrategyRuntimeMaxCommands +
+                 2u * trading_core::kStrategyRuntimeMaxDesiredOrders>
+      commandBuf{};
+  std::array<trading_core::StrategyTransactionIntent,
+             trading_core::kStrategyRuntimeMaxTransactions> transactionBuf{};
+  std::array<trading_core::StrategyOrderState, detail::kMaxOrderStates> orderStorage{};
+  std::array<trading_core::StrategyOrderPathWarmupView, 1> warmupViews{};
 };
 
 struct MultiLegCycleScratch {
-  std::array<hft_trader::core::OrderIntent, detail::kIntentCapacity> orderBuf{};
-  std::array<hft_trader::core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
-  std::array<hft_trader::core::StrategyCommandIntent, detail::kIntentCapacity> commandBuf{};
-  std::array<hft_trader::core::StrategyTransactionIntent, detail::kIntentCapacity> transactionBuf{};
-  std::array<hft_trader::core::StrategyMarketSnapshot, hft_trader::core::kStrategyRuntimeMaxLegs> snapshots{};
-  std::array<hft_trader::core::StrategyCandleSnapshot, hft_trader::core::kStrategyRuntimeMaxLegs> candles{};
-  std::array<std::array<hft_trader::core::StrategyOrderState, detail::kMaxOrderStates>, hft_trader::core::kStrategyRuntimeMaxLegs> orderStorage{};
-  std::array<hft_trader::core::StrategyOrderStateView, hft_trader::core::kStrategyRuntimeMaxLegs> orderViews{};
-  std::array<hft_trader::core::StrategyOrderPathWarmupView, hft_trader::core::kStrategyRuntimeMaxLegs> warmupViews{};
-  std::array<hft_trader::core::StrategyPositionState, hft_trader::core::kStrategyRuntimeMaxLegs> positions{};
-  std::array<hft_trader::core::StrategyAccountState, hft_trader::core::kStrategyRuntimeMaxLegs> accounts{};
-  std::array<StrategyInstrumentSpec, hft_trader::core::kStrategyRuntimeMaxLegs> instruments{};
-  std::array<canon::MarketType, hft_trader::core::kStrategyRuntimeMaxLegs> markets{};
-  std::array<std::uint64_t, hft_trader::core::kStrategyRuntimeMaxLegs> revisions{};
+  std::array<trading_core::OrderIntent, detail::kIntentCapacity> orderBuf{};
+  std::array<trading_core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
+  std::array<trading_core::StrategyDesiredOrderSlot,
+             trading_core::kStrategyRuntimeMaxDesiredOrders> desiredOrderBuf{};
+  std::array<trading_core::StrategyCommandIntent,
+             trading_core::kStrategyRuntimeMaxCommands +
+                 2u * trading_core::kStrategyRuntimeMaxDesiredOrders>
+      commandBuf{};
+  std::array<trading_core::StrategyTransactionIntent,
+             trading_core::kStrategyRuntimeMaxTransactions> transactionBuf{};
+  std::array<trading_core::StrategyMarketSnapshot, trading_core::kStrategyRuntimeMaxLegs> snapshots{};
+  std::array<trading_core::StrategyCandleSnapshot, trading_core::kStrategyRuntimeMaxLegs> candles{};
+  std::array<std::array<trading_core::StrategyOrderState, detail::kMaxOrderStates>, trading_core::kStrategyRuntimeMaxLegs> orderStorage{};
+  std::array<trading_core::StrategyOrderStateView, trading_core::kStrategyRuntimeMaxLegs> orderViews{};
+  std::array<trading_core::StrategyOrderPathWarmupView, trading_core::kStrategyRuntimeMaxLegs> warmupViews{};
+  std::array<trading_core::StrategyPositionState, trading_core::kStrategyRuntimeMaxLegs> positions{};
+  std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs> accounts{};
+  std::array<StrategyInstrumentSpec, trading_core::kStrategyRuntimeMaxLegs> instruments{};
+  std::array<canon::MarketType, trading_core::kStrategyRuntimeMaxLegs> markets{};
+  std::array<std::uint64_t, trading_core::kStrategyRuntimeMaxLegs> revisions{};
   std::size_t legCount{0u};
 
   void reset(std::size_t count) noexcept;
@@ -59,16 +72,16 @@ struct MultiLegCycleScratch {
                     const std::vector<StrategyInstrumentSpec>& legInstruments) noexcept;
 };
 
-[[nodiscard]] hft_trader::core::StrategyAccountState accountStateFromEngine(
+[[nodiscard]] trading_core::StrategyAccountState accountStateFromEngine(
     const detail::EngineState& engine) noexcept;
 [[nodiscard]] std::size_t boundedRiskLegCount(std::size_t count) noexcept;
 void refreshRiskAccountsFromEngines(
     const std::vector<detail::EngineState>& engines,
-    std::array<hft_trader::core::StrategyAccountState, hft_trader::core::kStrategyRuntimeMaxLegs>& out) noexcept;
+    std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs>& out) noexcept;
 void resolveRiskVenuesForSessions(
-    const hft_trader::runtime::HftRuntimeConfig& cfg,
+    const BacktestStrategyConfig& cfg,
     const std::vector<detail::SessionData>& sessions,
-    std::array<const hft_trader::runtime::VenueRuntimeConfig*, hft_trader::core::kStrategyRuntimeMaxLegs>& out) noexcept;
+    std::array<const BacktestStrategyVenueConfig*, trading_core::kStrategyRuntimeMaxLegs>& out) noexcept;
 [[nodiscard]] bool forceCloseForTraderRisk(detail::EngineState& engine, std::int64_t tsNs);
 [[nodiscard]] std::int64_t portfolioEquityE8(const std::vector<detail::EngineState>& engines,
                                              std::int64_t initialBalanceE8) noexcept;
@@ -93,63 +106,69 @@ void applyMarketEventToSnapshots(std::vector<detail::EngineState>& engines,
                                  const std::vector<StrategyInstrumentSpec>& instruments,
                                  bool strategyVisible);
 
-[[nodiscard]] bool runCycle(const hft_trader::runtime::StrategyDescriptor& descriptor,
+[[nodiscard]] bool runCycle(const trading_core::StrategyDescriptor& descriptor,
+                            const BacktestStrategyInputPolicy& inputPolicy,
                             void* state,
                             detail::EngineState& engine,
                             const StrategyInstrumentSpec& instrument,
                             SingleLegCycleScratch& scratch,
-                            const hft_trader::core::SymbolShardConfig& shard,
-                            const hft_trader::core::ShardControlState& control,
+                            const trading_core::SymbolShardConfig& shard,
+                            const trading_core::ShardControlState& control,
                             std::int64_t tsNs,
                             const BacktestRunRequest& request,
                             const cxet::composite::UserDataEvent* userEvent);
-[[nodiscard]] bool runCycleMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
+[[nodiscard]] bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
+                                 const BacktestStrategyInputPolicy& inputPolicy,
                                  void* state,
                                  std::vector<detail::EngineState>& engines,
                                  const std::vector<StrategyInstrumentSpec>& legInstruments,
                                  MultiLegCycleScratch& scratch,
-                                 const hft_trader::core::SymbolShardConfig& shard,
-                                 const hft_trader::core::ShardControlState& control,
+                                 const trading_core::SymbolShardConfig& shard,
+                                 const trading_core::ShardControlState& control,
                                  std::uint32_t eventLegIndex,
                                  std::int64_t tsNs,
                                  const BacktestRunRequest& request,
                                  const cxet::composite::UserDataEvent* userEvent);
-[[nodiscard]] bool runUntil(const hft_trader::runtime::StrategyDescriptor& descriptor,
+[[nodiscard]] bool runUntil(const trading_core::StrategyDescriptor& descriptor,
+                            const BacktestStrategyInputPolicy& inputPolicy,
                             void* state,
                             detail::EngineState& engine,
                             const StrategyInstrumentSpec& instrument,
                             SingleLegCycleScratch& scratch,
-                            const hft_trader::core::SymbolShardConfig& shard,
-                            const hft_trader::core::ShardControlState& control,
+                            const trading_core::SymbolShardConfig& shard,
+                            const trading_core::ShardControlState& control,
                             std::int64_t untilTs,
                             const BacktestRunRequest& request,
                             RunUntilBoundary boundary = RunUntilBoundary::Inclusive);
-[[nodiscard]] bool runUntilMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
+[[nodiscard]] bool runUntilMulti(const trading_core::StrategyDescriptor& descriptor,
+                                 const BacktestStrategyInputPolicy& inputPolicy,
                                  void* state,
                                  std::vector<detail::EngineState>& engines,
                                  const std::vector<StrategyInstrumentSpec>& legInstruments,
                                  MultiLegCycleScratch& scratch,
-                                 const hft_trader::core::SymbolShardConfig& shard,
-                                 const hft_trader::core::ShardControlState& control,
+                                 const trading_core::SymbolShardConfig& shard,
+                                 const trading_core::ShardControlState& control,
                                  std::int64_t untilTs,
                                  const BacktestRunRequest& request,
                                  RunUntilBoundary boundary = RunUntilBoundary::Inclusive);
-[[nodiscard]] bool settleAfterReplay(const hft_trader::runtime::StrategyDescriptor& descriptor,
+[[nodiscard]] bool settleAfterReplay(const trading_core::StrategyDescriptor& descriptor,
+                                     const BacktestStrategyInputPolicy& inputPolicy,
                                      void* state,
                                      detail::EngineState& engine,
                                      const StrategyInstrumentSpec& instrument,
                                      SingleLegCycleScratch& scratch,
-                                     const hft_trader::core::SymbolShardConfig& shard,
-                                     const hft_trader::core::ShardControlState& control,
+                                     const trading_core::SymbolShardConfig& shard,
+                                     const trading_core::ShardControlState& control,
                                      std::int64_t lastTsNs,
                                      const BacktestRunRequest& request);
-[[nodiscard]] bool settleAfterReplayMulti(const hft_trader::runtime::StrategyDescriptor& descriptor,
+[[nodiscard]] bool settleAfterReplayMulti(const trading_core::StrategyDescriptor& descriptor,
+                                          const BacktestStrategyInputPolicy& inputPolicy,
                                           void* state,
                                           std::vector<detail::EngineState>& engines,
                                           const std::vector<StrategyInstrumentSpec>& legInstruments,
                                           MultiLegCycleScratch& scratch,
-                                          const hft_trader::core::SymbolShardConfig& shard,
-                                          const hft_trader::core::ShardControlState& control,
+                                          const trading_core::SymbolShardConfig& shard,
+                                          const trading_core::ShardControlState& control,
                                           std::int64_t lastTsNs,
                                           const BacktestRunRequest& request);
 

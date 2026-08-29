@@ -7,11 +7,12 @@
 #include "strategy/backtest_strategy_runtime.hpp"
 #include "../support/CapturedSessionFixture.hpp"
 
-#include "hft_trader/api/user/UserDataTools.hpp"
-#include "hft_trader/core/rate_limit/RateLimit.hpp"
-#include "hft_trader/core/rate_limit/RateLimitPresets.hpp"
-#include "hft_trader/runtime/GeneratedStrategyRegistry.hpp"
-#include "hft_trader/runtime/runner/StrategyMarketDataRuntime.hpp"
+#include "trading_core/api/user/UserDataTools.hpp"
+#include "trading_core/core/rate_limit/RateLimit.hpp"
+#include "trading_core/core/rate_limit/RateLimitPresets.hpp"
+#include "trading_core/strategy/GeneratedStrategyRegistry.hpp"
+#include "trading_core/strategy/StrategyInputFreshness.hpp"
+#include "trading_core/strategy/StrategyMarketData.hpp"
 
 #include <array>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -53,8 +55,8 @@ Amount amount(std::int64_t raw) noexcept {
   return out;
 }
 
-hft_trader::core::OrderIntent orderIntent(std::uint64_t orderId, Side side, std::int64_t px) noexcept {
-  hft_trader::core::OrderIntent out{};
+trading_core::OrderIntent orderIntent(std::uint64_t orderId, Side side, std::int64_t px) noexcept {
+  trading_core::OrderIntent out{};
   out.clientIntentId = id(orderId);
   out.side = side;
   out.orderType = canon::OrderType::Limit;
@@ -63,36 +65,36 @@ hft_trader::core::OrderIntent orderIntent(std::uint64_t orderId, Side side, std:
   return out;
 }
 
-hft_trader::core::OrderIntent postOnlyOrderIntent(std::uint64_t orderId, Side side, std::int64_t px) noexcept {
-  hft_trader::core::OrderIntent out = orderIntent(orderId, side, px);
-  out.limitTimeInForcePolicy = hft_trader::core::LimitTimeInForcePolicy::PostOnlyPrefer;
+trading_core::OrderIntent postOnlyOrderIntent(std::uint64_t orderId, Side side, std::int64_t px) noexcept {
+  trading_core::OrderIntent out = orderIntent(orderId, side, px);
+  out.limitTimeInForcePolicy = trading_core::LimitTimeInForcePolicy::PostOnlyPrefer;
   return out;
 }
 
-hft_trader::core::OrderIntent strictPostOnlyOrderIntent(std::uint64_t orderId, Side side, std::int64_t px) noexcept {
-  hft_trader::core::OrderIntent out = orderIntent(orderId, side, px);
-  out.limitTimeInForcePolicy = hft_trader::core::LimitTimeInForcePolicy::PostOnlyStrict;
+trading_core::OrderIntent strictPostOnlyOrderIntent(std::uint64_t orderId, Side side, std::int64_t px) noexcept {
+  trading_core::OrderIntent out = orderIntent(orderId, side, px);
+  out.limitTimeInForcePolicy = trading_core::LimitTimeInForcePolicy::PostOnlyStrict;
   return out;
 }
 
-hft_trader::core::OrderIntent reduceMarketIntent(std::uint64_t orderId, Side side) noexcept {
-  hft_trader::core::OrderIntent out{};
+trading_core::OrderIntent reduceMarketIntent(std::uint64_t orderId, Side side) noexcept {
+  trading_core::OrderIntent out{};
   out.clientIntentId = id(orderId);
   out.side = side;
   out.orderType = canon::OrderType::Market;
   out.qty = amount(kQty1);
-  out.reduceOnly = true;
+  out.positionReduction = trading_core::PositionReductionIntent::Reduce;
   return out;
 }
 
-hft_trader::core::OrderIntent reduceMarketIntentQty(std::uint64_t orderId, Side side, std::int64_t qtyRaw) noexcept {
-  hft_trader::core::OrderIntent out = reduceMarketIntent(orderId, side);
+trading_core::OrderIntent reduceMarketIntentQty(std::uint64_t orderId, Side side, std::int64_t qtyRaw) noexcept {
+  trading_core::OrderIntent out = reduceMarketIntent(orderId, side);
   out.qty = amount(qtyRaw);
   return out;
 }
 
-hft_trader::core::OrderIntent marketIntent(std::uint64_t orderId, Side side) noexcept {
-  hft_trader::core::OrderIntent out{};
+trading_core::OrderIntent marketIntent(std::uint64_t orderId, Side side) noexcept {
+  trading_core::OrderIntent out{};
   out.clientIntentId = id(orderId);
   out.side = side;
   out.orderType = canon::OrderType::Market;
@@ -100,11 +102,11 @@ hft_trader::core::OrderIntent marketIntent(std::uint64_t orderId, Side side) noe
   return out;
 }
 
-hft_trader::core::OrderIntent stopMarketIntent(std::uint64_t orderId,
+trading_core::OrderIntent stopMarketIntent(std::uint64_t orderId,
                                                Side side,
                                                std::int64_t triggerPx,
                                                canon::OrderTriggerSource triggerSource = canon::OrderTriggerSource::Last) noexcept {
-  hft_trader::core::OrderIntent out{};
+  trading_core::OrderIntent out{};
   out.clientIntentId = id(orderId);
   out.side = side;
   out.orderType = canon::OrderType::Stop;
@@ -114,42 +116,11 @@ hft_trader::core::OrderIntent stopMarketIntent(std::uint64_t orderId,
   return out;
 }
 
-hft_trader::core::CancelIntent cancelIntent(std::uint64_t commandId, std::uint64_t targetId) noexcept {
-  hft_trader::core::CancelIntent out{};
+trading_core::CancelIntent cancelIntent(std::uint64_t commandId, std::uint64_t targetId) noexcept {
+  trading_core::CancelIntent out{};
   out.clientIntentId = id(commandId);
   out.targetClientIntentId = id(targetId);
   out.targetOrderType = canon::OrderType::Limit;
-  return out;
-}
-
-std::array<hft_trader::core::StrategyCommandIntent, 2> amendCommands(
-    hft_trader::core::StrategyCommandSequenceKind kind,
-    const hft_trader::core::OrderIntent& replacement,
-    const hft_trader::core::CancelIntent& cancel) noexcept {
-  std::array<hft_trader::core::StrategyCommandIntent, 2> out{};
-  const bool cancelThenNew =
-      kind == hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew;
-  hft_trader::core::StrategyCommandIntent& first = out[0];
-  hft_trader::core::StrategyCommandIntent& second = out[1];
-  first.kind = cancelThenNew
-      ? hft_trader::core::StrategyCommandIntentKind::Cancel
-      : hft_trader::core::StrategyCommandIntentKind::Order;
-  second.kind = cancelThenNew
-      ? hft_trader::core::StrategyCommandIntentKind::Order
-      : hft_trader::core::StrategyCommandIntentKind::Cancel;
-  if (cancelThenNew) {
-    first.cancel = cancel;
-    second.order = replacement;
-  } else {
-    first.order = replacement;
-    second.cancel = cancel;
-  }
-  first.sequenceKind = kind;
-  second.sequenceKind = kind;
-  first.sequenceStep = hft_trader::core::StrategyCommandSequenceStep::First;
-  second.sequenceStep = hft_trader::core::StrategyCommandSequenceStep::Second;
-  first.sequenceId = replacement.clientIntentId;
-  second.sequenceId = replacement.clientIntentId;
   return out;
 }
 
@@ -157,11 +128,37 @@ void setTop(EngineState& engine, std::int64_t bid, std::int64_t ask) noexcept {
   cxet::composite::BookTickerRuntimeV1 top{};
   top.bid.px.raw = bid;
   top.ask.px.raw = ask;
-  hft_trader::core::copyBookTickerSnapshot(engine.snapshot, top);
-  hft_trader::core::copyBookTickerSnapshot(engine.venueSnapshot, top);
-  engine.lastStrategySourceMarketDataTsNs = 1000u;
+  trading_core::copyBookTickerSnapshot(engine.snapshot, top);
+  trading_core::copyBookTickerSnapshot(engine.venueSnapshot, top);
+  setStrategySourceDeliveryTimestamp(
+      engine, cxet::api::market::PublicMarketDataStream::BookTicker,
+      1000ll);
   engine.snapshot.lastBookTicker.ts.raw = 1000u;
   engine.venueSnapshot.lastBookTicker.ts.raw = 1000u;
+}
+
+void markReconstructedBookTickerReady(EngineState& engine) noexcept {
+  cxet::composite::BboReconstructionView reconstructed{};
+  reconstructed.bookTicker = engine.snapshot.lastBookTicker;
+  reconstructed.source =
+      cxet::composite::kBboReconstructionSourceBookTicker;
+  reconstructed.valid = cxet::composite::kBboReconstructionFlagTrue;
+  reconstructed.bidPresent = cxet::composite::kBboReconstructionFlagTrue;
+  reconstructed.askPresent = cxet::composite::kBboReconstructionFlagTrue;
+  trading_core::copyReconstructedBboSnapshot(
+      engine.snapshot, reconstructed, TimeNs{1000u});
+  trading_core::copyReconstructedBboSnapshot(
+      engine.venueSnapshot, reconstructed, TimeNs{1000u});
+}
+
+BacktestStrategyInputPolicy bookTickerInputPolicy() noexcept {
+  BacktestStrategyInputPolicy out{};
+  out.requiredStreamReadyMask =
+      cxet::api::market::publicMarketDataStreamReadyBit(
+          cxet::api::market::PublicMarketDataStream::BookTicker);
+  out.maxAgeNs = trading_core::strategy::strategyInputFreshnessMaxAgeNs(
+      trading_core::strategy::kDefaultStrategyInputFreshnessMaxAgeMs);
+  return out;
 }
 
 void setTopWithQty(EngineState& engine,
@@ -193,16 +190,16 @@ void seedVenueBook(EngineState& engine,
   for (const auto& level : asks) {
     (void)cxet::composite::appendOrderBookLevel(snapshot, price(level.first), amount(level.second), Side::Sell());
   }
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = static_cast<std::uint32_t>(
       std::max(bids.size(), asks.size()));
   if (!engine.venueOrderBook.reserveLevelsPerSide(
           config.maxStoredLevelsPerSide) ||
-      !hft_trader::core::applySnapshot(
+      !trading_core::applySnapshot(
           engine.venueOrderBook, snapshot, engine.symbol, config)) {
     return;
   }
-  hft_trader::core::bindOrderBookSnapshot(engine.venueSnapshot, engine.venueOrderBook);
+  trading_core::bindOrderBookSnapshot(engine.venueSnapshot, engine.venueOrderBook);
   engine.venueOrderBookExecutionEnabled = true;
   if (!bids.size() || !asks.size()) return;
   setTop(engine, bids.begin()->first, asks.begin()->first);
@@ -219,11 +216,11 @@ bool testBacktestCanonicalizesAsterSessionExchange() {
                 "Aster recorder session exchange is recognized by backtest");
 }
 
-const hft_trader::core::RateLimitBucketConfig* findRateLimitBucket(
+const trading_core::RateLimitBucketConfig* findRateLimitBucket(
     const BacktestRateLimitSchedule& schedule,
-    hft_trader::core::RateLimitBucketKind kind,
+    trading_core::RateLimitBucketKind kind,
     std::uint64_t intervalNs) noexcept {
-  for (const hft_trader::core::RateLimitBucketConfig& bucket : schedule.buckets) {
+  for (const trading_core::RateLimitBucketConfig& bucket : schedule.buckets) {
     if (bucket.enabled && bucket.kind == kind && bucket.intervalNs == intervalNs) return &bucket;
   }
   return nullptr;
@@ -232,10 +229,10 @@ const hft_trader::core::RateLimitBucketConfig* findRateLimitBucket(
 bool testBacktestRateLimitScheduleUsesExchangePreset() {
   BacktestRunRequest request{};
   const BacktestRateLimitSchedule schedule = resolveRateLimitSchedule(request, "binance", "futures");
-  const hft_trader::core::RateLimitBucketConfig* tenSecond = findRateLimitBucket(
-      schedule, hft_trader::core::RateLimitBucketKind::Orders, 10000000000ull);
-  const hft_trader::core::RateLimitBucketConfig* minute = findRateLimitBucket(
-      schedule, hft_trader::core::RateLimitBucketKind::Orders, 60000000000ull);
+  const trading_core::RateLimitBucketConfig* tenSecond = findRateLimitBucket(
+      schedule, trading_core::RateLimitBucketKind::Orders, 10000000000ull);
+  const trading_core::RateLimitBucketConfig* minute = findRateLimitBucket(
+      schedule, trading_core::RateLimitBucketKind::Orders, 60000000000ull);
   return expect(tenSecond && tenSecond->limit == 300,
                 "binance futures preset has 300 orders / 10s") &&
          expect(minute && minute->limit == 1200,
@@ -254,23 +251,23 @@ bool testWarmupOrderIsServiceHiddenAndMarksHot() {
   EngineState engine{};
   setTop(engine, kPx100, kPx100 + 100000000ll);
 
-  hft_trader::core::WarmupOrderIntent warmup{};
+  trading_core::WarmupOrderIntent warmup{};
   warmup.order = strictPostOnlyOrderIntent(500u, Side::Buy(), kPx100 - 200000000ll);
   warmup.order.qty = amount(kQty1 / 10);
   warmup.order.service = true;
   warmup.cancelTimeoutMs = 250u;
   warmup.cancelAfterAck = true;
 
-  hft_trader::core::StrategyCommandIntent command{};
-  command.kind = hft_trader::core::StrategyCommandIntentKind::WarmupOrder;
+  trading_core::StrategyCommandIntent command{};
+  command.kind = trading_core::StrategyCommandIntentKind::WarmupOrder;
   command.warmup = warmup;
-  hft_trader::core::StrategyIo io{};
-  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(&command, 1u);
+  trading_core::StrategyIo io{};
+  io.commandOut = Span<trading_core::StrategyCommandIntent>(&command, 1u);
   io.commandCount = 1u;
 
   applyIntents(engine, io, 1000ll, 0u, 0u);
 
-  hft_trader::core::StrategyOrderState visible[4]{};
+  trading_core::StrategyOrderState visible[4]{};
   const std::size_t visibleCount = visibleOrders(engine, visible, 4u);
   return expect(visibleCount == 0u, "service warmup order is hidden from strategy order state") &&
          expect(engine.userEvents.empty(), "service warmup ack/cancel does not publish strategy user events") &&
@@ -283,31 +280,31 @@ struct WarmupGateProbeState {
   std::uint64_t nextClientId{1u};
 };
 
-bool warmupGateProbeRunCycle(void* rawState, hft_trader::core::StrategyContext& ctx) noexcept {
+bool warmupGateProbeRunCycle(void* rawState, trading_core::StrategyContext& ctx) noexcept {
   auto* state = static_cast<WarmupGateProbeState*>(rawState);
   if (!state || ctx.io.commandOut.size() == 0u) return false;
-  hft_trader::core::StrategyCommandIntent command{};
-  command.kind = hft_trader::core::StrategyCommandIntentKind::Order;
+  trading_core::StrategyCommandIntent command{};
+  command.kind = trading_core::StrategyCommandIntentKind::Order;
   command.order.clientIntentId.raw = state->nextClientId++;
   command.order.side = Side::Buy();
   command.order.orderType = canon::OrderType::Market;
   command.order.qty = amount(kQty1);
-  command.order.routeHandle = hft_trader::core::ExecutionRouteHandle{1u};
+  command.order.routeHandle = trading_core::ExecutionRouteHandle{1u};
   ctx.io.commandOut[0] = command;
   ctx.io.commandCount = 1u;
   ++state->cycles;
   return true;
 }
 
-void warmupGateProbeCaptureState(const void* rawState, hft_trader::runtime::StrategyStateSnapshot& out) noexcept {
+void warmupGateProbeCaptureState(const void* rawState, trading_core::StrategyStateSnapshot& out) noexcept {
   const auto* state = static_cast<const WarmupGateProbeState*>(rawState);
-  out = hft_trader::runtime::StrategyStateSnapshot{};
+  out = trading_core::StrategyStateSnapshot{};
   if (!state) return;
   out.cycles = state->cycles;
   out.nextClientIntentId.raw = state->nextClientId;
 }
 
-void warmupGateProbeRestoreState(void* rawState, const hft_trader::runtime::StrategyStateSnapshot& before) noexcept {
+void warmupGateProbeRestoreState(void* rawState, const trading_core::StrategyStateSnapshot& before) noexcept {
   auto* state = static_cast<WarmupGateProbeState*>(rawState);
   if (!state) return;
   state->cycles = before.cycles;
@@ -315,11 +312,17 @@ void warmupGateProbeRestoreState(void* rawState, const hft_trader::runtime::Stra
 }
 
 bool testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() {
-  hft_trader::runtime::StrategyDescriptor descriptor{};
+  trading_core::StrategyDescriptor descriptor{};
   descriptor.name = "warmup_gate_probe";
-  descriptor.streamCount = 0u;
+  descriptor.streamCount = 1u;
+  descriptor.streams[0] =
+      cxet::api::market::PublicMarketDataStream::BookTicker;
+  descriptor.footprint =
+      trading_core::strategyRuntimeFootprint<WarmupGateProbeState>(
+          0u, 0u, 0u, 1u, 0u);
   descriptor.runCycle = warmupGateProbeRunCycle;
   descriptor.captureState = warmupGateProbeCaptureState;
+  descriptor.rollbackCapacityCycle = warmupGateProbeRestoreState;
   descriptor.restoreAfterOrderFailure = warmupGateProbeRestoreState;
 
   std::vector<EngineState> engines(1u);
@@ -327,6 +330,7 @@ bool testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() {
   engine.exchange = canon::kExchangeIdBinance;
   engine.market = canon::kMarketTypeFutures;
   setTop(engine, kPx100, kPx100 + 100000000ll);
+  markReconstructedBookTickerReady(engine);
   BacktestLatencyConfig latency{};
   latency.marketOrder = BacktestLatencyProfile{};
   latency.limitOrder = BacktestLatencyProfile{};
@@ -336,23 +340,25 @@ bool testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() {
   std::vector<StrategyInstrumentSpec> instruments(1u);
   instruments[0].tickSizeRaw = 100000000ll;
   instruments[0].stepSizeRaw = 100000000ll;
-  instruments[0].tickGrid = hft_trader::core::prepareFastStepGrid(instruments[0].tickSizeRaw);
-  instruments[0].qtyStepGrid = hft_trader::core::prepareFastStepGrid(instruments[0].stepSizeRaw);
+  instruments[0].tickGrid = trading_core::prepareFastStepGrid(instruments[0].tickSizeRaw);
+  instruments[0].qtyStepGrid = trading_core::prepareFastStepGrid(instruments[0].stepSizeRaw);
 
   auto scratch = std::make_unique<MultiLegCycleScratch>();
   scratch->reset(1u);
   WarmupGateProbeState state{};
-  hft_trader::core::SymbolShardConfig shard{};
-  hft_trader::core::ShardControlState control{};
+  trading_core::SymbolShardConfig shard{};
+  trading_core::ShardControlState control{};
   BacktestRunRequest request{};
 
   const bool warmupOk = hft_backtest::runCycleMulti(
-      descriptor, &state, engines, instruments, *scratch, shard, control, 0u, 1000ll, request, nullptr);
+      descriptor, bookTickerInputPolicy(), &state, engines, instruments,
+      *scratch, shard, control, 0u, 1000ll, request, nullptr);
   const std::size_t ordersAfterWarmup = engine.orders.size();
   const std::uint64_t hotMonoAfterWarmup = engine.lastOrderPathHotMono.raw;
 
   const bool realOrderOk = hft_backtest::runCycleMulti(
-      descriptor, &state, engines, instruments, *scratch, shard, control, 0u, 1001ll, request, nullptr);
+      descriptor, bookTickerInputPolicy(), &state, engines, instruments,
+      *scratch, shard, control, 0u, 1001ll, request, nullptr);
 
   return expect(warmupOk, "first cycle emits service warmup order") &&
          expect(ordersAfterWarmup == 2u, "warmup order and cancel are recorded") &&
@@ -369,150 +375,248 @@ bool testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() {
          expect(!engine.orders.back().service && !engine.orders.back().warmup, "final order is real strategy order");
 }
 
-bool amendFilterProbeRunCycle(void* rawState, hft_trader::core::StrategyContext& ctx) noexcept {
-  auto* state = static_cast<WarmupGateProbeState*>(rawState);
-  if (!state || ctx.io.commandOut.size() < 2u) return false;
-  hft_trader::core::OrderIntent replacement =
-      postOnlyOrderIntent(state->nextClientId, Side::Buy(), kPx100 - 200000000ll);
-  replacement.routeHandle.raw = 2u;
-  replacement.quoteSlotId.raw = 7u;
-  hft_trader::core::CancelIntent cancel = cancelIntent(state->nextClientId + 1u, 900u);
-  cancel.routeHandle = replacement.routeHandle;
-  cancel.quoteSlotId = replacement.quoteSlotId;
-  const auto commands = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
-      replacement,
-      cancel);
-  ctx.io.commandOut[0] = commands[0];
-  ctx.io.commandOut[1] = commands[1];
-  ctx.io.commandCount = commands.size();
-  ctx.io.hasCommandSequence = true;
-  state->nextClientId += 2u;
+enum class ReservedSequenceProbeMode : std::uint8_t {
+  HasSequenceFlag = 0,
+  FilteredFlag = 1,
+  RawMetadata = 2,
+  Ordinary = 3,
+};
+
+struct ReservedSequenceProbeState {
+  ReservedSequenceProbeMode mode{ReservedSequenceProbeMode::HasSequenceFlag};
+  std::uint64_t cycles{0u};
+  std::uint64_t restoreCalls{0u};
+};
+
+bool reservedSequenceProbeRunCycle(
+    void* rawState,
+    trading_core::StrategyContext& ctx) noexcept {
+  auto* state = static_cast<ReservedSequenceProbeState*>(rawState);
+  if (!state || ctx.io.commandOut.size() == 0u) return false;
+  trading_core::StrategyCommandIntent command{};
+  command.kind = trading_core::StrategyCommandIntentKind::Order;
+  command.order = postOnlyOrderIntent(
+      700u + state->cycles, Side::Buy(), kPx100 - 200000000ll);
+  command.order.routeHandle = trading_core::ExecutionRouteHandle{1u};
+  if (state->mode == ReservedSequenceProbeMode::RawMetadata) {
+    command.sequenceKind =
+        static_cast<trading_core::StrategyCommandSequenceKind>(1u);
+    command.sequenceStep =
+        static_cast<trading_core::StrategyCommandSequenceStep>(1u);
+    command.sequenceId.raw = 1u;
+  }
+  ctx.io.commandOut[0] = command;
+  ctx.io.commandCount = 1u;
+  ctx.io.commandSequenceFiltered =
+      state->mode == ReservedSequenceProbeMode::FilteredFlag;
+  ctx.io.hasCommandSequence =
+      state->mode == ReservedSequenceProbeMode::HasSequenceFlag;
   ++state->cycles;
   return true;
 }
 
-bool testBacktestTradabilityFilterDropsWholeAmendAndRestoresState() {
-  hft_trader::runtime::StrategyDescriptor descriptor{};
-  descriptor.name = "amend_filter_probe";
-  descriptor.streamCount = 0u;
-  descriptor.runCycle = amendFilterProbeRunCycle;
-  descriptor.captureState = warmupGateProbeCaptureState;
-  descriptor.restoreAfterOrderFailure = warmupGateProbeRestoreState;
-
-  std::vector<EngineState> engines(2u);
-  for (std::size_t i = 0u; i < engines.size(); ++i) {
-    engines[i].exchange = canon::kExchangeIdBinance;
-    engines[i].market = canon::kMarketTypeFutures;
-    engines[i].legIndex = static_cast<std::uint32_t>(i);
-    setTop(engines[i], kPx100 - 100000000ll, kPx100 + 100000000ll);
-  }
-  std::vector<StrategyInstrumentSpec> instruments(2u);
-  for (StrategyInstrumentSpec& instrument : instruments) {
-    instrument.tickSizeRaw = 100000000ll;
-    instrument.stepSizeRaw = 100000000ll;
-    instrument.tickGrid = hft_trader::core::prepareFastStepGrid(instrument.tickSizeRaw);
-    instrument.qtyStepGrid = hft_trader::core::prepareFastStepGrid(instrument.stepSizeRaw);
-  }
-  auto scratch = std::make_unique<MultiLegCycleScratch>();
-  scratch->reset(engines.size());
-  WarmupGateProbeState state{};
-  hft_trader::core::SymbolShardConfig shard{};
-  hft_trader::core::ShardControlState control{};
-  BacktestRunRequest request{};
-  request.tradeMode = BacktestTradeMode::PrimaryOnly;
-  request.hasPrimaryLegIndex = true;
-  request.primaryLegIndex = 0u;
-
-  const bool ok = hft_backtest::runCycleMulti(
-      descriptor, &state, engines, instruments, *scratch, shard, control, 0u, 1000ll, request, nullptr);
-
-  return expect(ok, "tradability-filtered amend does not abort replay") &&
-         expect(state.cycles == 0u, "tradability-filtered amend restores strategy cycle state") &&
-         expect(state.nextClientId == 1u, "tradability-filtered amend restores client id allocation") &&
-         expect(engines[0].orders.empty() && engines[1].orders.empty(),
-                "tradability filter emits neither half of amend pair");
+void reservedSequenceProbeCaptureState(
+    const void* rawState,
+    trading_core::StrategyStateSnapshot& out) noexcept {
+  const auto* state = static_cast<const ReservedSequenceProbeState*>(rawState);
+  out = trading_core::StrategyStateSnapshot{};
+  if (state) out.cycles = state->cycles;
 }
 
-bool twoAmendFailureProbeRunCycle(void* rawState, hft_trader::core::StrategyContext& ctx) noexcept {
-  auto* state = static_cast<WarmupGateProbeState*>(rawState);
-  if (!state || ctx.io.commandOut.size() < 4u) return false;
-  const auto first = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
-      postOnlyOrderIntent(state->nextClientId, Side::Buy(), kPx100 - 200000000ll),
-      cancelIntent(1000u + state->nextClientId, 100u));
-  const auto second = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
-      postOnlyOrderIntent(state->nextClientId + 1u, Side::Sell(), kPx100 + 200000000ll),
-      cancelIntent(1001u + state->nextClientId, 101u));
-  ctx.io.commandOut[0] = first[0];
-  ctx.io.commandOut[1] = first[1];
-  ctx.io.commandOut[2] = second[0];
-  ctx.io.commandOut[3] = second[1];
-  ctx.io.commandCount = 4u;
-  ctx.io.hasCommandSequence = true;
-  state->nextClientId += 2u;
-  ++state->cycles;
-  return true;
+void reservedSequenceProbeRestoreState(
+    void* rawState,
+    const trading_core::StrategyStateSnapshot& before) noexcept {
+  auto* state = static_cast<ReservedSequenceProbeState*>(rawState);
+  if (!state) return;
+  state->cycles = before.cycles;
+  ++state->restoreCalls;
 }
 
-bool testBacktestFailedLaterAmendCleansEarlierAcceptedReplacement() {
-  hft_trader::runtime::StrategyDescriptor descriptor{};
-  descriptor.name = "two_amend_failure_probe";
-  descriptor.streamCount = 0u;
-  descriptor.runCycle = twoAmendFailureProbeRunCycle;
-  descriptor.captureState = warmupGateProbeCaptureState;
-  descriptor.restoreAfterOrderFailure = warmupGateProbeRestoreState;
+bool testRunCycleRejectsReservedSequenceMetadataBeforeApply() {
+  trading_core::StrategyDescriptor descriptor{};
+  descriptor.name = "reserved_sequence_probe";
+  descriptor.streamCount = 1u;
+  descriptor.streams[0] =
+      cxet::api::market::PublicMarketDataStream::BookTicker;
+  descriptor.footprint =
+      trading_core::strategyRuntimeFootprint<ReservedSequenceProbeState>(
+          0u, 0u, 0u, 1u, 0u);
+  descriptor.runCycle = reservedSequenceProbeRunCycle;
+  descriptor.captureState = reservedSequenceProbeCaptureState;
+  descriptor.rollbackCapacityCycle = reservedSequenceProbeRestoreState;
+  descriptor.restoreAfterOrderFailure = reservedSequenceProbeRestoreState;
 
   EngineState engine{};
   engine.exchange = canon::kExchangeIdBinance;
   engine.market = canon::kMarketTypeFutures;
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 2> initial{
-      postOnlyOrderIntent(100u, Side::Buy(), kPx100 - 300000000ll),
-      postOnlyOrderIntent(101u, Side::Sell(), kPx100 + 300000000ll)};
-  hft_trader::core::StrategyIo seed{};
-  seed.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
-  seed.orderCount = initial.size();
-  (void)applyIntents(engine, seed, 1000ll, 0u, 0u);
+  markReconstructedBookTickerReady(engine);
   engine.lastOrderPathHotMono.raw = 1000u;
-
-  hft_trader::core::RateLimitBucketConfig orders{};
-  orders.kind = hft_trader::core::RateLimitBucketKind::Orders;
-  orders.limit = 1;
-  orders.intervalNs = 1000000000ll;
-  orders.enabled = true;
-  engine.rateLimits.configureBucket(orders);
-  hft_trader::core::RateLimitActionConfig orderAction{};
-  orderAction.action = hft_trader::core::RateLimitActionKind::LimitOrder;
-  orderAction.costCount = 1u;
-  orderAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::Orders;
-  orderAction.costs[0].cost = 1;
-  engine.rateLimits.configureAction(orderAction);
 
   StrategyInstrumentSpec instrument{};
   instrument.tickSizeRaw = 100000000ll;
   instrument.stepSizeRaw = 100000000ll;
-  instrument.tickGrid = hft_trader::core::prepareFastStepGrid(instrument.tickSizeRaw);
-  instrument.qtyStepGrid = hft_trader::core::prepareFastStepGrid(instrument.stepSizeRaw);
-  auto scratch = std::make_unique<SingleLegCycleScratch>();
-  WarmupGateProbeState state{};
-  hft_trader::core::SymbolShardConfig shard{};
-  hft_trader::core::ShardControlState control{};
+  instrument.tickGrid = trading_core::prepareFastStepGrid(
+      instrument.tickSizeRaw);
+  instrument.qtyStepGrid = trading_core::prepareFastStepGrid(
+      instrument.stepSizeRaw);
+  SingleLegCycleScratch scratch{};
+  trading_core::SymbolShardConfig shard{};
+  trading_core::ShardControlState control{};
   BacktestRunRequest request{};
+  ReservedSequenceProbeState state{};
 
-  const bool ok = hft_backtest::runCycle(
-      descriptor, &state, engine, instrument, *scratch, shard, control, 2000ll, request, nullptr);
-  std::array<hft_trader::core::StrategyOrderState, 8> visible{};
-  const std::size_t visibleCount = visibleOrders(engine, visible.data(), visible.size());
+  const bool flaggedOk = hft_backtest::runCycle(
+      descriptor, bookTickerInputPolicy(), &state, engine, instrument,
+      scratch, shard, control,
+      1000ll, request, nullptr);
+  const bool flaggedRestored =
+      !flaggedOk && state.cycles == 0u && state.restoreCalls == 1u &&
+      engine.orders.empty();
 
-  return expect(ok, "later amend send failure does not abort replay") &&
-         expect(state.cycles == 0u && state.nextClientId == 1u,
-                "later amend failure restores full strategy cycle state") &&
-         expect(visibleCount == 0u,
-                "rollback cleanup removes earlier replacement accepted in the failed cycle") &&
-         expect(engine.orders.back().action == kRecordActionCancel,
-                "rollback emits cleanup cancel for earlier accepted replacement");
+  state.mode = ReservedSequenceProbeMode::FilteredFlag;
+  const bool filteredOk = hft_backtest::runCycle(
+      descriptor, bookTickerInputPolicy(), &state, engine, instrument,
+      scratch, shard, control,
+      1001ll, request, nullptr);
+  const bool filteredRestored =
+      !filteredOk && state.cycles == 0u && state.restoreCalls == 2u &&
+      engine.orders.empty();
+
+  state.mode = ReservedSequenceProbeMode::RawMetadata;
+  const bool rawOk = hft_backtest::runCycle(
+      descriptor, bookTickerInputPolicy(), &state, engine, instrument,
+      scratch, shard, control,
+      1002ll, request, nullptr);
+  const bool rawRestored =
+      !rawOk && state.cycles == 0u && state.restoreCalls == 3u &&
+      engine.orders.empty();
+
+  state.mode = ReservedSequenceProbeMode::Ordinary;
+  const bool ordinaryOk = hft_backtest::runCycle(
+      descriptor, bookTickerInputPolicy(), &state, engine, instrument,
+      scratch, shard, control,
+      1003ll, request, nullptr);
+
+  return expect(flaggedRestored,
+                "hasCommandSequence output restores strategy state before apply") &&
+         expect(filteredRestored,
+                "filtered reserved sequence output restores strategy state before apply") &&
+         expect(rawRestored,
+                "raw reserved metadata restores strategy state before apply") &&
+         expect(ordinaryOk && state.cycles == 1u &&
+                    state.restoreCalls == 3u && engine.orders.size() == 1u,
+                "ordinary single command remains valid after rejected cycles");
+}
+
+struct UserSemanticProbeState {
+  cxet::composite::UserDataSemanticMask mask{0u};
+  std::uint64_t cycles{0u};
+  bool hasUserEvent{false};
+};
+
+void userSemanticProbeCaptureState(
+    const void* rawState,
+    trading_core::StrategyStateSnapshot& out) noexcept {
+  const auto* state = static_cast<const UserSemanticProbeState*>(rawState);
+  out = trading_core::StrategyStateSnapshot{};
+  if (state) out.cycles = state->cycles;
+}
+
+bool userSemanticProbeRunCycle(
+    void* rawState,
+    trading_core::StrategyContext& ctx) noexcept {
+  auto* state = static_cast<UserSemanticProbeState*>(rawState);
+  if (!state) return false;
+  state->mask = ctx.userEventAdmittedSemanticMask;
+  state->hasUserEvent = ctx.hasUserEvent;
+  ++state->cycles;
+  return true;
+}
+
+bool testRunCycleAdmitsSimulatedUserEventSemantics() {
+  trading_core::StrategyDescriptor descriptor{};
+  descriptor.name = "user_semantic_probe";
+  descriptor.streamCount = 1u;
+  descriptor.streams[0] =
+      cxet::api::market::PublicMarketDataStream::BookTicker;
+  descriptor.footprint =
+      trading_core::strategyRuntimeFootprint<UserSemanticProbeState>(
+          0u, 0u, 0u, 0u, 0u);
+  descriptor.runCycle = userSemanticProbeRunCycle;
+  descriptor.captureState = userSemanticProbeCaptureState;
+
+  EngineState engine{};
+  engine.exchange = canon::kExchangeIdBinance;
+  engine.market = canon::kMarketTypeFutures;
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  markReconstructedBookTickerReady(engine);
+
+  StrategyInstrumentSpec instrument{};
+  instrument.tickSizeRaw = 100000000ll;
+  instrument.stepSizeRaw = 100000000ll;
+  instrument.tickGrid = trading_core::prepareFastStepGrid(
+      instrument.tickSizeRaw);
+  instrument.qtyStepGrid = trading_core::prepareFastStepGrid(
+      instrument.stepSizeRaw);
+  SingleLegCycleScratch scratch{};
+  trading_core::SymbolShardConfig shard{};
+  trading_core::ShardControlState control{};
+  BacktestRunRequest request{};
+  UserSemanticProbeState state{};
+
+  using Field = cxet::composite::UserDataField;
+  using Kind = cxet::composite::UserDataEventKind;
+  using Semantic = cxet::composite::UserDataSemantic;
+  const auto orderMask =
+      cxet::composite::userDataSemanticBit(Semantic::OrderTransition);
+  const auto fillMask =
+      cxet::composite::userDataSemanticBit(Semantic::FillExecution);
+
+  cxet::composite::UserDataEvent canceled{};
+  canceled.kind = Kind::Order;
+  canceled.orderStatus = canon::OrderStatus::Canceled;
+  cxet::composite::markUserDataFieldPresent(canceled, Field::OrderStatus);
+  cxet::composite::markUserDataFieldPresent(canceled, Field::LastFilledQty);
+  const bool canceledOk = hft_backtest::runCycle(
+      descriptor, bookTickerInputPolicy(), &state, engine, instrument,
+      scratch, shard, control,
+      2000ll, request, &canceled);
+  const bool canceledIsOrderOnly =
+      canceledOk && state.hasUserEvent && state.mask == orderMask;
+
+  cxet::composite::UserDataEvent rejected{};
+  rejected.kind = Kind::Order;
+  rejected.orderStatus = canon::OrderStatus::Rejected;
+  cxet::composite::markUserDataFieldPresent(rejected, Field::OrderStatus);
+  const bool rejectedOk = hft_backtest::runCycle(
+      descriptor, bookTickerInputPolicy(), &state, engine, instrument,
+      scratch, shard, control,
+      2001ll, request, &rejected);
+  const bool rejectedIsOrderOnly =
+      rejectedOk && state.hasUserEvent && state.mask == orderMask;
+
+  cxet::composite::UserDataEvent fill{};
+  fill.kind = Kind::Order;
+  fill.orderStatus = canon::OrderStatus::PartiallyFilled;
+  fill.lastFilledQty = amount(kQty1 / 4ll);
+  cxet::composite::markUserDataFieldPresent(fill, Field::OrderStatus);
+  cxet::composite::markUserDataFieldPresent(fill, Field::LastFilledQty);
+  const bool fillOk = hft_backtest::runCycle(
+      descriptor, bookTickerInputPolicy(), &state, engine, instrument,
+      scratch, shard, control,
+      2002ll, request, &fill);
+
+  return expect(canceledIsOrderOnly,
+                "canceled simulated order event admits order transition only") &&
+         expect(rejectedIsOrderOnly,
+                "rejected simulated order event admits order transition only") &&
+         expect(fillOk && state.hasUserEvent &&
+                    state.mask == static_cast<cxet::composite::UserDataSemanticMask>(
+                        orderMask | fillMask),
+                "positive present LastFilledQty admits order and fill semantics") &&
+         expect(state.cycles == 3u,
+                "all admitted simulated user events reach the strategy cycle");
 }
 
 bool testBacktestFeeScheduleOverridesExchangePreset() {
@@ -546,17 +650,17 @@ bool testBacktestGlobalFeeOverrideFillsPresetSides() {
 }
 
 bool testRateLimitDecisionAllowsAfterReset() {
-  hft_trader::core::RateLimitState limits{};
-  hft_trader::core::RateLimitBucketConfig bucket{};
-  bucket.kind = hft_trader::core::RateLimitBucketKind::Orders;
+  trading_core::RateLimitState limits{};
+  trading_core::RateLimitBucketConfig bucket{};
+  bucket.kind = trading_core::RateLimitBucketKind::Orders;
   bucket.limit = 1;
   bucket.intervalNs = 100u;
   bucket.enabled = true;
-  hft_trader::core::RateLimitActionConfig action{};
-  action.action = hft_trader::core::RateLimitActionKind::LimitOrder;
+  trading_core::RateLimitActionConfig action{};
+  action.action = trading_core::RateLimitActionKind::LimitOrder;
   action.enabled = true;
   action.costCount = 1u;
-  action.costs[0].bucket = hft_trader::core::RateLimitBucketKind::Orders;
+  action.costs[0].bucket = trading_core::RateLimitBucketKind::Orders;
   action.costs[0].cost = 1;
   TimeNs first{};
   first.raw = 1u;
@@ -564,17 +668,17 @@ bool testRateLimitDecisionAllowsAfterReset() {
   blockedTs.raw = 2u;
 
   const bool configured = limits.configureBucket(bucket) && limits.configureAction(action);
-  const hft_trader::core::RateLimitDecision firstDecision =
-      limits.consumeDecision(hft_trader::core::RateLimitActionKind::LimitOrder, first);
-  const hft_trader::core::RateLimitDecision blockedDecision =
-      limits.consumeDecision(hft_trader::core::RateLimitActionKind::LimitOrder, blockedTs);
-  const hft_trader::core::RateLimitDecision resetDecision =
-      limits.consumeDecision(hft_trader::core::RateLimitActionKind::LimitOrder, blockedDecision.resetMono);
+  const trading_core::RateLimitDecision firstDecision =
+      limits.consumeDecision(trading_core::RateLimitActionKind::LimitOrder, first);
+  const trading_core::RateLimitDecision blockedDecision =
+      limits.consumeDecision(trading_core::RateLimitActionKind::LimitOrder, blockedTs);
+  const trading_core::RateLimitDecision resetDecision =
+      limits.consumeDecision(trading_core::RateLimitActionKind::LimitOrder, blockedDecision.resetMono);
 
   return expect(configured, "rate-limit test state is configured") &&
          expect(firstDecision.allowed, "first action consumes available quota") &&
          expect(!blockedDecision.allowed, "second action is blocked before reset") &&
-         expect(blockedDecision.blockedBucket == hft_trader::core::RateLimitBucketKind::Orders,
+         expect(blockedDecision.blockedBucket == trading_core::RateLimitBucketKind::Orders,
                 "blocked decision names exhausted bucket") &&
          expect(blockedDecision.resetMono.raw == 100u,
                 "blocked decision exposes next reset timestamp") &&
@@ -658,19 +762,19 @@ Symbol btcUsdtSymbol() {
 bool testStaleCancelDoesNotCancelReusedSlot() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 2> orders{orderIntent(1, Side::Buy(), kPx100 - 200000000ll), orderIntent(2, Side::Sell(), kPx100 + 200000000ll)};
-  std::array<hft_trader::core::CancelIntent, 1> cancels{cancelIntent(10, 1)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), 1);
+  std::array<trading_core::OrderIntent, 2> orders{orderIntent(1, Side::Buy(), kPx100 - 200000000ll), orderIntent(2, Side::Sell(), kPx100 + 200000000ll)};
+  std::array<trading_core::CancelIntent, 1> cancels{cancelIntent(10, 1)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), 1);
   io.orderCount = 1;
   applyIntents(engine, io, 0, 0, 0);
   io.clear();
-  io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancels.size());
+  io.cancelOut = Span<trading_core::CancelIntent>(cancels.data(), cancels.size());
   io.cancelCount = 1;
   applyIntents(engine, io, 10, 0, 100);
   (void)fillOrder(engine, engine.open[0], kPx100, 20, false);
   io.clear();
-  io.orderOut = Span<hft_trader::core::OrderIntent>(&orders[1], 1);
+  io.orderOut = Span<trading_core::OrderIntent>(&orders[1], 1);
   io.orderCount = 1;
   applyIntents(engine, io, 30, 0, 0);
   const std::size_t userEventsBeforeStaleCancel = engine.userEvents.size();
@@ -685,46 +789,46 @@ bool testRateLimitRejectsOrderButAllowsSeparateCancelBucket() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
 
-  hft_trader::core::RateLimitBucketConfig orders{};
-  orders.kind = hft_trader::core::RateLimitBucketKind::Orders;
+  trading_core::RateLimitBucketConfig orders{};
+  orders.kind = trading_core::RateLimitBucketKind::Orders;
   orders.limit = 1;
   orders.intervalNs = 1000000000ll;
   orders.enabled = true;
   engine.rateLimits.configureBucket(orders);
 
-  hft_trader::core::RateLimitBucketConfig cancels{};
-  cancels.kind = hft_trader::core::RateLimitBucketKind::CancelOrders;
+  trading_core::RateLimitBucketConfig cancels{};
+  cancels.kind = trading_core::RateLimitBucketKind::CancelOrders;
   cancels.limit = 1;
   cancels.intervalNs = 1000000000ll;
   cancels.enabled = true;
   engine.rateLimits.configureBucket(cancels);
 
-  hft_trader::core::RateLimitActionConfig orderAction{};
-  orderAction.action = hft_trader::core::RateLimitActionKind::LimitOrder;
+  trading_core::RateLimitActionConfig orderAction{};
+  orderAction.action = trading_core::RateLimitActionKind::LimitOrder;
   orderAction.costCount = 1;
-  orderAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::Orders;
+  orderAction.costs[0].bucket = trading_core::RateLimitBucketKind::Orders;
   orderAction.costs[0].cost = 1;
   engine.rateLimits.configureAction(orderAction);
 
-  hft_trader::core::RateLimitActionConfig cancelAction{};
-  cancelAction.action = hft_trader::core::RateLimitActionKind::CancelOrder;
+  trading_core::RateLimitActionConfig cancelAction{};
+  cancelAction.action = trading_core::RateLimitActionKind::CancelOrder;
   cancelAction.costCount = 1;
-  cancelAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::CancelOrders;
+  cancelAction.costs[0].bucket = trading_core::RateLimitBucketKind::CancelOrders;
   cancelAction.costs[0].cost = 1;
   engine.rateLimits.configureAction(cancelAction);
 
-  std::array<hft_trader::core::OrderIntent, 1> first{orderIntent(1, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(first.data(), first.size());
+  std::array<trading_core::OrderIntent, 1> first{orderIntent(1, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(first.data(), first.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 0, 0);
 
-  std::array<hft_trader::core::CancelIntent, 1> cancel{cancelIntent(10, 1)};
-  std::array<hft_trader::core::OrderIntent, 1> second{orderIntent(2, Side::Sell(), kPx100 + 200000000ll)};
+  std::array<trading_core::CancelIntent, 1> cancel{cancelIntent(10, 1)};
+  std::array<trading_core::OrderIntent, 1> second{orderIntent(2, Side::Sell(), kPx100 + 200000000ll)};
   io.clear();
-  io.cancelOut = Span<hft_trader::core::CancelIntent>(cancel.data(), cancel.size());
+  io.cancelOut = Span<trading_core::CancelIntent>(cancel.data(), cancel.size());
   io.cancelCount = 1;
-  io.orderOut = Span<hft_trader::core::OrderIntent>(second.data(), second.size());
+  io.orderOut = Span<trading_core::OrderIntent>(second.data(), second.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1100, 0, 0);
 
@@ -745,31 +849,31 @@ bool testRepeatedRateLimitRejectsShareCooldownWindow() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
 
-  hft_trader::core::RateLimitBucketConfig orders{};
-  orders.kind = hft_trader::core::RateLimitBucketKind::Orders;
+  trading_core::RateLimitBucketConfig orders{};
+  orders.kind = trading_core::RateLimitBucketKind::Orders;
   orders.limit = 1;
   orders.intervalNs = 1000000000ll;
   orders.enabled = true;
   engine.rateLimits.configureBucket(orders);
 
-  hft_trader::core::RateLimitActionConfig orderAction{};
-  orderAction.action = hft_trader::core::RateLimitActionKind::LimitOrder;
+  trading_core::RateLimitActionConfig orderAction{};
+  orderAction.action = trading_core::RateLimitActionKind::LimitOrder;
   orderAction.costCount = 1;
-  orderAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::Orders;
+  orderAction.costs[0].bucket = trading_core::RateLimitBucketKind::Orders;
   orderAction.costs[0].cost = 1;
   engine.rateLimits.configureAction(orderAction);
 
-  std::array<hft_trader::core::OrderIntent, 1> first{orderIntent(1, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(first.data(), first.size());
+  std::array<trading_core::OrderIntent, 1> first{orderIntent(1, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(first.data(), first.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 0, 0);
 
-  std::array<hft_trader::core::OrderIntent, 2> blocked{
+  std::array<trading_core::OrderIntent, 2> blocked{
       orderIntent(2, Side::Sell(), kPx100 + 200000000ll),
       orderIntent(3, Side::Sell(), kPx100 + 300000000ll)};
   io.clear();
-  io.orderOut = Span<hft_trader::core::OrderIntent>(blocked.data(), blocked.size());
+  io.orderOut = Span<trading_core::OrderIntent>(blocked.data(), blocked.size());
   io.orderCount = static_cast<std::uint32_t>(blocked.size());
   applyIntents(engine, io, 1100, 0, 0);
 
@@ -791,25 +895,34 @@ bool testRateLimitRejectAddsRunWarningWithoutFailingRun() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
 
-  hft_trader::core::RateLimitBucketConfig orders{};
-  orders.kind = hft_trader::core::RateLimitBucketKind::Orders;
-  orders.limit = 0;
+  trading_core::RateLimitBucketConfig orders{};
+  orders.kind = trading_core::RateLimitBucketKind::Orders;
+  orders.limit = 1;
   orders.intervalNs = 1000000000ll;
   orders.enabled = true;
   engine.rateLimits.configureBucket(orders);
 
-  hft_trader::core::RateLimitActionConfig orderAction{};
-  orderAction.action = hft_trader::core::RateLimitActionKind::LimitOrder;
+  trading_core::RateLimitActionConfig orderAction{};
+  orderAction.action = trading_core::RateLimitActionKind::LimitOrder;
   orderAction.costCount = 1;
-  orderAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::Orders;
+  orderAction.costs[0].bucket = trading_core::RateLimitBucketKind::Orders;
   orderAction.costs[0].cost = 1;
   engine.rateLimits.configureAction(orderAction);
 
-  std::array<hft_trader::core::OrderIntent, 1> order{orderIntent(1, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(order.data(), order.size());
+  std::array<trading_core::OrderIntent, 1> first{
+      orderIntent(1, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(first.data(), first.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 0, 0);
+
+  std::array<trading_core::OrderIntent, 1> blocked{
+      orderIntent(2, Side::Sell(), kPx100 + 200000000ll)};
+  io.clear();
+  io.orderOut =
+      Span<trading_core::OrderIntent>(blocked.data(), blocked.size());
+  io.orderCount = 1;
+  applyIntents(engine, io, 1100, 0, 0);
 
   hft_backtest::BacktestRunResult result{};
   result.status = hft_backtest::Status::Ok;
@@ -828,57 +941,170 @@ bool testRateLimitRejectAddsRunWarningWithoutFailingRun() {
 bool testPendingDrainActivatesLateOrder() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(3, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(3, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 100, 0);
   return expect(engine.orders[0].status == kRecordStatusPending, "late order initially pending") &&
-         expect(engine.open[0].state.state == hft_trader::core::StrategyOrderLocalState::PendingNew,
+         expect(engine.open[0].state.state == trading_core::StrategyOrderLocalState::PendingNew,
                 "late order is strategy-visible but not exchange-live before latency drain") &&
          (applyDueActions(engine, 101000), true) &&
          expect(engine.orders[0].status == kRecordStatusActive, "final drain activates due order") &&
-         expect(engine.open[0].state.state == hft_trader::core::StrategyOrderLocalState::LiveLocal,
+         expect(engine.open[0].state.state == trading_core::StrategyOrderLocalState::LiveLocal,
                 "late order becomes exchange-live after latency drain");
 }
 
-bool testCancelThenReplacementLimitMaterializesReplace() {
+bool testReservedCommandSequenceMetadataFailsClosed() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(1, Side::Buy(), kPx100 - 300000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+
+  std::array<trading_core::OrderIntent, 1> initial{
+      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
+  trading_core::StrategyIo seed{};
+  seed.orderOut = Span<trading_core::OrderIntent>(
+      initial.data(), initial.size());
+  seed.orderCount = initial.size();
+  applyIntents(engine, seed, 1000ll, 0u, 0u);
+
+  std::array<trading_core::CancelIntent, 1> cancels{cancelIntent(2u, 1u)};
+  std::array<trading_core::OrderIntent, 1> directOrders{
+      postOnlyOrderIntent(3u, Side::Buy(), kPx100 - 200000000ll)};
+  std::array<trading_core::StrategyCommandIntent, 1> commands{};
+  commands[0].kind = trading_core::StrategyCommandIntentKind::Order;
+  commands[0].order =
+      postOnlyOrderIntent(4u, Side::Buy(), kPx100 - 100000000ll);
+
+  trading_core::StrategyIo malformed{};
+  malformed.cancelOut = Span<trading_core::CancelIntent>(
+      cancels.data(), cancels.size());
+  malformed.cancelCount = cancels.size();
+  malformed.orderOut = Span<trading_core::OrderIntent>(
+      directOrders.data(), directOrders.size());
+  malformed.orderCount = directOrders.size();
+  malformed.commandOut = Span<trading_core::StrategyCommandIntent>(
+      commands.data(), commands.size());
+  malformed.commandCount = commands.size();
+  malformed.hasCommandSequence = true;
+  applyIntents(engine, malformed, 2000ll, 0u, 0u);
+
+  const bool flaggedMetadataRejected =
+      engine.orders.size() == 1u && engine.open[0].state.valid &&
+      engine.open[0].state.clientIntentId.raw == 1u &&
+      engine.open[0].state.state ==
+          trading_core::StrategyOrderLocalState::LiveLocal;
+
+  malformed.hasCommandSequence = false;
+  malformed.commandSequenceFiltered = true;
+  applyIntents(engine, malformed, 3000ll, 0u, 0u);
+
+  const bool filteredMetadataRejected =
+      engine.orders.size() == 1u && engine.open[0].state.valid &&
+      engine.open[0].state.clientIntentId.raw == 1u &&
+      engine.open[0].state.state ==
+          trading_core::StrategyOrderLocalState::LiveLocal;
+
+  malformed.commandSequenceFiltered = false;
+  commands[0].sequenceKind =
+      static_cast<trading_core::StrategyCommandSequenceKind>(1u);
+  commands[0].sequenceStep =
+      static_cast<trading_core::StrategyCommandSequenceStep>(1u);
+  commands[0].sequenceId.raw = 99u;
+  applyIntents(engine, malformed, 4000ll, 0u, 0u);
+
+  const bool rawMetadataRejected =
+      engine.orders.size() == 1u && engine.open[0].state.valid &&
+      engine.open[0].state.clientIntentId.raw == 1u &&
+      engine.open[0].state.state ==
+          trading_core::StrategyOrderLocalState::LiveLocal;
+
+  commands[0] = trading_core::StrategyCommandIntent{};
+  commands[0].kind = trading_core::StrategyCommandIntentKind::Order;
+  commands[0].order =
+      postOnlyOrderIntent(5u, Side::Buy(), kPx100 - 200000000ll);
+  trading_core::StrategyIo ordinary{};
+  ordinary.commandOut = Span<trading_core::StrategyCommandIntent>(
+      commands.data(), commands.size());
+  ordinary.commandCount = commands.size();
+  applyIntents(engine, ordinary, 5000ll, 0u, 0u);
+
+  return expect(flaggedMetadataRejected,
+                "hasCommandSequence must reject the entire intent batch") &&
+         expect(filteredMetadataRejected,
+                "filtered reserved sequence metadata must reject the entire intent batch") &&
+         expect(rawMetadataRejected,
+                "non-default reserved sequence metadata must reject the entire intent batch") &&
+         expect(engine.orders.size() == 2u,
+                "ordinary single command remains executable") &&
+         expect(engine.orders[1].action == kRecordActionOrder &&
+                    engine.orders[1].id == 5u &&
+                    engine.orders[1].status == kRecordStatusActive,
+                "ordinary single command materializes its order");
+}
+
+bool testConservativeReplacementWaitsForCancelTerminal() {
+  EngineState engine{};
+  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  std::array<trading_core::OrderIntent, 1> orders{postOnlyOrderIntent(1, Side::Buy(), kPx100 - 300000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 0, 0);
 
-  std::array<hft_trader::core::CancelIntent, 1> cancels{cancelIntent(2, 1)};
-  std::array<hft_trader::core::OrderIntent, 1> replacements{postOnlyOrderIntent(2, Side::Buy(), kPx100 - 200000000ll)};
+  std::array<trading_core::CancelIntent, 1> cancels{cancelIntent(2, 1)};
+  std::array<trading_core::OrderIntent, 1> replacements{postOnlyOrderIntent(2, Side::Buy(), kPx100 - 200000000ll)};
   io.clear();
-  io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancels.size());
+  io.cancelOut = Span<trading_core::CancelIntent>(cancels.data(), cancels.size());
   io.cancelCount = 1;
-  io.orderOut = Span<hft_trader::core::OrderIntent>(replacements.data(), replacements.size());
-  io.orderCount = 1;
-  applyIntents(engine, io, 2000, 0, 0);
-  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
+  applyIntents(engine, io, 2000, 0, 100);
+
+  const bool cancelPendingWithoutNew =
+      engine.orders.size() == 2u &&
+      engine.orders[1].action == kRecordActionCancel &&
+      engine.orders[1].status == kRecordStatusPending &&
+      engine.open[0].state.valid &&
+      engine.open[0].state.state ==
+          trading_core::StrategyOrderLocalState::CancelPending;
+
+  applyDueActions(engine, 102000);
+  const bool terminalBeforeNew =
+      engine.orders.size() == 2u &&
+      engine.orders[0].status == kRecordStatusCancelled &&
+      engine.orders[1].status == kRecordStatusAcked &&
+      !engine.open[0].state.valid;
+
+  io.clear();
+  io.orderOut = Span<trading_core::OrderIntent>(
+      replacements.data(), replacements.size());
+  io.orderCount = replacements.size();
+  applyIntents(engine, io, 102001, 0, 0);
+  std::array<trading_core::StrategyOrderState, 4> visible{};
   const std::size_t visibleCount = visibleOrders(engine, visible.data(), visible.size());
 
-  return expect(engine.orders.size() == 3u, "replace writes cancel and replacement order records") &&
-         expect(engine.orders[0].status == kRecordStatusCancelled, "replace cancels original order row") &&
-         expect(engine.orders[1].action == kRecordActionCancel, "replace writes cancel command row") &&
-         expect(engine.orders[1].targetId == 1u, "replace cancel targets original order") &&
-         expect(engine.orders[1].status == kRecordStatusAcked, "replace cancel command is acked") &&
-         expect(engine.orders[2].action == kRecordActionOrder, "replace writes replacement order row") &&
-         expect(engine.orders[2].id == 2u, "replacement order uses replacement client intent id") &&
-         expect(engine.orders[2].type == kRecordTypeLimit, "replacement remains a limit order") &&
-         expect(engine.orders[2].priceE8 == kPx100 - 200000000ll, "replacement keeps replacement price") &&
-         expect(engine.orders[2].postOnly, "replacement keeps post-only policy") &&
-         expect(visibleCount == 1u, "replacement order is visible to strategy") &&
-         expect(visible[0].clientIntentId.raw == 2u, "visible order is replacement id") &&
-         expect(visible[0].desiredPrice.raw == kPx100 - 200000000ll, "visible order has replacement desired price");
+  return expect(cancelPendingWithoutNew,
+                "live mismatch emits only a pending cancel") &&
+         expect(terminalBeforeNew,
+                "cancel must become terminal before replacement placement") &&
+         expect(engine.orders.size() == 3u,
+                "next ordinary cycle writes the replacement order") &&
+         expect(engine.orders[1].targetId == 1u,
+                "cancel targets the original order") &&
+         expect(engine.orders[2].action == kRecordActionOrder &&
+                    engine.orders[2].id == 2u,
+                "replacement is a later independent order") &&
+         expect(engine.orders[2].type == kRecordTypeLimit &&
+                    engine.orders[2].priceE8 == kPx100 - 200000000ll &&
+                    engine.orders[2].postOnly,
+                "replacement preserves limit price and post-only policy") &&
+         expect(visibleCount == 1u &&
+                    visible[0].clientIntentId.raw == 2u &&
+                    visible[0].desiredPrice.raw == kPx100 - 200000000ll,
+                "replacement becomes visible only after terminal cancel");
 }
 
 bool testCancelAckPublishesCanceledUserEventWithCumulativeFill() {
   EngineState engine{};
+  engine.exchange = canon::kExchangeIdBinance;
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
   BacktestLatencyConfig config{};
   config.seed = 77u;
@@ -886,9 +1112,9 @@ bool testCancelAckPublishesCanceledUserEventWithCumulativeFill() {
   config.userData.baseUs = 500u;
   initLatencyRuntime(engine.latency, config);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(61, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{postOnlyOrderIntent(61, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -898,14 +1124,14 @@ bool testCancelAckPublishesCanceledUserEventWithCumulativeFill() {
     return expect(false, "partial fill before cancel succeeds");
   }
 
-  std::array<hft_trader::core::CancelIntent, 1> cancels{cancelIntent(62, 61)};
+  std::array<trading_core::CancelIntent, 1> cancels{cancelIntent(62, 61)};
   io.clear();
-  io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancels.size());
+  io.cancelOut = Span<trading_core::CancelIntent>(cancels.data(), cancels.size());
   io.cancelCount = cancels.size();
   applyIntents(engine, io, 3000, engine.latency);
   applyDueActions(engine, 123000);
 
-  hft_trader::strategy::RuntimeClientOrderId parsed{};
+  trading_core::strategy::RuntimeClientOrderId parsed{};
   return expect(engine.userEvents.size() == 2u, "partial fill plus cancel publish two user events") &&
          expect(cxet::composite::userDataEventContractValid(engine.userEvents[0]) &&
                     cxet::composite::userDataEventContractValid(engine.userEvents[1]),
@@ -921,302 +1147,12 @@ bool testCancelAckPublishesCanceledUserEventWithCumulativeFill() {
                     cxet::composite::UserDataField::LastFilledQty),
                 "cancel preserves explicit zero last-fill presence") &&
          expect(engine.userEvents[1].filledQty.raw == 25000000, "cancel user event carries cumulative filled qty") &&
-         expect(hft_trader::strategy::parseRuntimeClientOrderId(engine.userEvents[1].clientOrderId, parsed),
+         expect(trading_core::strategy::parseRuntimeClientOrderId(engine.userEvents[1].clientOrderId, parsed),
                 "cancel client order id parses") &&
          expect(parsed.clientIntentId.raw == 61u, "cancel user event targets original order id") &&
          expect(engine.userEventDeliveryTsNs.size() == 2u, "cancel user event stores delivery timestamp") &&
          expect(engine.userEventDeliveryTsNs[1] == 623000, "cancel user event delivery applies user-data latency") &&
          expect(!engine.open[0].state.valid, "cancel ack clears open order");
-}
-
-bool testOrderedCommandNewBeforeCancelKeepsReplacementLive() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> initial{postOnlyOrderIntent(1, Side::Buy(), kPx100 - 300000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
-  io.orderCount = initial.size();
-  applyIntents(engine, io, 1000, 0, 0);
-
-  std::array<hft_trader::core::StrategyCommandIntent, 2> commands{};
-  commands[0].kind = hft_trader::core::StrategyCommandIntentKind::Order;
-  commands[0].order = postOnlyOrderIntent(2, Side::Buy(), kPx100 - 200000000ll);
-  commands[1].kind = hft_trader::core::StrategyCommandIntentKind::Cancel;
-  commands[1].cancel = cancelIntent(3, 1);
-  io.clear();
-  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
-  io.commandCount = commands.size();
-  applyIntents(engine, io, 2000, 0, 0);
-
-  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
-  const std::size_t visibleCount = visibleOrders(engine, visible.data(), visible.size());
-
-  return expect(engine.orders.size() == 3u, "ordered replace writes initial, replacement, cancel records") &&
-         expect(engine.orders[1].action == kRecordActionOrder, "ordered command emits replacement order first") &&
-         expect(engine.orders[1].id == 2u, "ordered replacement uses replacement id") &&
-         expect(engine.orders[1].status == kRecordStatusActive, "ordered replacement remains active") &&
-         expect(engine.orders[2].action == kRecordActionCancel, "ordered command emits cancel second") &&
-         expect(engine.orders[2].targetId == 1u, "ordered cancel targets original order") &&
-         expect(engine.orders[0].status == kRecordStatusCancelled, "ordered cancel removes original order") &&
-         expect(visibleCount == 1u, "only replacement remains visible") &&
-         expect(visible[0].clientIntentId.raw == 2u, "visible order is ordered replacement");
-}
-
-bool testTaggedAmendEqualLatencyPreservesCommandOrder() {
-  EngineState cancelThenNew{};
-  setTop(cancelThenNew, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> initial{
-      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
-  io.orderCount = initial.size();
-  (void)applyIntents(cancelThenNew, io, 1000ll, 0u, 0u);
-
-  auto cancelFirstCommands = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
-      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
-      cancelIntent(3u, 1u));
-  io.clear();
-  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(
-      cancelFirstCommands.data(), cancelFirstCommands.size());
-  io.commandCount = cancelFirstCommands.size();
-  io.hasCommandSequence = true;
-  const IntentApplyResult cancelFirstResult = applyIntents(cancelThenNew, io, 2000ll, 100u, 100u);
-
-  EngineState newThenCancel{};
-  setTop(newThenCancel, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  io.clear();
-  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
-  io.orderCount = initial.size();
-  (void)applyIntents(newThenCancel, io, 1000ll, 0u, 0u);
-  auto newFirstCommands = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendNewThenCancel,
-      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
-      cancelIntent(3u, 1u));
-  io.clear();
-  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(
-      newFirstCommands.data(), newFirstCommands.size());
-  io.commandCount = newFirstCommands.size();
-  io.hasCommandSequence = true;
-  const IntentApplyResult newFirstResult = applyIntents(newThenCancel, io, 2000ll, 100u, 100u);
-
-  return expect(cancelFirstResult.disposition == IntentApplyDisposition::Applied,
-                "cancel-then-new equal-latency amend is accepted") &&
-         expect(cancelThenNew.pending.size() == 2u,
-                "cancel-then-new schedules both effects without waiting for ack") &&
-         expect(cancelThenNew.pending.front().kind == PendingActionKind::CancelAck,
-                "cancel-then-new equal-latency tie exposes cancel first") &&
-         expect(newFirstResult.disposition == IntentApplyDisposition::Applied,
-                "new-then-cancel equal-latency amend is accepted") &&
-         expect(newThenCancel.pending.size() == 2u,
-                "new-then-cancel schedules both effects without waiting for ack") &&
-         expect(newThenCancel.pending.front().kind == PendingActionKind::OrderAck,
-                "new-then-cancel equal-latency tie exposes new first");
-}
-
-bool testTaggedCancelThenNewStopsWhenCancelSubmissionFails() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  auto commands = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
-      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
-      cancelIntent(3u, 999u));
-  hft_trader::core::StrategyIo io{};
-  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
-  io.commandCount = commands.size();
-  io.hasCommandSequence = true;
-
-  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 0u, 0u);
-
-  return expect(result.disposition == IntentApplyDisposition::RestoreStrategyState,
-                "failed cancel-then-new asks runtime to restore strategy state") &&
-         expect(engine.orders.size() == 1u, "failed cancel records only cancel attempt") &&
-         expect(engine.orders[0].action == kRecordActionCancel, "failed first amend step is cancel") &&
-         expect(engine.orders[0].status == kRecordStatusMissing, "missing cancel target is explicit") &&
-         expect(engine.pending.empty(), "failed cancel does not schedule replacement") &&
-         expect(!engine.open[0].state.valid, "failed cancel does not create replacement order");
-}
-
-bool testTaggedNewThenCancelStopsWhenNewSubmissionFails() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> initial{
-      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
-  io.orderCount = initial.size();
-  (void)applyIntents(engine, io, 1000ll, 0u, 0u);
-
-  hft_trader::core::RateLimitBucketConfig orders{};
-  orders.kind = hft_trader::core::RateLimitBucketKind::Orders;
-  orders.limit = 0;
-  orders.intervalNs = 1000000000ll;
-  orders.enabled = true;
-  engine.rateLimits.configureBucket(orders);
-  hft_trader::core::RateLimitActionConfig orderAction{};
-  orderAction.action = hft_trader::core::RateLimitActionKind::LimitOrder;
-  orderAction.costCount = 1u;
-  orderAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::Orders;
-  orderAction.costs[0].cost = 1;
-  engine.rateLimits.configureAction(orderAction);
-
-  auto commands = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendNewThenCancel,
-      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
-      cancelIntent(3u, 1u));
-  io.clear();
-  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
-  io.commandCount = commands.size();
-  io.hasCommandSequence = true;
-  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 0u, 0u);
-
-  return expect(result.disposition == IntentApplyDisposition::RestoreStrategyState,
-                "failed new-then-cancel asks runtime to restore strategy state") &&
-         expect(engine.orders.size() == 2u, "failed new records no cancel attempt") &&
-         expect(engine.orders[1].action == kRecordActionOrder, "failed first amend step is new") &&
-         expect(engine.orders[1].status == kRecordStatusRejected, "rate-limited new is rejected") &&
-         expect(engine.orders[0].status == kRecordStatusActive, "failed new leaves old order live");
-}
-
-bool testTaggedCancelThenNewRestoresAfterAcceptedCancelAndFailedNew() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> initial{
-      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
-  io.orderCount = initial.size();
-  (void)applyIntents(engine, io, 1000ll, 0u, 0u);
-
-  hft_trader::core::RateLimitBucketConfig orders{};
-  orders.kind = hft_trader::core::RateLimitBucketKind::Orders;
-  orders.limit = 0;
-  orders.intervalNs = 1000000000ll;
-  orders.enabled = true;
-  engine.rateLimits.configureBucket(orders);
-  hft_trader::core::RateLimitActionConfig orderAction{};
-  orderAction.action = hft_trader::core::RateLimitActionKind::LimitOrder;
-  orderAction.costCount = 1u;
-  orderAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::Orders;
-  orderAction.costs[0].cost = 1;
-  engine.rateLimits.configureAction(orderAction);
-
-  auto commands = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
-      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
-      cancelIntent(3u, 1u));
-  io.clear();
-  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
-  io.commandCount = commands.size();
-  io.hasCommandSequence = true;
-  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 0u, 0u);
-
-  return expect(result.disposition == IntentApplyDisposition::RestoreStrategyState,
-                "accepted cancel plus failed new requests strategy rollback") &&
-         expect(engine.orders.size() == 3u, "partial cancel-then-new records both attempts") &&
-         expect(engine.orders[0].status == kRecordStatusCancelled,
-                "already accepted cancel still reaches exchange") &&
-         expect(engine.orders[1].status == kRecordStatusAcked, "cancel command remains accepted") &&
-         expect(engine.orders[2].status == kRecordStatusRejected, "replacement new is rejected") &&
-         expect(!engine.open[0].state.valid, "failed replacement does not resurrect canceled order");
-}
-
-bool testTaggedNewThenCancelPreservesAcceptedNewWhenCancelFails() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> initial{
-      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
-  io.orderCount = initial.size();
-  (void)applyIntents(engine, io, 1000ll, 0u, 0u);
-
-  hft_trader::core::RateLimitBucketConfig cancels{};
-  cancels.kind = hft_trader::core::RateLimitBucketKind::CancelOrders;
-  cancels.limit = 0;
-  cancels.intervalNs = 1000000000ll;
-  cancels.enabled = true;
-  engine.rateLimits.configureBucket(cancels);
-  hft_trader::core::RateLimitActionConfig cancelAction{};
-  cancelAction.action = hft_trader::core::RateLimitActionKind::CancelOrder;
-  cancelAction.costCount = 1u;
-  cancelAction.costs[0].bucket = hft_trader::core::RateLimitBucketKind::CancelOrders;
-  cancelAction.costs[0].cost = 1;
-  engine.rateLimits.configureAction(cancelAction);
-
-  auto commands = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendNewThenCancel,
-      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
-      cancelIntent(3u, 1u));
-  io.clear();
-  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
-  io.commandCount = commands.size();
-  io.hasCommandSequence = true;
-  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 0u, 0u);
-  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
-  const std::size_t visibleCount = visibleOrders(engine, visible.data(), visible.size());
-
-  return expect(result.disposition == IntentApplyDisposition::PreserveAcceptedSequence,
-                "failed second step preserves accepted new-then-cancel sequence") &&
-         expect(engine.orders.size() == 3u, "partial new-then-cancel records new and failed cancel") &&
-         expect(engine.orders[1].status == kRecordStatusActive, "accepted replacement stays live") &&
-         expect(engine.orders[2].status == kRecordStatusRejected, "second-step cancel is rejected") &&
-         expect(visibleCount == 2u, "old and accepted replacement remain visible after cancel failure");
-}
-
-bool testTaggedCancelThenNewAllowsLatencyOverlap() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> initial{
-      postOnlyOrderIntent(1u, Side::Buy(), kPx100 - 300000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(initial.data(), initial.size());
-  io.orderCount = initial.size();
-  (void)applyIntents(engine, io, 1000ll, 0u, 0u);
-
-  auto commands = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
-      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
-      cancelIntent(3u, 1u));
-  io.clear();
-  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
-  io.commandCount = commands.size();
-  io.hasCommandSequence = true;
-  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 50u, 200u);
-  applyDueActions(engine, 52000ll);
-  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
-  const std::size_t visibleCount = visibleOrders(engine, visible.data(), visible.size());
-
-  return expect(result.disposition == IntentApplyDisposition::Applied,
-                "overlapping cancel-then-new amend is accepted") &&
-         expect(engine.orders[2].status == kRecordStatusActive,
-                "replacement activates before slower cancel effect") &&
-         expect(engine.orders[0].status == kRecordStatusActive,
-                "old order remains exchange-live until cancel effect") &&
-         expect(engine.open[0].state.cancelPending,
-                "old order remains cancel-pending during overlap") &&
-         expect(visibleCount == 2u, "strategy order book exposes both orders during overlap");
-}
-
-bool testMalformedTaggedAmendFailsClosed() {
-  EngineState engine{};
-  setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  auto commands = amendCommands(
-      hft_trader::core::StrategyCommandSequenceKind::LimitAmendCancelThenNew,
-      postOnlyOrderIntent(2u, Side::Buy(), kPx100 - 200000000ll),
-      cancelIntent(3u, 1u));
-  commands[1].sequenceStep = hft_trader::core::StrategyCommandSequenceStep::First;
-  hft_trader::core::StrategyIo io{};
-  io.commandOut = Span<hft_trader::core::StrategyCommandIntent>(commands.data(), commands.size());
-  io.commandCount = commands.size();
-  io.hasCommandSequence = true;
-
-  const IntentApplyResult result = applyIntents(engine, io, 2000ll, 0u, 0u);
-
-  return expect(result.disposition == IntentApplyDisposition::RestoreStrategyState,
-                "malformed amend requests strategy rollback") &&
-         expect(engine.orders.empty(), "malformed amend emits no partial command") &&
-         expect(engine.pending.empty(), "malformed amend schedules no exchange effect");
 }
 
 bool testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() {
@@ -1259,9 +1195,9 @@ bool testLatencyRuntimeSplitsMarketAndLimitOrderActivation() {
   config.limitOrder.baseUs = 700u;
   initLatencyRuntime(engine.latency, config);
 
-  std::array<hft_trader::core::OrderIntent, 2> orders{reduceMarketIntent(30, Side::Buy()), orderIntent(31, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 2> orders{reduceMarketIntent(30, Side::Buy()), orderIntent(31, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, engine.latency);
 
@@ -1281,11 +1217,11 @@ bool testLatencyRuntimeTreatsStopMarketAsMarketOrderActivation() {
   config.limitOrder.baseUs = 700u;
   initLatencyRuntime(engine.latency, config);
 
-  std::array<hft_trader::core::OrderIntent, 2> orders{
+  std::array<trading_core::OrderIntent, 2> orders{
       stopMarketIntent(32, Side::Buy(), kPx100 + 300000000ll),
       orderIntent(33, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, engine.latency);
 
@@ -1301,9 +1237,9 @@ bool testMarketOrderAtSameTimestampWaitsForVenueTopUpdate() {
   EngineState engine{};
   setTop(engine, 120000000ll, 121000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(70, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(70, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 0, 1, 0);
 
@@ -1322,9 +1258,9 @@ bool testSellMarketOrderAtSameTimestampWaitsForVenueTopUpdate() {
   EngineState engine{};
   setTop(engine, 120000000ll, 121000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(71, Side::Sell())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(71, Side::Sell())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 0, 1, 0);
 
@@ -1343,9 +1279,9 @@ bool testStopMarketBuyTriggersOnReconstructedAskForLastSource() {
   EngineState engine{};
   setTop(engine, 104000000ll, 105000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{stopMarketIntent(74, Side::Buy(), 110000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{stopMarketIntent(74, Side::Buy(), 110000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1374,9 +1310,9 @@ bool testStopMarketBuyRejectsIfAlreadyTriggeredAtActivation() {
   EngineState engine{};
   setTop(engine, 114000000ll, 115000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{stopMarketIntent(75, Side::Buy(), 110000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{stopMarketIntent(75, Side::Buy(), 110000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1390,18 +1326,18 @@ bool testStopMarketBuyRejectsIfAlreadyTriggeredAtActivation() {
 bool testStopMarketRejectsInvalidTriggerConfig() {
   EngineState badPrice{};
   setTop(badPrice, 114000000ll, 115000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> zeroPrice{stopMarketIntent(790, Side::Buy(), 0)};
-  hft_trader::core::StrategyIo zeroIo{};
-  zeroIo.orderOut = Span<hft_trader::core::OrderIntent>(zeroPrice.data(), zeroPrice.size());
+  std::array<trading_core::OrderIntent, 1> zeroPrice{stopMarketIntent(790, Side::Buy(), 0)};
+  trading_core::StrategyIo zeroIo{};
+  zeroIo.orderOut = Span<trading_core::OrderIntent>(zeroPrice.data(), zeroPrice.size());
   zeroIo.orderCount = zeroPrice.size();
   applyIntents(badPrice, zeroIo, 1000, 0, 0);
 
   EngineState badSource{};
   setTop(badSource, 114000000ll, 115000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> unknownSource{
+  std::array<trading_core::OrderIntent, 1> unknownSource{
       stopMarketIntent(791, Side::Buy(), 110000000ll, canon::OrderTriggerSource::Unknown)};
-  hft_trader::core::StrategyIo sourceIo{};
-  sourceIo.orderOut = Span<hft_trader::core::OrderIntent>(unknownSource.data(), unknownSource.size());
+  trading_core::StrategyIo sourceIo{};
+  sourceIo.orderOut = Span<trading_core::OrderIntent>(unknownSource.data(), unknownSource.size());
   sourceIo.orderCount = unknownSource.size();
   applyIntents(badSource, sourceIo, 1000, 0, 0);
 
@@ -1415,9 +1351,9 @@ bool testStopMarketSellTriggersOnReconstructedBidForLastSource() {
   EngineState engine{};
   setTop(engine, 115000000ll, 116000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{stopMarketIntent(76, Side::Sell(), 110000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{stopMarketIntent(76, Side::Sell(), 110000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1444,10 +1380,10 @@ bool testStopMarketBuyTriggersOnMarkPrice() {
   EngineState engine{};
   setTop(engine, 104000000ll, 105000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{
+  std::array<trading_core::OrderIntent, 1> orders{
       stopMarketIntent(77, Side::Buy(), 110000000ll, canon::OrderTriggerSource::Mark)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1471,10 +1407,10 @@ bool testStopMarketSellTriggersOnIndexPrice() {
   EngineState engine{};
   setTop(engine, 109000000ll, 110000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{
+  std::array<trading_core::OrderIntent, 1> orders{
       stopMarketIntent(78, Side::Sell(), 110000000ll, canon::OrderTriggerSource::Index)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1499,15 +1435,15 @@ bool testMarketBuyConsumesVisibleAskLevelsWithoutMutatingBook() {
                 {{9900000000ll, 500000000ll}},
                 {{10100000000ll, 40000000ll}, {10200000000ll, 60000000ll}});
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(72, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(72, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
   tryFillOnTop(engine, 2000, true);
 
-  const hft_trader::core::LocalOrderBookView book = hft_trader::core::orderBook(engine.venueOrderBook);
-  const hft_trader::core::LocalOrderBookSideState* asks = book.side(hft_trader::core::BookSide::Ask);
+  const trading_core::LocalOrderBookView book = trading_core::orderBook(engine.venueOrderBook);
+  const trading_core::LocalOrderBookSideState* asks = book.side(trading_core::BookSide::Ask);
 
   return expect(engine.fills.size() == 2u, "market buy writes one fill per consumed ask level") &&
          expect(engine.fills[0].priceE8 == 10100000000ll, "market buy first chunk fills at best ask") &&
@@ -1541,9 +1477,9 @@ bool testMarketBuyFallsBackToBboWhenVisibleDepthCannotFillMarket() {
                 {{10100000000ll, 30000000ll}});
   setTop(engine, 9900000000ll, 10500000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(73, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(73, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
   tryFillOnTop(engine, 2000, true);
@@ -1567,14 +1503,14 @@ bool testMarketBuyOverlaysBboBeforeWalkingVisibleDepth() {
                  {15120000ll, 198400000000ll}});
   setTopWithQty(engine, 15096000ll, 10400000000ll, 15120000ll, 198400000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(178, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(178, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
-  const hft_trader::core::LocalOrderBookView book = hft_trader::core::orderBook(engine.venueOrderBook);
-  const hft_trader::core::LocalOrderBookSideState* asks = book.side(hft_trader::core::BookSide::Ask);
+  const trading_core::LocalOrderBookView book = trading_core::orderBook(engine.venueOrderBook);
+  const trading_core::LocalOrderBookSideState* asks = book.side(trading_core::BookSide::Ask);
 
   return expect(engine.fills.size() == 1u, "market buy overlays BBO before consuming stale ask depth") &&
          expect(engine.fills[0].priceE8 == 15120000ll, "market buy fills at reconstructed BBO ask") &&
@@ -1592,9 +1528,9 @@ bool testMarketSellOverlaysBboBeforeWalkingVisibleDepth() {
                 {{10400000000ll, 10000000000ll}});
   setTopWithQty(engine, 9700000000ll, 50000000000ll, 10400000000ll, 10000000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(179, Side::Sell())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(179, Side::Sell())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1612,9 +1548,9 @@ bool testLimitBuyBelowBboAskIgnoresStaleDepthAsk() {
                  {15120000ll, 198400000000ll}});
   setTopWithQty(engine, 15096000ll, 10400000000ll, 15120000ll, 198400000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(180, Side::Buy(), 14000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(180, Side::Buy(), 14000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1632,9 +1568,9 @@ bool testCrossingLimitBuyOverlaysBboBeforeWalkingVisibleDepth() {
                  {15120000ll, 198400000000ll}});
   setTopWithQty(engine, 15096000ll, 10400000000ll, 15120000ll, 198400000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(181, Side::Buy(), 15120000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(181, Side::Buy(), 15120000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1656,16 +1592,16 @@ bool testLazyExecutionDepthProviderRejectsLegacyDepth() {
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
   setTop(engine, 9900000000ll, 10100000000ll);
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
   const ExecutionDepthOpenStatus openStatus =
       provider.open(dir, engine.symbol, config, engine.venueOrderBook);
   engine.executionDepthProvider = &provider;
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(172, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(172, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1688,7 +1624,7 @@ bool testDeclaredMissingExecutionDepthReportsFallbackStatus() {
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
   const ExecutionDepthOpenStatus status = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
@@ -1714,7 +1650,7 @@ bool testUndeclaredExecutionDepthUsesPlainBboMode() {
 
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
   const ExecutionDepthOpenStatus status = provider.open(dir, engine.symbol, config, engine.venueOrderBook);
@@ -1738,15 +1674,15 @@ bool testLazyExecutionDepthProviderMarketBuyConsumesTapeDepth() {
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
   setTop(engine, 9800000000ll, 10100000000ll);
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
   const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(174, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(174, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1775,15 +1711,15 @@ bool testStaleLazyExecutionDepthMarketBuyFallsBackToBbo() {
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
   setTopAt(engine, 9900000000ll, 10400000000ll, 501002000u);
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
   const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(175, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(175, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 501002000, 0, 0);
 
@@ -1807,15 +1743,15 @@ bool testFreshLazyExecutionDepthMarketBuyMayUseSlightlyOlderDepth() {
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
   setTopAt(engine, 9900000000ll, 10100000000ll, 26000000u);
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
   const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(176, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(176, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 26000000, 0, 0);
 
@@ -1838,15 +1774,15 @@ bool testStaleLazyExecutionDepthMarketSellFallsBackToBboBid() {
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
   setTopAt(engine, 9700000000ll, 10400000000ll, 501002000u);
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
   const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(177, Side::Sell())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(177, Side::Sell())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 501002000, 0, 0);
 
@@ -1871,7 +1807,7 @@ bool testLazyExecutionDepthProviderDoesNotAdvanceWithoutExecutionCandidate() {
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
   setTop(engine, 9900000000ll, 10100000000ll);
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
   const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
@@ -1895,15 +1831,15 @@ bool testLazyExecutionDepthProviderInitializesPassiveQueueAtActivation() {
   EngineState engine{};
   engine.symbol.copyFrom("BTC_USDT");
   setTop(engine, 9900000000ll, 10100000000ll);
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
   const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
   engine.executionDepthProvider = &provider;
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(146, Side::Buy(), 9900000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{postOnlyOrderIntent(146, Side::Buy(), 9900000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 0, 0);
   const bool capturedQueueAhead = engine.open[0].queueAheadQtyRaw == 55000000ll;
@@ -1929,9 +1865,9 @@ bool testPassiveQueueDoesNotFillFromTopQtyShrinkWithoutTrade() {
                 {{9900000000ll, 55000000ll}},
                 {{10100000000ll, 100000000ll}});
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(190, Side::Buy(), 9900000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{postOnlyOrderIntent(190, Side::Buy(), 9900000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
   const bool capturedQueueAhead = engine.open[0].queueAheadQtyRaw == 55000000ll;
@@ -1954,9 +1890,9 @@ bool testInitialSnapshotBookDoesNotReplaceBboFallbackWithoutExecutionDepth() {
   engine.venueOrderBookExecutionEnabled = false;
   setTop(engine, 9900000000ll, 10500000000ll);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{marketIntent(173, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{marketIntent(173, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -1971,9 +1907,9 @@ bool testCrossingLimitConsumesVisibleDepthThenRestsRemainder() {
                 {{9900000000ll, 500000000ll}},
                 {{10100000000ll, 30000000ll}});
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(74, Side::Buy(), 10100000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(74, Side::Buy(), 10100000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
   tryFillOnTop(engine, 2000, true);
@@ -1995,15 +1931,15 @@ bool testLatencyRuntimeUsesDedicatedCancelChannel() {
   config.cancelOrder.baseUs = 120u;
   initLatencyRuntime(engine.latency, config);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(61, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(61, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
-  std::array<hft_trader::core::CancelIntent, 1> cancels{cancelIntent(62, 61)};
+  std::array<trading_core::CancelIntent, 1> cancels{cancelIntent(62, 61)};
   io.clear();
-  io.cancelOut = Span<hft_trader::core::CancelIntent>(cancels.data(), cancels.size());
+  io.cancelOut = Span<trading_core::CancelIntent>(cancels.data(), cancels.size());
   io.cancelCount = cancels.size();
   applyIntents(engine, io, 2000, engine.latency);
 
@@ -2015,19 +1951,19 @@ bool testLatencyRuntimeUsesDedicatedCancelChannel() {
 bool testFillPublishesRuntimeUserEvent() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(4, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(4, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 0, 0, 0);
   const bool filled = fillOrder(engine, engine.open[0], kPx100, 20, false);
-  hft_trader::strategy::RuntimeClientOrderId parsed{};
+  trading_core::strategy::RuntimeClientOrderId parsed{};
   return expect(filled, "manual fill succeeds") &&
          expect(engine.userEvents.size() == 1u, "fill creates one user event") &&
          expect(engine.userEvents[0].kind == cxet::composite::UserDataEventKind::Order, "user event is order kind") &&
          expect(engine.userEvents[0].orderStatus == canon::OrderStatus::Closed, "user event is final fill") &&
          expect(engine.userEvents[0].lastFilledQty.raw == kQty1, "user event has last fill qty") &&
-         expect(hft_trader::strategy::parseRuntimeClientOrderId(engine.userEvents[0].clientOrderId, parsed), "client order id parses") &&
+         expect(trading_core::strategy::parseRuntimeClientOrderId(engine.userEvents[0].clientOrderId, parsed), "client order id parses") &&
          expect(parsed.clientIntentId.raw == 4, "client order id carries intent id");
 }
 
@@ -2039,9 +1975,9 @@ bool testFillUserEventHasSeparateDeliveryLatency() {
   config.userData.baseUs = 500u;
   initLatencyRuntime(engine.latency, config);
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(64, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(64, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 0, 0, 0);
   const bool filled = fillOrder(engine, engine.open[0], kPx100, 20, false);
@@ -2056,10 +1992,11 @@ bool testFillUserEventHasSeparateDeliveryLatency() {
 
 bool testPostOnlyCrossingBuyRejectsWithoutTakerFill() {
   EngineState engine{};
+  engine.exchange = canon::kExchangeIdBinance;
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(40, Side::Buy(), kPx100 + 100000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{postOnlyOrderIntent(40, Side::Buy(), kPx100 + 100000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
 
   applyIntents(engine, io, 1000, 0, 0);
@@ -2078,9 +2015,9 @@ bool testPostOnlyCrossingBuyRejectsWithoutTakerFill() {
 bool testPostOnlyCrossingSellRejectsWithoutTakerFill() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(41, Side::Sell(), kPx100 - 100000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{postOnlyOrderIntent(41, Side::Sell(), kPx100 - 100000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
 
   applyIntents(engine, io, 1000, 0, 0);
@@ -2094,9 +2031,9 @@ bool testPostOnlyCrossingSellRejectsWithoutTakerFill() {
 bool testStrictPostOnlyCrossingBuyRejectsWithoutTakerFill() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{strictPostOnlyOrderIntent(140, Side::Buy(), kPx100 + 100000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{strictPostOnlyOrderIntent(140, Side::Buy(), kPx100 + 100000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
 
   applyIntents(engine, io, 1000, 0, 0);
@@ -2113,9 +2050,9 @@ bool testStrictPostOnlyCrossingBuyRejectsWithoutTakerFill() {
 bool testStrictPostOnlyCrossingSellRejectsWithoutTakerFill() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{strictPostOnlyOrderIntent(141, Side::Sell(), kPx100 - 100000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{strictPostOnlyOrderIntent(141, Side::Sell(), kPx100 - 100000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
 
   applyIntents(engine, io, 1000, 0, 0);
@@ -2132,23 +2069,23 @@ bool testStrictPostOnlyCrossingSellRejectsWithoutTakerFill() {
 bool testNoFreeOrderSlotPublishesRejectedUserEvent() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, kMaxOrderStates + 1u> orders{};
+  std::array<trading_core::OrderIntent, kMaxOrderStates + 1u> orders{};
   for (std::size_t i = 0u; i < orders.size(); ++i) {
     orders[i] = orderIntent(1000u + i, Side::Buy(), kPx100 - 200000000ll);
   }
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
 
   applyIntents(engine, io, 1000, 100, 0);
 
-  hft_trader::strategy::RuntimeClientOrderId parsed{};
+  trading_core::strategy::RuntimeClientOrderId parsed{};
   return expect(engine.orders.size() == kMaxOrderStates + 1u, "overflow order is recorded") &&
          expect(engine.orders[kMaxOrderStates].status == kRecordStatusRejected, "overflow order is rejected") &&
          expect(engine.userEvents.size() == 1u, "overflow order publishes rejected user event") &&
          expect(engine.userEventDeliveryTsNs.size() == 1u, "overflow rejection stores delivery timestamp") &&
          expect(engine.userEvents[0].orderStatus == canon::OrderStatus::Rejected, "overflow user event is rejected") &&
-         expect(hft_trader::strategy::parseRuntimeClientOrderId(engine.userEvents[0].clientOrderId, parsed),
+         expect(trading_core::strategy::parseRuntimeClientOrderId(engine.userEvents[0].clientOrderId, parsed),
                 "overflow rejected client order id parses") &&
          expect(parsed.clientIntentId.raw == 1000u + kMaxOrderStates, "overflow rejection carries intent id");
 }
@@ -2156,12 +2093,12 @@ bool testNoFreeOrderSlotPublishesRejectedUserEvent() {
 bool testPostOnlyRestingOrderDoesNotFillOnTopButFillsOnTrade() {
   EngineState engine{};
   setTop(engine, kPx100 - 200000000ll, kPx100 + 200000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(42, Side::Buy(), kPx100 - 100000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{postOnlyOrderIntent(42, Side::Buy(), kPx100 - 100000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 0, 0);
-  const bool policyVisible = engine.open[0].state.limitTimeInForcePolicy == hft_trader::core::LimitTimeInForcePolicy::PostOnlyPrefer;
+  const bool policyVisible = engine.open[0].state.limitTimeInForcePolicy == trading_core::LimitTimeInForcePolicy::PostOnlyPrefer;
 
   setTop(engine, kPx100 - 200000000ll, kPx100);
   tryFillOnTop(engine, 2000, true);
@@ -2189,9 +2126,9 @@ bool testMakerFillMinCrossTicksRequiresTradeThrough() {
   engine.makerFillMinCrossTicks = 1u;
   setTop(engine, kPx100 - 200000000ll, kPx100 + 200000000ll);
   const std::int64_t orderPrice = kPx100 - 100000000ll;
-  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(44, Side::Buy(), orderPrice)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{postOnlyOrderIntent(44, Side::Buy(), orderPrice)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -2221,9 +2158,9 @@ bool testMakerFillMinCrossTicksRequiresTradeThrough() {
 bool testTradeQtyPartialFillKeepsMakerOrderLiveUntilCumulativeFilled() {
   EngineState engine{};
   setTop(engine, kPx100 - 200000000ll, kPx100 + 200000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(43, Side::Buy(), kPx100 - 100000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{postOnlyOrderIntent(43, Side::Buy(), kPx100 - 100000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -2269,9 +2206,9 @@ bool testPassiveQueueAdvancesOnlyFromOppositeTradesAtOrderPrice() {
                 {{9900000000ll, 55000000ll}},
                 {{10100000000ll, 500000000ll}});
 
-  std::array<hft_trader::core::OrderIntent, 1> orders{postOnlyOrderIntent(46, Side::Buy(), 9900000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{postOnlyOrderIntent(46, Side::Buy(), 9900000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 0, 0);
   const bool capturedQueueAhead = engine.open[0].queueAheadQtyRaw == 55000000ll;
@@ -2302,9 +2239,9 @@ bool testPassiveQueueAdvancesOnlyFromOppositeTradesAtOrderPrice() {
 bool testGtcCrossingLimitStillTakerFills() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(45, Side::Buy(), kPx100 + 100000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(45, Side::Buy(), kPx100 + 100000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
 
   applyIntents(engine, io, 1000, 0, 0);
@@ -2318,9 +2255,9 @@ bool testGtcCrossingLimitStillTakerFills() {
 bool testReduceOnlyMarketBuyDoesNotOpenWhenFlat() {
   EngineState engine{};
   setTop(engine, kPx100 - 300000000ll, kPx100 - 200000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{reduceMarketIntent(7, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{reduceMarketIntent(7, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 200, 0, 0);
   return expect(engine.netQtyRaw == 0, "reduce-only buy cannot open long when flat") &&
@@ -2335,11 +2272,10 @@ bool testReduceOnlyMarketSellClosesLongAtBid() {
   EngineState engine{};
   engine.takerFeeBpsE8 = 0;
   setTop(engine, kPx100 + 200000000ll, kPx100 + 300000000ll);
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0, netRealized);
-  std::array<hft_trader::core::OrderIntent, 1> orders{reduceMarketIntent(5, Side::Sell())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  (void)updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0);
+  std::array<trading_core::OrderIntent, 1> orders{reduceMarketIntent(5, Side::Sell())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 200, 0, 0);
   return expect(engine.netQtyRaw == 0, "reduce-only sell flattens long") &&
@@ -2355,11 +2291,10 @@ bool testReduceOnlyMarketSellCapsToActualLongPosition() {
   EngineState engine{};
   engine.takerFeeBpsE8 = 0;
   setTop(engine, kPx100 + 200000000ll, kPx100 + 300000000ll);
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Buy(), kPx100, 40000000, 100, 0, netRealized);
-  std::array<hft_trader::core::OrderIntent, 1> orders{reduceMarketIntentQty(50, Side::Sell(), kQty1)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  (void)updatePosition(engine, Side::Buy(), kPx100, 40000000, 100, 0);
+  std::array<trading_core::OrderIntent, 1> orders{reduceMarketIntentQty(50, Side::Sell(), kQty1)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 200, 0, 0);
   return expect(engine.netQtyRaw == 0, "oversized reduce-only sell does not open short") &&
@@ -2375,11 +2310,10 @@ bool testReduceOnlyMarketBuyClosesShortAtAsk() {
   EngineState engine{};
   engine.takerFeeBpsE8 = 0;
   setTop(engine, kPx100 - 300000000ll, kPx100 - 200000000ll);
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Sell(), kPx100, kQty1, 100, 0, netRealized);
-  std::array<hft_trader::core::OrderIntent, 1> orders{reduceMarketIntent(6, Side::Buy())};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  (void)updatePosition(engine, Side::Sell(), kPx100, kQty1, 100, 0);
+  std::array<trading_core::OrderIntent, 1> orders{reduceMarketIntent(6, Side::Buy())};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 200, 0, 0);
   return expect(engine.netQtyRaw == 0, "reduce-only buy flattens short") &&
@@ -2388,14 +2322,42 @@ bool testReduceOnlyMarketBuyClosesShortAtAsk() {
          expect(engine.netRealizedPnlE8 == 200000000ll, "short close realizes entry-ask pnl");
 }
 
+bool testReduceOnlyInt64MinShortLeavesBoundedResidual() {
+  constexpr std::int64_t kMin = std::numeric_limits<std::int64_t>::min();
+  constexpr std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
+  EngineState engine{};
+  engine.netQtyRaw = kMin;
+  engine.entryPriceE8 = kPx100;
+  engine.takerFeeBpsE8 = 0;
+  setTop(engine, kPx100 - 300000000ll, kPx100 - 200000000ll);
+  std::array<trading_core::OrderIntent, 1> orders{
+      reduceMarketIntentQty(67, Side::Buy(), kMax)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
+  io.orderCount = orders.size();
+  applyIntents(engine, io, 200, 0, 0);
+
+  return expect(engine.netQtyRaw == -1,
+                "INT64_MIN reduce-only buy leaves the explicit one-unit short residual") &&
+         expect(engine.position.netQty.raw == -1 &&
+                    engine.position.entryPrice.raw == kPx100,
+                "bounded reduce-only fill preserves residual position basis") &&
+         expect(engine.fills.size() == 1u &&
+                    engine.fills[0].qtyE8 == kMax &&
+                    engine.fills[0].reduceOnly,
+                "INT64_MIN reduce-only fill is capped at representable INT64_MAX") &&
+         expect(engine.orders.size() == 1u &&
+                    engine.orders[0].status == kRecordStatusFilled,
+                "bounded reduce-only order terminates without crossing through flat");
+}
+
 bool testFeesReduceWalletAndNetPnl() {
   EngineState engine{};
   engine.initialBalanceE8 = 100000000000ll;
   engine.walletBalanceE8 = engine.initialBalanceE8;
   engine.takerFeeBpsE8 = 100000000ll;
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, engine.takerFeeBpsE8, netRealized);
-  updatePosition(engine, Side::Sell(), kPx100 + 100000000ll, kQty1, 200, engine.takerFeeBpsE8, netRealized);
+  (void)updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, engine.takerFeeBpsE8);
+  (void)updatePosition(engine, Side::Sell(), kPx100 + 100000000ll, kQty1, 200, engine.takerFeeBpsE8);
   return expect(engine.grossRealizedPnlE8 == 100000000ll, "gross pnl ignores fees") &&
          expect(engine.feesPaidE8 > 0, "fees are charged") &&
          expect(engine.netRealizedPnlE8 == engine.grossRealizedPnlE8 - engine.feesPaidE8, "net pnl subtracts fees") &&
@@ -2410,8 +2372,7 @@ bool testEquityPointCapturesRealizedOnlyPnl() {
   engine.grossRealizedPnlE8 = 120000000ll;
   engine.netRealizedPnlE8 = 90000000ll;
   setTop(engine, kPx100 + 200000000ll, kPx100 + 300000000ll);
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0, netRealized);
+  (void)updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0);
 
   appendEquityPoint(engine, 200);
 
@@ -2435,8 +2396,7 @@ bool testRiskSnapshotCapturesCompactMarkToMarketPnl() {
   engine.grossRealizedPnlE8 = 120000000ll;
   engine.netRealizedPnlE8 = 90000000ll;
   setTop(engine, kPx100 + 200000000ll, kPx100 + 300000000ll);
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0, netRealized);
+  (void)updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0);
 
   appendRiskSnapshot(engine, 200, kRiskSnapshotReasonFill);
 
@@ -2453,8 +2413,7 @@ bool testRiskSnapshotCapturesCompactMarkToMarketPnl() {
 bool testRiskSnapshotCadenceLimitsOpenPositionMtmRows() {
   EngineState engine{};
   setTop(engine, kPx100, kPx100 + 100000000ll);
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0, netRealized);
+  (void)updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0);
   appendRiskSnapshot(engine, 100, kRiskSnapshotReasonFill);
 
   setTop(engine, kPx100 + 100000000ll, kPx100 + 200000000ll);
@@ -2463,11 +2422,26 @@ bool testRiskSnapshotCadenceLimitsOpenPositionMtmRows() {
   const bool due = appendRiskSnapshotIfDue(engine, 100 + 1000000000ll);
   const bool unchanged = appendRiskSnapshotIfDue(engine, 100 + 2000000000ll);
 
+  EngineState overflowBoundary{};
+  overflowBoundary.netQtyRaw = 1;
+  overflowBoundary.entryPriceE8 = kPx100;
+  overflowBoundary.hasRiskSnapshot = true;
+  overflowBoundary.lastRiskSnapshotTsNs =
+      std::numeric_limits<std::int64_t>::max() - 500000000ll;
+  overflowBoundary.lastRiskSnapshotUnrealizedPnlE8 = 0;
+  setTop(overflowBoundary,
+         kPx100 + 100000000ll,
+         kPx100 + 200000000ll);
+  const bool overflowDue = appendRiskSnapshotIfDue(
+      overflowBoundary, std::numeric_limits<std::int64_t>::max());
+
   return expect(!early, "risk cadence skips sub-second MTM changes") &&
          expect(due, "risk cadence writes after one second") &&
          expect(!unchanged, "risk cadence skips unchanged MTM value") &&
          expect(engine.riskSnapshots.size() == 2u, "risk snapshots stay compact") &&
-         expect(engine.riskSnapshots[1].reason == kRiskSnapshotReasonInterval, "cadence row is marked interval");
+         expect(engine.riskSnapshots[1].reason == kRiskSnapshotReasonInterval, "cadence row is marked interval") &&
+         expect(!overflowDue && overflowBoundary.riskSnapshots.empty(),
+                "risk cadence fails closed when deadline exceeds INT64_MAX");
 }
 
 bool testHardLiquidationClearsStateAndBlocksNewOrders() {
@@ -2477,22 +2451,21 @@ bool testHardLiquidationClearsStateAndBlocksNewOrders() {
   EngineState engine{};
   initializeAccounting(engine, request);
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(40, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(40, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 100, 0);
 
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0, netRealized);
+  (void)updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0);
   setTop(engine, kPx100 - 6000000000ll, kPx100 - 5900000000ll);
   const std::int64_t breachedEquity = equityE8(engine);
 
   hardLiquidate(engine, 2000, breachedEquity);
-  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
+  std::array<trading_core::StrategyOrderState, 4> visible{};
   io.clear();
   orders[0] = orderIntent(41, Side::Sell(), kPx100 + 200000000ll);
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 3000, 0, 0);
 
@@ -2516,23 +2489,22 @@ bool testTraderRiskStopCancelsOrdersKeepsPositionAndBlocksNewOrders() {
   EngineState engine{};
   initializeAccounting(engine, request);
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(50, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(50, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 1000, 0, 0);
 
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0, netRealized);
+  (void)updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0);
   setTop(engine, kPx100 - 3000000000ll, kPx100 - 2900000000ll);
   const std::int64_t breachedEquity = equityE8(engine);
   const std::int64_t thresholdEquity = 3000000000ll;
 
   stopForTraderRisk(engine, 2000, breachedEquity, thresholdEquity);
-  std::array<hft_trader::core::StrategyOrderState, 4> visible{};
+  std::array<trading_core::StrategyOrderState, 4> visible{};
   io.clear();
   orders[0] = orderIntent(51, Side::Sell(), kPx100 + 200000000ll);
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = orders.size();
   applyIntents(engine, io, 3000, 0, 0);
 
@@ -2559,8 +2531,7 @@ bool testTraderRiskStopAfterForceCloseKeepsRiskFieldsAndFlatPosition() {
   initializeAccounting(engine, request);
   engine.takerFeeBpsE8 = 0;
   setTop(engine, kPx100 - 3000000000ll, kPx100 - 2900000000ll);
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0, netRealized);
+  (void)updatePosition(engine, Side::Buy(), kPx100, kQty1, 1200, 0);
   const std::int64_t breachedEquity = equityE8(engine);
   const std::int64_t thresholdEquity = 3000000000ll;
 
@@ -2596,10 +2567,9 @@ bool testForceCloseOpenLongPositionUsesLazyExecutionDepth() {
   engine.symbol.copyFrom("BTC_USDT");
   engine.takerFeeBpsE8 = 0;
   setTopWithQty(engine, 9900000000ll, 40000000ll, 10100000000ll, 100000000ll);
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0, netRealized);
+  (void)updatePosition(engine, Side::Buy(), kPx100, kQty1, 100, 0);
 
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
   ExecutionDepthProvider provider{};
   const bool opened = provider.open(dir, engine.symbol, config, engine.venueOrderBook) == ExecutionDepthOpenStatus::Ready;
@@ -2623,8 +2593,7 @@ bool testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() {
   EngineState engine{};
   engine.takerFeeBpsE8 = 0;
   setTop(engine, kPx100 - 300000000ll, kPx100 - 200000000ll);
-  std::int64_t netRealized = 0;
-  updatePosition(engine, Side::Sell(), kPx100, kQty1, 100, 0, netRealized);
+  (void)updatePosition(engine, Side::Sell(), kPx100, kQty1, 100, 0);
 
   const bool closed = forceClosePosition(engine, 200, 100);
 
@@ -2639,13 +2608,38 @@ bool testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() {
          expect(engine.fills[0].reduceOnly, "force close fill is reduce-only");
 }
 
+bool testForceCloseInt64MinPositionFailsClosed() {
+  constexpr std::int64_t kMin = std::numeric_limits<std::int64_t>::min();
+  EngineState direct{};
+  direct.netQtyRaw = kMin;
+  direct.entryPriceE8 = kPx100;
+  setTop(direct, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  const bool directClosed = forceClosePosition(direct, 200, 0);
+
+  EngineState scheduled{};
+  scheduled.netQtyRaw = kMin;
+  scheduled.entryPriceE8 = kPx100;
+  setTop(scheduled, kPx100 - 100000000ll, kPx100 + 100000000ll);
+  BacktestLatencyRuntime latency{};
+  const bool scheduledClose = forceClosePosition(scheduled, 200, latency);
+
+  return expect(!directClosed && direct.netQtyRaw == kMin,
+                "direct force close rejects unrepresentable INT64_MIN magnitude") &&
+         expect(direct.orders.empty() && direct.fills.empty(),
+                "direct force close leaves no partial close side effects") &&
+         expect(!scheduledClose && scheduled.netQtyRaw == kMin,
+                "scheduled force close rejects unrepresentable INT64_MIN magnitude") &&
+         expect(scheduled.orders.empty() && scheduled.pending.empty(),
+                "scheduled force close leaves no partial close side effects");
+}
+
 
 bool testCancelOpenOrdersAtFinishWritesCancelAcks() {
   EngineState engine{};
   setTop(engine, kPx100 - 100000000ll, kPx100 + 100000000ll);
-  std::array<hft_trader::core::OrderIntent, 1> orders{orderIntent(1, Side::Buy(), kPx100 - 200000000ll)};
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(orders.data(), orders.size());
+  std::array<trading_core::OrderIntent, 1> orders{orderIntent(1, Side::Buy(), kPx100 - 200000000ll)};
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
   io.orderCount = 1;
   applyIntents(engine, io, 1000, 0, 0);
 
@@ -2669,25 +2663,25 @@ bool testDepthRowBuildsInitialOrderBookSnapshot() {
   toRuntime(row, tape, sides);
   cxet::composite::OrderBookSnapshot snapshot = toRuntimeSnapshot(row);
 
-  hft_trader::core::LocalOrderBookState book{};
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookState book{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = 1u;
   config.tickSizeRaw = 1000000;
   Symbol symbol{};
   symbol.copyFrom("BTC_USDT");
   const bool bookReady =
       book.reserveLevelsPerSide(config.maxStoredLevelsPerSide) &&
-      hft_trader::core::applySnapshot(book, snapshot, symbol, config);
+      trading_core::applySnapshot(book, snapshot, symbol, config);
 
-  const hft_trader::core::LocalOrderBookView view = hft_trader::core::orderBook(book);
+  const trading_core::LocalOrderBookView view = trading_core::orderBook(book);
   return expect(bookReady, "depth row allocates bounded local orderbook") &&
          expect(snapshot.levelCount.raw == 2u, "depth row snapshot carries levels") &&
          expect(sides.sideCount.raw == 2u, "depth row tape carries side count") &&
          expect(sides.sides[0] == Side::Buy().raw, "depth row tape maps side zero to bid") &&
          expect(sides.sides[1] == Side::Sell().raw, "depth row tape maps side one to ask") &&
-         expect(book.initialized.raw == hft_trader::core::kAlgoFlagTrue.raw, "depth row snapshot initializes local orderbook") &&
-         expect(hft_trader::core::bestBid(view).raw == 9900000000ll, "depth row snapshot sets best bid") &&
-         expect(hft_trader::core::bestAsk(view).raw == 10100000000ll, "depth row snapshot sets best ask");
+         expect(book.initialized.raw == trading_core::kAlgoFlagTrue.raw, "depth row snapshot initializes local orderbook") &&
+         expect(trading_core::bestBid(view).raw == 9900000000ll, "depth row snapshot sets best bid") &&
+         expect(trading_core::bestAsk(view).raw == 10100000000ll, "depth row snapshot sets best ask");
 }
 
 bool testCapturedBboFreshnessUsesReplayClockCoordinates() {
@@ -2967,6 +2961,62 @@ bool testWriterDiagnosesNoSignalBelowThreshold() {
                 "diagnostics summarizes strategy spread decision reasons");
 }
 
+bool testWriterParsesSignedDecimalAccountingBounds() {
+  struct DecimalCase {
+    const char* suffix;
+    const char* value;
+    const char* expectedRaw;
+  };
+  constexpr DecimalCase kCases[] = {
+      {"positive-max", "92233720368.54775807", "9223372036854775807"},
+      {"negative-min", "-92233720368.54775808", "-9223372036854775808"},
+      {"positive-over", "92233720368.54775808", "null"},
+      {"negative-over", "-92233720368.54775809", "null"},
+  };
+
+  bool ok = true;
+  for (const DecimalCase& testCase : kCases) {
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() /
+        (std::string{"hft_backtest_decimal_bound_"} + testCase.suffix + "_" +
+         std::to_string(std::rand()));
+    hft_backtest::BacktestRunResult result{};
+    result.status = hft_backtest::Status::Ok;
+    result.requestId = testCase.suffix;
+    result.runId = testCase.suffix;
+    result.strategy = "stat_arb_edge_maker";
+    result.sessionPath = dir.parent_path() / "session";
+    result.configPath = dir / "source_config.ini";
+    result.resultPath = dir;
+    std::filesystem::create_directories(dir);
+    {
+      std::ofstream config(result.configPath,
+                           std::ios::out | std::ios::trunc);
+      config << "[strategy]\n"
+             << "type=stat_arb_edge_maker\n"
+             << "entry_edge_bps=" << testCase.value << '\n';
+    }
+
+    EngineState engine{};
+    engine.equityPoints.push_back(
+        JsonEquityPoint{100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+    engine.riskSnapshots.push_back(JsonRiskSnapshot{
+        100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        kRiskSnapshotReasonFinal});
+    const hft_backtest::Status status = writeResult(result, engine);
+    const std::string manifest = readText(dir / "manifest.json");
+    const std::string expected =
+        std::string{"\"entry_edge_bps_e8\": "} + testCase.expectedRaw;
+    ok = expect(status == hft_backtest::Status::Ok,
+                "decimal-bound writer reports ok") &&
+         ok;
+    ok = expect(manifest.find(expected) != std::string::npos,
+                "decimal-bound parser preserves valid bounds and rejects overflow") &&
+         ok;
+  }
+  return ok;
+}
+
 bool testWriterUsesSpreadDiagnosticsWithoutFullTrace() {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     ("hft_backtest_diagnostics_light_spread_" + std::to_string(std::rand()));
@@ -3148,10 +3198,10 @@ bool metadataParamDefaultIs(const hft_backtest::StrategyMetadata& metadata,
 }
 
 bool testStrategyMetadataMirrorsTraderRegistry() {
-  const std::size_t descriptorCount = hft_trader::runtime::strategyDescriptorCount();
+  const std::size_t descriptorCount = trading_core::strategyDescriptorCount();
   if (!expect(hft_backtest::strategyMetadataCount() == descriptorCount, "metadata count mirrors trader registry")) return false;
   for (std::size_t i = 0; i < descriptorCount; ++i) {
-    const hft_trader::runtime::StrategyDescriptor* descriptor = hft_trader::runtime::strategyDescriptorAt(i);
+    const trading_core::StrategyDescriptor* descriptor = trading_core::strategyDescriptorAt(i);
     const hft_backtest::StrategyMetadata* metadata = hft_backtest::strategyMetadataAt(i);
     if (!expect(descriptor != nullptr && descriptor->name != nullptr, "registry descriptor has a name")) return false;
     if (!expect(metadata != nullptr && metadata->id != nullptr, "metadata row exists for registry descriptor")) return false;
@@ -3162,10 +3212,10 @@ bool testStrategyMetadataMirrorsTraderRegistry() {
 }
 
 bool testStatArbBandLadderKeepsTradesOptionalForBboOnlyReplay() {
-  const hft_trader::runtime::StrategyDescriptor* descriptor = nullptr;
-  const std::size_t descriptorCount = hft_trader::runtime::strategyDescriptorCount();
+  const trading_core::StrategyDescriptor* descriptor = nullptr;
+  const std::size_t descriptorCount = trading_core::strategyDescriptorCount();
   for (std::size_t i = 0; i < descriptorCount; ++i) {
-    const hft_trader::runtime::StrategyDescriptor* candidate = hft_trader::runtime::strategyDescriptorAt(i);
+    const trading_core::StrategyDescriptor* candidate = trading_core::strategyDescriptorAt(i);
     if (candidate != nullptr && candidate->name != nullptr &&
         std::string_view{candidate->name} == "stat_arb_band_ladder") {
       descriptor = candidate;
@@ -3174,17 +3224,17 @@ bool testStatArbBandLadderKeepsTradesOptionalForBboOnlyReplay() {
   }
   if (!expect(descriptor != nullptr, "stat arb band ladder descriptor is exported")) return false;
 
-  return expect(hft_trader::runtime::descriptorStreamCount(*descriptor) == 2u,
+  return expect(trading_core::strategy::descriptorStreamCount(*descriptor) == 2u,
                 "stat arb band ladder keeps bookticker plus optional trades") &&
-         expect(hft_trader::runtime::descriptorStreamAt(*descriptor, 0u) ==
+         expect(trading_core::strategy::descriptorStreamAt(*descriptor, 0u) ==
                     cxet::api::market::PublicMarketDataStream::BookTicker,
                 "stat arb band ladder primary descriptor stream is bookticker") &&
-         expect(hft_trader::runtime::descriptorStreamRequired(*descriptor, 0u),
+         expect(trading_core::strategy::descriptorStreamRequired(*descriptor, 0u),
                 "stat arb band ladder requires bookticker") &&
-         expect(hft_trader::runtime::descriptorStreamAt(*descriptor, 1u) ==
+         expect(trading_core::strategy::descriptorStreamAt(*descriptor, 1u) ==
                     cxet::api::market::PublicMarketDataStream::Trades,
                 "stat arb band ladder still accepts trades when present") &&
-         expect(!hft_trader::runtime::descriptorStreamRequired(*descriptor, 1u),
+         expect(!trading_core::strategy::descriptorStreamRequired(*descriptor, 1u),
                 "stat arb band ladder does not require trades for BBO-only replay");
 }
 
@@ -3294,7 +3344,6 @@ bool testStatArbPairwiseTakerMetadataSupportsAllPairs() {
 
 bool testStrategyMetadataExposesInputFreshnessParam() {
   constexpr std::string_view kStrategies[] = {
-      "basis_convergence_probe",
       "spread_maker1and2",
       "stat_arb_band_ladder",
       "stat_arb_edge_maker",
@@ -3326,8 +3375,8 @@ int main() {
   ok = testBacktestRateLimitScheduleCanDisablePresets() && ok;
   ok = testWarmupOrderIsServiceHiddenAndMarksHot() && ok;
   ok = testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() && ok;
-  ok = testBacktestTradabilityFilterDropsWholeAmendAndRestoresState() && ok;
-  ok = testBacktestFailedLaterAmendCleansEarlierAcceptedReplacement() && ok;
+  ok = testRunCycleRejectsReservedSequenceMetadataBeforeApply() && ok;
+  ok = testRunCycleAdmitsSimulatedUserEventSemantics() && ok;
   ok = testBacktestFeeScheduleOverridesExchangePreset() && ok;
   ok = testBacktestGlobalFeeOverrideFillsPresetSides() && ok;
   ok = testRateLimitDecisionAllowsAfterReset() && ok;
@@ -3336,16 +3385,9 @@ int main() {
   ok = testRepeatedRateLimitRejectsShareCooldownWindow() && ok;
   ok = testRateLimitRejectAddsRunWarningWithoutFailingRun() && ok;
   ok = testPendingDrainActivatesLateOrder() && ok;
-  ok = testCancelThenReplacementLimitMaterializesReplace() && ok;
+  ok = testReservedCommandSequenceMetadataFailsClosed() && ok;
+  ok = testConservativeReplacementWaitsForCancelTerminal() && ok;
   ok = testCancelAckPublishesCanceledUserEventWithCumulativeFill() && ok;
-  ok = testOrderedCommandNewBeforeCancelKeepsReplacementLive() && ok;
-  ok = testTaggedAmendEqualLatencyPreservesCommandOrder() && ok;
-  ok = testTaggedCancelThenNewStopsWhenCancelSubmissionFails() && ok;
-  ok = testTaggedNewThenCancelStopsWhenNewSubmissionFails() && ok;
-  ok = testTaggedCancelThenNewRestoresAfterAcceptedCancelAndFailedNew() && ok;
-  ok = testTaggedNewThenCancelPreservesAcceptedNewWhenCancelFails() && ok;
-  ok = testTaggedCancelThenNewAllowsLatencyOverlap() && ok;
-  ok = testMalformedTaggedAmendFailsClosed() && ok;
   ok = testLatencySamplerIsReproducibleAndDeterministicWithoutJitter() && ok;
   ok = testLatencyRuntimeSplitsMarketAndLimitOrderActivation() && ok;
   ok = testLatencyRuntimeTreatsStopMarketAsMarketOrderActivation() && ok;
@@ -3392,6 +3434,7 @@ int main() {
   ok = testReduceOnlyMarketSellClosesLongAtBid() && ok;
   ok = testReduceOnlyMarketSellCapsToActualLongPosition() && ok;
   ok = testReduceOnlyMarketBuyClosesShortAtAsk() && ok;
+  ok = testReduceOnlyInt64MinShortLeavesBoundedResidual() && ok;
   ok = testFeesReduceWalletAndNetPnl() && ok;
   ok = testEquityPointCapturesRealizedOnlyPnl() && ok;
   ok = testRiskSnapshotCapturesCompactMarkToMarketPnl() && ok;
@@ -3401,12 +3444,14 @@ int main() {
   ok = testTraderRiskStopAfterForceCloseKeepsRiskFieldsAndFlatPosition() && ok;
   ok = testForceCloseOpenLongPositionUsesLazyExecutionDepth() && ok;
   ok = testForceCloseOpenShortPositionSubmitsReduceOnlyMarketBuy() && ok;
+  ok = testForceCloseInt64MinPositionFailsClosed() && ok;
   ok = testCancelOpenOrdersAtFinishWritesCancelAcks() && ok;
   ok = testDepthRowBuildsInitialOrderBookSnapshot() && ok;
   ok = testCapturedBboFreshnessUsesReplayClockCoordinates() && ok;
   ok = testTieredCandleHistoryBuildsCounts() && ok;
   ok = testWriterCreatesRunDirectory() && ok;
   ok = testWriterDiagnosesNoSignalBelowThreshold() && ok;
+  ok = testWriterParsesSignedDecimalAccountingBounds() && ok;
   ok = testWriterUsesSpreadDiagnosticsWithoutFullTrace() && ok;
   ok = testWriterDiagnosesOrdersWithoutFillsAndRateLimits() && ok;
   ok = testStaleProbeStrategiesAreRejectedByRegistry() && ok;

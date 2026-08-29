@@ -5,6 +5,7 @@
 #include "execution/backtest_execution_depth.hpp"
 #include "accounting/backtest_result_aggregation.hpp"
 #include "config/backtest_run_config.hpp"
+#include "config/backtest_strategy_config.hpp"
 #include "strategy/backtest_strategy_warmup.hpp"
 #include "strategy/backtest_strategy_runtime.hpp"
 #include "strategy/backtest_strategy_trace.hpp"
@@ -12,13 +13,12 @@
 #include "input/session_loader.hpp"
 #include "runner/backtest_run_error.hpp"
 
-#include "hft_trader/core/control/ControlState.hpp"
-#include "hft_trader/core/market/LocalOrderBook.hpp"
-#include "hft_trader/core/strategy/StrategyContract.hpp"
-#include "hft_trader/runtime/GeneratedStrategyRegistry.hpp"
-#include "hft_trader/runtime/config/RuntimeConfig.hpp"
-#include "hft_trader/runtime/risk/PortfolioRiskRuntime.hpp"
-#include "hft_trader/runtime/runner/StrategyMarketDataRuntime.hpp"
+#include "trading_core/core/control/ControlState.hpp"
+#include "trading_core/core/market/LocalOrderBook.hpp"
+#include "trading_core/core/strategy/StrategyContract.hpp"
+#include "trading_core/execution/PortfolioRisk.hpp"
+#include "trading_core/strategy/GeneratedStrategyRegistry.hpp"
+#include "trading_core/strategy/StrategyMarketData.hpp"
 #include "primitives/composite/OrderBookTapeRuntimeV1.hpp"
 
 #include <array>
@@ -40,8 +40,8 @@ extern "C" HFT_BACKTEST_API std::uint32_t hft_backtest_api_version() noexcept {
 }
 namespace {
 
-using hft_trader::runtime::StrategyDescriptor;
-using hft_trader::runtime::StrategyParamStorage;
+using trading_core::StrategyDescriptor;
+using trading_core::StrategyParamStorage;
 
 std::uint64_t elapsedNs(std::chrono::steady_clock::time_point start) noexcept {
   const auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -49,12 +49,12 @@ std::uint64_t elapsedNs(std::chrono::steady_clock::time_point start) noexcept {
   return value > 0 ? static_cast<std::uint64_t>(value) : 0u;
 }
 
-BacktestLiveProbeSummary summarizeLiveProbeConfig(const hft_trader::runtime::HftRuntimeConfig& cfg) noexcept {
+BacktestLiveProbeSummary summarizeLiveProbeConfig(const BacktestStrategyConfig& cfg) noexcept {
   BacktestLiveProbeSummary summary{};
-  for (const hft_trader::runtime::VenueRuntimeConfig& venue : cfg.venues) {
-    if (venue.liveProbe == hft_trader::runtime::LiveProbeVenueMode::Default) continue;
+  for (const BacktestStrategyVenueConfig& venue : cfg.venues) {
+    if (venue.liveProbe == BacktestLiveProbeMode::Default) continue;
     summary.configured = true;
-    if (venue.liveProbe == hft_trader::runtime::LiveProbeVenueMode::Required) summary.enabled = true;
+    if (venue.liveProbe == BacktestLiveProbeMode::Required) summary.enabled = true;
   }
   summary.ignored = summary.configured;
   return summary;
@@ -364,10 +364,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.error = "select either recorder sessions or a corpus path with source selections, plus config_path";
     return result;
   }
-  if (requestedSessionCount > hft_trader::core::kStrategyRuntimeMaxLegs) {
+  if (requestedSessionCount > trading_core::kStrategyRuntimeMaxLegs) {
     result.status = Status::InvalidArgument;
     result.error = "too many backtest market legs (max " +
-        std::to_string(hft_trader::core::kStrategyRuntimeMaxLegs) + ")";
+        std::to_string(trading_core::kStrategyRuntimeMaxLegs) + ")";
     return result;
   }
   if (request.hasPrimaryLegIndex && request.primaryLegIndex >= requestedSessionCount) {
@@ -384,19 +384,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   seedRequestedLegSummaries(result, request, hasExplicitSessions);
 
   std::string error;
-  if (hft_trader::runtime::hftRuntimeConfigAbiFingerprint() !=
-      hft_trader::runtime::kHftRuntimeConfigAbiFingerprint) {
-    result.status = Status::ConfigMismatch;
-    result.error = "hft-trader runtime ABI mismatch: rebuild apps/hft-trader and apps/hft-backtest before running backtests";
-    (void)writeEmptyArtifacts();
-    return result;
-  }
-
-  hft_trader::runtime::HftRuntimeConfig cfg{};
-  hft_trader::runtime::HftRuntimeConfigLoadOptions loadOptions{};
-  loadOptions.requireCpuTopology = false;
-  if (!hft_trader::runtime::loadRuntimeConfig(
-          request.configPath.string().c_str(), cfg, error, loadOptions)) {
+  BacktestStrategyConfig cfg{};
+  if (!loadBacktestStrategyConfig(
+          request.configPath.string().c_str(), cfg, error)) {
     result.status = Status::InvalidArgument;
     result.error = error;
     (void)writeEmptyArtifacts();
@@ -424,7 +414,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)writeEmptyArtifacts();
     return result;
   }
-  const StrategyDescriptor* descriptor = hft_trader::runtime::findStrategyDescriptor(cfg.strategyType);
+  const StrategyDescriptor* descriptor = trading_core::findStrategyDescriptor(cfg.strategyType);
   if (!descriptor || !descriptor->resolveParams || !descriptor->initState || !descriptor->runCycle) {
     result.status = Status::Unsupported;
     result.error = "strategy descriptor is missing required callbacks";
@@ -506,7 +496,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
 
   const ExchangeId sessionExchange = detail::exchangeFromText(session.exchange);
   const canon::MarketType sessionMarket = detail::marketFromText(session.market);
-  const hft_trader::runtime::VenueRuntimeConfig* venue = nullptr;
+  const BacktestStrategyVenueConfig* venue = nullptr;
   Symbol selectedSymbol{};
   bool symbolMatched = false;
   for (const auto& candidate : cfg.venues) {
@@ -528,21 +518,24 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
 
   StrategyParamStorage params{};
-  if (!descriptor->resolveParams(hft_trader::runtime::makeStrategyParamContext(cfg, *venue), params, error)) {
+  if (!descriptor->resolveParams(
+          makeBacktestStrategyParamContext(cfg, *venue), params, error)) {
     result.status = Status::InvalidArgument;
     result.error = error;
     (void)writeEmptyArtifacts();
     return result;
   }
+  const BacktestStrategyInputPolicy inputPolicy =
+      resolveBacktestStrategyInputPolicy(*descriptor, params);
   StrategyInstrumentSpec instrument{};
   instrument.tickSizeRaw = session.instrument.tickSizeE8;
   instrument.stepSizeRaw = session.instrument.lotSizeE8;
   instrument.contractBaseQtyRaw = session.instrument.contractBaseQtyE8;
   instrument.priceBasisQtyRaw = session.instrument.priceBasisQtyE8;
   instrument.expiryUtcNs = static_cast<std::uint64_t>(session.instrument.expiryUtcNs > 0 ? session.instrument.expiryUtcNs : 0);
-  instrument.tickGrid = hft_trader::core::prepareFastStepGrid(instrument.tickSizeRaw);
-  instrument.qtyStepGrid = hft_trader::core::prepareFastStepGrid(instrument.stepSizeRaw);
-  instrument.contractBaseQtyGrid = hft_trader::core::prepareFastStepGrid(instrument.contractBaseQtyRaw);
+  instrument.tickGrid = trading_core::prepareFastStepGrid(instrument.tickSizeRaw);
+  instrument.qtyStepGrid = trading_core::prepareFastStepGrid(instrument.stepSizeRaw);
+  instrument.contractBaseQtyGrid = trading_core::prepareFastStepGrid(instrument.contractBaseQtyRaw);
   std::vector<StrategyInstrumentSpec> legInstruments;
   std::vector<Symbol> legSymbols;
   if (hasExplicitSessions) {
@@ -554,14 +547,14 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       legInstruments[leg].contractBaseQtyRaw = sessions[leg].instrument.contractBaseQtyE8;
       legInstruments[leg].priceBasisQtyRaw = sessions[leg].instrument.priceBasisQtyE8;
       legInstruments[leg].expiryUtcNs = static_cast<std::uint64_t>(sessions[leg].instrument.expiryUtcNs > 0 ? sessions[leg].instrument.expiryUtcNs : 0);
-      legInstruments[leg].tickGrid = hft_trader::core::prepareFastStepGrid(legInstruments[leg].tickSizeRaw);
-      legInstruments[leg].qtyStepGrid = hft_trader::core::prepareFastStepGrid(legInstruments[leg].stepSizeRaw);
-      legInstruments[leg].contractBaseQtyGrid = hft_trader::core::prepareFastStepGrid(legInstruments[leg].contractBaseQtyRaw);
+      legInstruments[leg].tickGrid = trading_core::prepareFastStepGrid(legInstruments[leg].tickSizeRaw);
+      legInstruments[leg].qtyStepGrid = trading_core::prepareFastStepGrid(legInstruments[leg].stepSizeRaw);
+      legInstruments[leg].contractBaseQtyGrid = trading_core::prepareFastStepGrid(legInstruments[leg].contractBaseQtyRaw);
       legSymbols[leg].copyFrom(sessions[leg].symbol.c_str());
     }
   }
 
-  alignas(hft_trader::runtime::kStrategyRuntimeStateAlign) std::array<unsigned char, hft_trader::runtime::kStrategyRuntimeStateBytes> state{};
+  alignas(trading_core::kStrategyRuntimeStateAlign) std::array<unsigned char, trading_core::kStrategyRuntimeStateBytes> state{};
   if (!descriptor->initState(state.data(), params, instrument)) {
     result.status = Status::InvalidArgument;
     result.error = "strategy initState failed";
@@ -586,7 +579,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     seedCoverage.seedM1Candles = history.m1Count.raw;
     seedCoverage.seedM15Candles = history.m15Count.raw;
     seedCoverage.seedD1Candles = history.d1Count.raw;
-    hft_trader::runtime::StrategyHistorySeedStats stats{};
+    trading_core::StrategyHistorySeedStats stats{};
     if (!descriptor->seedHistory(state.data(), history, &stats)) {
       result.status = Status::InvalidArgument;
       result.error = "strategy seedHistory failed";
@@ -735,7 +728,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     if (hasExplicitSessions) {
       executionDepthProviders.reserve(legEngines.size());
       for (std::size_t leg = 0; leg < sessions.size() && leg < legEngines.size(); ++leg) {
-        hft_trader::core::LocalOrderBookConfig bookConfig{};
+        trading_core::LocalOrderBookConfig bookConfig{};
         bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
         bookConfig.tickSizeRaw = sessions[leg].instrument.tickSizeE8;
         Symbol legSymbol{};
@@ -758,7 +751,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       }
       if (!legEngines.empty()) engine = legEngines[0];
     } else {
-      hft_trader::core::LocalOrderBookConfig bookConfig{};
+      trading_core::LocalOrderBookConfig bookConfig{};
       bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
       bookConfig.tickSizeRaw = instrument.tickSizeRaw;
       auto provider = std::make_unique<detail::ExecutionDepthProvider>();
@@ -778,12 +771,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       }
     }
   }
-  hft_trader::core::SymbolShardConfig shard{};
+  trading_core::SymbolShardConfig shard{};
   shard.shardId.raw = 1;
   shard.strategyId.raw = 1;
   shard.symbolId.raw = 1;
   shard.symbol = selectedSymbol;
-  hft_trader::core::ShardControlState control{};
+  trading_core::ShardControlState control{};
   control.shardId = shard.shardId;
 
   std::vector<detail::TimelineEvent> loadedTimeline;
@@ -933,8 +926,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     detail::appendEquityPoint(engine, replayStartTsNs);
     detail::appendRiskSnapshot(engine, replayStartTsNs, detail::kRiskSnapshotReasonStart);
   }
-  std::array<hft_trader::core::StrategyAccountState, hft_trader::core::kStrategyRuntimeMaxLegs> riskAccounts{};
-  std::array<const hft_trader::runtime::VenueRuntimeConfig*, hft_trader::core::kStrategyRuntimeMaxLegs> riskVenues{};
+  std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs> riskAccounts{};
+  std::array<const BacktestStrategyVenueConfig*, trading_core::kStrategyRuntimeMaxLegs> riskVenues{};
+  std::array<trading_core::PortfolioRiskLegConfig,
+             trading_core::kStrategyRuntimeMaxLegs> riskLegConfigs{};
   const std::size_t riskAccountCount = hasExplicitSessions ? boundedRiskLegCount(legEngines.size()) : 1u;
   if (hasExplicitSessions) {
     refreshRiskAccountsFromEngines(legEngines, riskAccounts);
@@ -943,8 +938,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     riskAccounts[0] = accountStateFromEngine(engine);
     riskVenues[0] = venue;
   }
-  hft_trader::runtime::PortfolioRiskRuntimeState traderRiskState =
-      hft_trader::runtime::makePortfolioRiskRuntimeState(cfg.risk, riskAccounts.data(), riskAccountCount, riskVenues.data());
+  for (std::size_t i = 0u; i < riskAccountCount; ++i) {
+    riskLegConfigs[i] = makeBacktestPortfolioRiskLegConfig(riskVenues[i]);
+  }
+  trading_core::PortfolioRiskState traderRiskState =
+      trading_core::makePortfolioRiskState(
+          makeBacktestPortfolioRiskConfig(cfg.risk), riskAccounts.data(),
+          riskAccountCount, riskLegConfigs.data());
   auto writeCurrentArtifacts = [&]() noexcept -> Status {
     markTotalTime();
     if (hasExplicitSessions) {
@@ -1001,8 +1001,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
         if (legEngine.initialBalanceE8 > 0 && detail::equityE8(legEngine) <= 0) {
           const std::int64_t legEquity = detail::equityE8(legEngine);
           detail::hardLiquidate(legEngine, tsNs, legEquity);
-          control.killActive = hft_trader::core::kAlgoFlagTrue;
-          control.haltReason = hft_trader::core::kHaltReasonManualKill;
+          control.killActive = trading_core::kAlgoFlagTrue;
+          control.haltReason = trading_core::kHaltReasonManualKill;
           result.liquidated = true;
           result.liquidationTsNs = tsNs;
           result.liquidationEquityE8 = legEquity;
@@ -1014,8 +1014,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       const std::int64_t equity = portfolioEquityE8(legEngines, portfolioInitialBalance);
       if (equity > 0) return false;
       for (detail::EngineState& legEngine : legEngines) detail::hardLiquidate(legEngine, tsNs, equity);
-      control.killActive = hft_trader::core::kAlgoFlagTrue;
-      control.haltReason = hft_trader::core::kHaltReasonManualKill;
+      control.killActive = trading_core::kAlgoFlagTrue;
+      control.haltReason = trading_core::kHaltReasonManualKill;
       result.liquidated = true;
       result.liquidationTsNs = tsNs;
       result.liquidationEquityE8 = equity;
@@ -1025,8 +1025,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     const std::int64_t equity = detail::equityE8(engine);
     if (equity > 0) return false;
     detail::hardLiquidate(engine, tsNs, equity);
-    control.killActive = hft_trader::core::kAlgoFlagTrue;
-    control.haltReason = hft_trader::core::kHaltReasonManualKill;
+    control.killActive = trading_core::kAlgoFlagTrue;
+    control.haltReason = trading_core::kHaltReasonManualKill;
     result.liquidated = true;
     result.liquidationTsNs = tsNs;
     result.liquidationEquityE8 = equity;
@@ -1045,9 +1045,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       if (engine.riskStopped) return true;
       riskAccounts[0] = accountStateFromEngine(engine);
     }
-    if (!hft_trader::runtime::acquirePortfolioRiskEvaluationSlot(traderRiskState, riskNow, forceRiskCheck)) return false;
-    const hft_trader::runtime::PortfolioRiskEvaluation eval =
-        hft_trader::runtime::evaluatePortfolioRisk(traderRiskState, riskAccounts.data(), riskAccountCount, riskNow);
+    if (!trading_core::acquirePortfolioRiskEvaluationSlot(
+            traderRiskState, riskNow, forceRiskCheck)) {
+      return false;
+    }
+    const trading_core::PortfolioRiskEvaluation eval =
+        trading_core::evaluatePortfolioRisk(
+            traderRiskState, riskAccounts.data(), riskAccountCount, riskNow);
     if (!eval.breached) return false;
     if (hasExplicitSessions) {
       for (detail::EngineState& legEngine : legEngines) {
@@ -1058,7 +1062,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       if (!forceCloseForTraderRisk(engine, tsNs)) traderRiskCloseProblem = true;
       detail::stopForTraderRisk(engine, tsNs, eval.equityE8, eval.thresholdEquityE8);
     }
-    hft_trader::runtime::applyPortfolioRiskToControl(traderRiskState, control);
+    control.killActive = trading_core::kAlgoFlagTrue;
+    control.haltReason = trading_core::kHaltReasonRiskLimit;
     result.riskStopped = true;
     result.riskStopTsNs = tsNs;
     result.riskStopEquityE8 = eval.equityE8;
@@ -1105,7 +1110,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       return result;
     }
     multiScratch = multiScratchStorage.get();
-    multiScratch->reset(legEngines.size() < hft_trader::core::kStrategyRuntimeMaxLegs ? legEngines.size() : hft_trader::core::kStrategyRuntimeMaxLegs);
+    multiScratch->reset(legEngines.size() < trading_core::kStrategyRuntimeMaxLegs ? legEngines.size() : trading_core::kStrategyRuntimeMaxLegs);
   }
   bool replayStopped = false;
   auto deliverNextApplicationTransaction =
@@ -1113,10 +1118,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     const std::int64_t deliveryTsNs =
         deliveryEventAt(deliveryCursor).deliveryTsNs;
     const bool beforeDeliveryOk = hasExplicitSessions
-        ? runUntilMulti(*descriptor, state.data(), legEngines,
+        ? runUntilMulti(*descriptor, inputPolicy, state.data(), legEngines,
                         legInstruments, *multiScratch, shard, control,
                         deliveryTsNs, request, RunUntilBoundary::Exclusive)
-        : runUntil(*descriptor, state.data(), engine, instrument,
+        : runUntil(*descriptor, inputPolicy, state.data(), engine, instrument,
                    *singleScratch, shard, control, deliveryTsNs, request,
                    RunUntilBoundary::Exclusive);
     if (!beforeDeliveryOk) {
@@ -1163,11 +1168,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
     const bool deliveredOk = cycleEvent->applicationOnly ||
         (hasExplicitSessions
-            ? runCycleMulti(*descriptor, state.data(), legEngines,
+            ? runCycleMulti(*descriptor, inputPolicy, state.data(), legEngines,
                             legInstruments, *multiScratch, shard, control,
                             cycleEvent->legIndex, cycleEvent->deliveryTsNs,
                             request, nullptr)
-            : runCycle(*descriptor, state.data(), engine, instrument,
+            : runCycle(*descriptor, inputPolicy, state.data(), engine,
+                       instrument,
                        *singleScratch, shard, control,
                        cycleEvent->deliveryTsNs, request, nullptr));
     if (!deliveredOk) {
@@ -1180,10 +1186,10 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
     if (stopOnStrictRateLimitReject()) return false;
     const bool afterDeliveryOk = hasExplicitSessions
-        ? runUntilMulti(*descriptor, state.data(), legEngines,
+        ? runUntilMulti(*descriptor, inputPolicy, state.data(), legEngines,
                         legInstruments, *multiScratch, shard, control,
                         cycleEvent->deliveryTsNs, request)
-        : runUntil(*descriptor, state.data(), engine, instrument,
+        : runUntil(*descriptor, inputPolicy, state.data(), engine, instrument,
                    *singleScratch, shard, control,
                    cycleEvent->deliveryTsNs, request);
     if (!afterDeliveryOk) {
@@ -1226,8 +1232,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     // tie the venue update still wins: orders due at the same coordinate are
     // activated only after that venue state has been applied.
     const bool beforeRawOk = hasExplicitSessions
-        ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, eventTsNs, request, RunUntilBoundary::Exclusive)
-        : runUntil(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, eventTsNs, request, RunUntilBoundary::Exclusive);
+        ? runUntilMulti(*descriptor, inputPolicy, state.data(), legEngines,
+                        legInstruments, *multiScratch, shard, control,
+                        eventTsNs, request, RunUntilBoundary::Exclusive)
+        : runUntil(*descriptor, inputPolicy, state.data(), engine, instrument,
+                   *singleScratch, shard, control, eventTsNs, request,
+                   RunUntilBoundary::Exclusive);
     if (!beforeRawOk) {
       result.status = Status::InvalidArgument;
       result.error = "strategy event loop did not settle before raw market event";
@@ -1267,8 +1277,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
     if (replayStopped) break;
     const bool afterOk = hasExplicitSessions
-        ? runUntilMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, eventTsNs, request)
-        : runUntil(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, eventTsNs, request);
+        ? runUntilMulti(*descriptor, inputPolicy, state.data(), legEngines,
+                        legInstruments, *multiScratch, shard, control,
+                        eventTsNs, request)
+        : runUntil(*descriptor, inputPolicy, state.data(), engine, instrument,
+                   *singleScratch, shard, control, eventTsNs, request);
     if (!afterOk) {
       result.status = Status::InvalidArgument;
       result.error = "strategy event loop did not settle after market event";
@@ -1294,8 +1307,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (!replayStopped) {
     const std::int64_t settlementBaseTsNs = currentReplayTsNs();
     const bool settled = hasExplicitSessions
-        ? settleAfterReplayMulti(*descriptor, state.data(), legEngines, legInstruments, *multiScratch, shard, control, settlementBaseTsNs, effectiveRequest)
-        : settleAfterReplay(*descriptor, state.data(), engine, instrument, *singleScratch, shard, control, settlementBaseTsNs, effectiveRequest);
+        ? settleAfterReplayMulti(*descriptor, inputPolicy, state.data(),
+                                 legEngines, legInstruments, *multiScratch,
+                                 shard, control, settlementBaseTsNs,
+                                 effectiveRequest)
+        : settleAfterReplay(*descriptor, inputPolicy, state.data(), engine,
+                            instrument, *singleScratch, shard, control,
+                            settlementBaseTsNs, effectiveRequest);
     if (!settled) {
       result.status = Status::InvalidArgument;
       result.error = "strategy event loop did not settle after replay";

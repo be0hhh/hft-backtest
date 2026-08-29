@@ -33,11 +33,11 @@ Amount amount(std::int64_t raw) noexcept {
   return out;
 }
 
-hft_trader::core::OrderIntent stopMarketIntent(std::uint64_t orderId,
+trading_core::OrderIntent stopMarketIntent(std::uint64_t orderId,
                                                Side side,
                                                std::int64_t triggerPx,
                                                canon::OrderTriggerSource triggerSource = canon::OrderTriggerSource::Mark) noexcept {
-  hft_trader::core::OrderIntent out{};
+  trading_core::OrderIntent out{};
   out.clientIntentId = id(orderId);
   out.side = side;
   out.orderType = canon::OrderType::Stop;
@@ -47,12 +47,12 @@ hft_trader::core::OrderIntent stopMarketIntent(std::uint64_t orderId,
   return out;
 }
 
-hft_trader::core::OrderIntent triggeredLimitStopIntent(std::uint64_t orderId,
+trading_core::OrderIntent triggeredLimitStopIntent(std::uint64_t orderId,
                                                        Side side,
                                                        std::int64_t triggerPx,
                                                        std::int64_t capPx,
                                                        canon::TimeInForce triggeredTimeInForce) noexcept {
-  hft_trader::core::OrderIntent out = stopMarketIntent(orderId, side, triggerPx);
+  trading_core::OrderIntent out = stopMarketIntent(orderId, side, triggerPx);
   out.price = price(capPx);
   out.triggeredTimeInForce = triggeredTimeInForce;
   return out;
@@ -62,8 +62,8 @@ void setTop(EngineState& engine, std::int64_t bid, std::int64_t ask) noexcept {
   cxet::composite::BookTickerRuntimeV1 top{};
   top.bid.px.raw = bid;
   top.ask.px.raw = ask;
-  hft_trader::core::copyBookTickerSnapshot(engine.snapshot, top);
-  hft_trader::core::copyBookTickerSnapshot(engine.venueSnapshot, top);
+  trading_core::copyBookTickerSnapshot(engine.snapshot, top);
+  trading_core::copyBookTickerSnapshot(engine.venueSnapshot, top);
 }
 
 void setTopWithQty(EngineState& engine,
@@ -89,24 +89,24 @@ void seedVenueBook(EngineState& engine,
   for (const auto& level : asks) {
     (void)cxet::composite::appendOrderBookLevel(snapshot, price(level.first), amount(level.second), Side::Sell());
   }
-  hft_trader::core::LocalOrderBookConfig config{};
+  trading_core::LocalOrderBookConfig config{};
   config.maxStoredLevelsPerSide.raw = static_cast<std::uint32_t>(
       std::max(bids.size(), asks.size()));
   if (!engine.venueOrderBook.reserveLevelsPerSide(
           config.maxStoredLevelsPerSide) ||
-      !hft_trader::core::applySnapshot(
+      !trading_core::applySnapshot(
           engine.venueOrderBook, snapshot, engine.symbol, config)) {
     return;
   }
-  hft_trader::core::bindOrderBookSnapshot(engine.venueSnapshot, engine.venueOrderBook);
+  trading_core::bindOrderBookSnapshot(engine.venueSnapshot, engine.venueOrderBook);
   engine.venueOrderBookExecutionEnabled = true;
   if (!bids.size() || !asks.size()) return;
   setTop(engine, bids.begin()->first, asks.begin()->first);
 }
 
-void submitTriggeredStop(EngineState& engine, hft_trader::core::OrderIntent& order) noexcept {
-  hft_trader::core::StrategyIo io{};
-  io.orderOut = Span<hft_trader::core::OrderIntent>(&order, 1u);
+void submitTriggeredStop(EngineState& engine, trading_core::OrderIntent& order) noexcept {
+  trading_core::StrategyIo io{};
+  io.orderOut = Span<trading_core::OrderIntent>(&order, 1u);
   io.orderCount = 1u;
   applyIntents(engine, io, 1000, 0, 0);
 }
@@ -130,7 +130,7 @@ bool testTriggeredIocLimitStopCapsExecutionAndCancelsResidualFromDepth() {
                 {{104000000ll, kQty1}},
                 {{105000000ll, 40000000ll}, {106000000ll, 60000000ll}});
 
-  hft_trader::core::OrderIntent order =
+  trading_core::OrderIntent order =
       triggeredLimitStopIntent(79, Side::Buy(), 110000000ll, 105000000ll, canon::TimeInForce::IOC);
   submitTriggeredStop(engine, order);
   triggerMark(engine, 110000000ll, 2700);
@@ -148,7 +148,7 @@ bool testTriggeredFokLimitStopRejectsPartialExecutableDepthLiquidity() {
                 {{104000000ll, kQty1}},
                 {{105000000ll, 40000000ll}, {106000000ll, 60000000ll}});
 
-  hft_trader::core::OrderIntent order =
+  trading_core::OrderIntent order =
       triggeredLimitStopIntent(80, Side::Buy(), 110000000ll, 105000000ll, canon::TimeInForce::FOK);
   submitTriggeredStop(engine, order);
   triggerMark(engine, 110000000ll, 2800);
@@ -163,7 +163,7 @@ bool testTriggeredIocLimitStopUsesBboQtyWhenDepthIsUnavailable() {
   EngineState engine{};
   setTopWithQty(engine, 104000000ll, kQty1, 105000000ll, 40000000ll);
 
-  hft_trader::core::OrderIntent order =
+  trading_core::OrderIntent order =
       triggeredLimitStopIntent(81, Side::Buy(), 110000000ll, 105000000ll, canon::TimeInForce::IOC);
   submitTriggeredStop(engine, order);
   triggerMark(engine, 110000000ll, 2900);
@@ -179,7 +179,7 @@ bool testTriggeredFokLimitStopRejectsInsufficientBboQtyWhenDepthIsUnavailable() 
   EngineState engine{};
   setTopWithQty(engine, 104000000ll, kQty1, 105000000ll, 40000000ll);
 
-  hft_trader::core::OrderIntent order =
+  trading_core::OrderIntent order =
       triggeredLimitStopIntent(82, Side::Buy(), 110000000ll, 105000000ll, canon::TimeInForce::FOK);
   submitTriggeredStop(engine, order);
   triggerMark(engine, 110000000ll, 3000);
@@ -194,7 +194,7 @@ bool testTriggeredFokLimitStopFillsWhenBboQtyIsSufficient() {
   EngineState engine{};
   setTopWithQty(engine, 104000000ll, kQty1, 105000000ll, kQty1);
 
-  hft_trader::core::OrderIntent order =
+  trading_core::OrderIntent order =
       triggeredLimitStopIntent(83, Side::Buy(), 110000000ll, 105000000ll, canon::TimeInForce::FOK);
   submitTriggeredStop(engine, order);
   triggerMark(engine, 110000000ll, 3100);
