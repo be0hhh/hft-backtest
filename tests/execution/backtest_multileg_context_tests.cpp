@@ -413,9 +413,22 @@ template <typename State,
           std::size_t MaxCommands = 0u>
 trading_core::StrategyDescriptor makeProbeDescriptor(
     const char* name,
-    trading_core::StrategyRunCycleFn runCycle) noexcept {
+    trading_core::StrategyRunCycleFn runCycle,
+    bool singleSource = false,
+    trading_core::StrategyOrderCapability requiredOrderCapabilities =
+        trading_core::StrategyOrderCapability::None) noexcept {
   trading_core::StrategyDescriptor descriptor{};
   descriptor.name = name;
+  descriptor.universeTopology = singleSource
+      ? trading_core::StrategyUniverseTopology::SingleSource
+      : trading_core::StrategyUniverseTopology::ExplicitGroup;
+  descriptor.domainMask = trading_core::StrategyDomainMask::All;
+  descriptor.requiredOrderCapabilities = requiredOrderCapabilities;
+  descriptor.minLegs = singleSource ? 1u : 2u;
+  descriptor.maxLegs = singleSource
+      ? 1u
+      : static_cast<std::uint8_t>(
+            trading_core::kStrategyDescriptorMaxLegs);
   descriptor.streamCount = 1u;
   descriptor.streams[0] =
       cxet::api::market::PublicMarketDataStream::BookTicker;
@@ -620,7 +633,7 @@ bool testRunCycleSinglePassesRouteContext() {
 
   trading_core::StrategyDescriptor descriptor =
       makeProbeDescriptor<SingleLegContextProbeState>(
-          "single_leg_context_probe", singleLegContextProbeRunCycle);
+          "single_leg_context_probe", singleLegContextProbeRunCycle, true);
 
   SingleLegCycleScratch scratch{};
   SingleLegContextProbeState state{};
@@ -979,7 +992,9 @@ bool testBacktestResolvesDescriptorFreshnessMaxAge() {
 
   trading_core::StrategyDescriptor descriptor =
       makeProbeDescriptor<SingleLegContextProbeState>(
-          "configured_freshness_age_probe", singleLegContextProbeRunCycle);
+          "configured_freshness_age_probe",
+          singleLegContextProbeRunCycle,
+          true);
   descriptor.inputFreshnessMaxAgeMs = &oneMillisecondFreshnessMaxAge;
   const BacktestStrategyInputPolicy inputPolicy =
       probeInputPolicy(descriptor);
@@ -1058,7 +1073,8 @@ bool testRunCycleMultiPrimaryOnlyDropsNonPrimaryRouteOrder() {
 
   trading_core::StrategyDescriptor descriptor =
       makeProbeDescriptor<NonPrimaryRouteOrderState, 1u>(
-          "primary_only_filter_probe", nonPrimaryRouteOrderRunCycle);
+          "primary_only_filter_probe", nonPrimaryRouteOrderRunCycle,
+          false, trading_core::StrategyOrderCapability::Market);
 
   auto scratch = std::make_unique<MultiLegCycleScratch>();
   NonPrimaryRouteOrderState state{};
@@ -1098,7 +1114,8 @@ bool testRunCycleMultiDefaultRouteTargetsConfiguredPrimary() {
 
   trading_core::StrategyDescriptor descriptor =
       makeProbeDescriptor<NonPrimaryRouteOrderState, 1u>(
-          "default_route_primary_probe", nonPrimaryRouteOrderRunCycle);
+          "default_route_primary_probe", nonPrimaryRouteOrderRunCycle,
+          false, trading_core::StrategyOrderCapability::Market);
   auto scratch = std::make_unique<MultiLegCycleScratch>();
   NonPrimaryRouteOrderState state{};
   state.routeRaw = trading_core::kDefaultExecutionRouteHandle.raw;
@@ -1144,7 +1161,8 @@ bool testRunCycleMultiDefaultRouteRejectsStaleConfiguredLeg() {
 
   trading_core::StrategyDescriptor descriptor =
       makeProbeDescriptor<NonPrimaryRouteOrderState, 1u>(
-          "default_route_stale_probe", nonPrimaryRouteOrderRunCycle);
+          "default_route_stale_probe", nonPrimaryRouteOrderRunCycle,
+          false, trading_core::StrategyOrderCapability::Market);
   auto scratch = std::make_unique<MultiLegCycleScratch>();
   NonPrimaryRouteOrderState state{};
   state.routeRaw = trading_core::kDefaultExecutionRouteHandle.raw;
@@ -1185,7 +1203,11 @@ bool testRunCycleMultiRetainsCancelsWhenDefaultPrimaryIsStale() {
 
   trading_core::StrategyDescriptor descriptor =
       makeProbeDescriptor<CancelParityProbeState, 1u, 0u, 2u, 2u>(
-          "stale_default_cancel_parity_probe", cancelParityProbeRunCycle);
+          "stale_default_cancel_parity_probe", cancelParityProbeRunCycle,
+          false,
+          trading_core::StrategyOrderCapability::Market |
+              trading_core::StrategyOrderCapability::Limit |
+              trading_core::StrategyOrderCapability::Cancel);
   auto scratch = std::make_unique<MultiLegCycleScratch>();
   CancelParityProbeState state{};
   trading_core::SymbolShardConfig shard{};
@@ -1239,7 +1261,8 @@ bool testRunCycleMultiBridgesTransactionOutputToEmitReport() {
 
   trading_core::StrategyDescriptor descriptor =
       makeProbeDescriptor<TransactionEmitProbeState, 2u, 1u>(
-          "transaction_emit_probe", transactionEmitProbeRunCycle);
+          "transaction_emit_probe", transactionEmitProbeRunCycle,
+          false, trading_core::StrategyOrderCapability::Market);
   descriptor.applyEmitReport = transactionEmitProbeApplyReport;
 
   auto scratch = std::make_unique<MultiLegCycleScratch>();
@@ -1305,7 +1328,8 @@ bool testRunCycleMultiBindsRouteZeroOrderToExplicitTransactionLeg() {
   trading_core::StrategyDescriptor descriptor =
       makeProbeDescriptor<RouteZeroTransactionProbeState, 1u, 1u>(
           "route_zero_transaction_binding_probe",
-          routeZeroTransactionProbeRunCycle);
+          routeZeroTransactionProbeRunCycle,
+          false, trading_core::StrategyOrderCapability::Market);
   descriptor.applyEmitReport = routeZeroTransactionProbeApplyReport;
   auto scratch = std::make_unique<MultiLegCycleScratch>();
   RouteZeroTransactionProbeState state{};
@@ -1358,7 +1382,8 @@ bool testRunCycleMultiDeduplicatesWarmupByResolvedDefaultLeg() {
   trading_core::StrategyDescriptor descriptor =
       makeProbeDescriptor<DefaultWarmupDedupProbeState, 2u, 0u, 0u, 2u>(
           "resolved_default_warmup_dedup_probe",
-          defaultWarmupDedupProbeRunCycle);
+          defaultWarmupDedupProbeRunCycle,
+          false, trading_core::StrategyOrderCapability::Limit);
   descriptor.restoreAfterOrderFailure =
       &probeRollbackCapacityCycle<DefaultWarmupDedupProbeState>;
 
@@ -1400,6 +1425,11 @@ bool testBacktestRejectsExplicitInvalidPrimaryBeforeLoad() {
 bool testStrategyRunCycleErrorIncludesRejectReasonContext() {
   trading_core::StrategyDescriptor descriptor{};
   descriptor.name = "reject_reason_probe";
+  descriptor.universeTopology =
+      trading_core::StrategyUniverseTopology::SingleSource;
+  descriptor.domainMask = trading_core::StrategyDomainMask::All;
+  descriptor.minLegs = 1u;
+  descriptor.maxLegs = 1u;
   descriptor.captureState = rejectReasonProbeCaptureState;
   descriptor.rejectReasonName = rejectReasonProbeName;
   RejectReasonProbeState state{};

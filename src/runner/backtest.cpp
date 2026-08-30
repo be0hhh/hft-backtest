@@ -533,9 +533,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   instrument.contractBaseQtyRaw = session.instrument.contractBaseQtyE8;
   instrument.priceBasisQtyRaw = session.instrument.priceBasisQtyE8;
   instrument.expiryUtcNs = static_cast<std::uint64_t>(session.instrument.expiryUtcNs > 0 ? session.instrument.expiryUtcNs : 0);
-  instrument.tickGrid = trading_core::prepareFastStepGrid(instrument.tickSizeRaw);
-  instrument.qtyStepGrid = trading_core::prepareFastStepGrid(instrument.stepSizeRaw);
-  instrument.contractBaseQtyGrid = trading_core::prepareFastStepGrid(instrument.contractBaseQtyRaw);
+  (void)trading_core::prepareStrategyInstrumentSpecDerived(instrument);
   std::vector<StrategyInstrumentSpec> legInstruments;
   std::vector<Symbol> legSymbols;
   if (hasExplicitSessions) {
@@ -547,9 +545,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       legInstruments[leg].contractBaseQtyRaw = sessions[leg].instrument.contractBaseQtyE8;
       legInstruments[leg].priceBasisQtyRaw = sessions[leg].instrument.priceBasisQtyE8;
       legInstruments[leg].expiryUtcNs = static_cast<std::uint64_t>(sessions[leg].instrument.expiryUtcNs > 0 ? sessions[leg].instrument.expiryUtcNs : 0);
-      legInstruments[leg].tickGrid = trading_core::prepareFastStepGrid(legInstruments[leg].tickSizeRaw);
-      legInstruments[leg].qtyStepGrid = trading_core::prepareFastStepGrid(legInstruments[leg].stepSizeRaw);
-      legInstruments[leg].contractBaseQtyGrid = trading_core::prepareFastStepGrid(legInstruments[leg].contractBaseQtyRaw);
+      (void)trading_core::prepareStrategyInstrumentSpecDerived(
+          legInstruments[leg]);
       legSymbols[leg].copyFrom(sessions[leg].symbol.c_str());
     }
   }
@@ -646,6 +643,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   engine.market = sessionMarket;
   engine.symbol = selectedSymbol;
   engine.tickSizeE8 = instrument.tickSizeRaw;
+  Price reconstructionTick{};
+  reconstructionTick.raw = instrument.tickSizeRaw;
+  (void)cxet::composite::configureBboReconstruction(
+      engine.bboReconstruction, reconstructionTick);
+  (void)cxet::composite::configureBboReconstruction(
+      engine.venueBboReconstruction, reconstructionTick);
   engine.makerFillMinCrossTicks = effectiveRequest.makerFillMinCrossTicks;
   detail::initializeAccounting(engine, request);
   const BacktestFeeSchedule primaryFee = resolveFeeSchedule(request, session.exchange, session.market);
@@ -684,6 +687,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       legEngine.market = detail::marketFromText(sessions[leg].market);
       legEngine.symbol.copyFrom(sessions[leg].symbol.c_str());
       legEngine.tickSizeE8 = legInstruments[leg].tickSizeRaw;
+      Price legReconstructionTick{};
+      legReconstructionTick.raw = legInstruments[leg].tickSizeRaw;
+      (void)cxet::composite::configureBboReconstruction(
+          legEngine.bboReconstruction, legReconstructionTick);
+      (void)cxet::composite::configureBboReconstruction(
+          legEngine.venueBboReconstruction, legReconstructionTick);
       legEngine.makerFillMinCrossTicks = effectiveRequest.makerFillMinCrossTicks;
       detail::initializeAccounting(legEngine, request);
       const std::int64_t legBalance = legInitialBalanceE8(request, leg);

@@ -34,6 +34,23 @@ std::int64_t toInt64Time(TimeNs value) noexcept {
   return static_cast<std::int64_t>(value.raw);
 }
 
+[[nodiscard]] bool hasExactExchangeTimestamp(
+    const hftrec::replay::EventArrival& arrival,
+    std::int64_t exchangeTimestampNs) noexcept {
+  return exchangeTimestampNs > 0 &&
+      (arrival.flags &
+       hftrec::replay::EventArrivalExchangeTimestampMissing) == 0u;
+}
+
+[[nodiscard]] cxet::composite::BboReconstructionTimestampOrigin
+reconstructionTimestampOrigin(
+    const hftrec::replay::EventArrival& arrival,
+    std::int64_t exchangeTimestampNs) noexcept {
+  return hasExactExchangeTimestamp(arrival, exchangeTimestampNs)
+      ? cxet::composite::BboReconstructionTimestampOrigin::Exchange
+      : cxet::composite::BboReconstructionTimestampOrigin::Unknown;
+}
+
 std::int64_t nextPendingTs(const detail::EngineState& engine) noexcept {
   return engine.pending.empty()
       ? std::numeric_limits<std::int64_t>::max()
@@ -89,15 +106,10 @@ std::int64_t nextUserEventDeliveryTs(const detail::EngineState& engine) noexcept
   return userEventFallbackTs(engine.userEvents[engine.deliveredUserEvents]);
 }
 
-void applyBacktestReconstructedBbo(trading_core::StrategyMarketSnapshot& snapshot,
-                                   trading_core::LocalOrderBookState& orderBook,
-                                   const cxet::composite::BboReconstructionState& bbo,
-                                   std::uint64_t receiveMonotonicNs) noexcept {
-  const cxet::composite::BboReconstructionView view = cxet::composite::bboReconstructionView(bbo);
-  TimeNs receiveMonotonic{};
-  receiveMonotonic.raw = receiveMonotonicNs;
-  trading_core::copyReconstructedBboSnapshot(
-      snapshot, view, receiveMonotonic);
+void overlayBacktestReconstructedBbo(
+    trading_core::StrategyMarketSnapshot& snapshot,
+    trading_core::LocalOrderBookState& orderBook,
+    const cxet::composite::BboReconstructionView& view) noexcept {
   if (cxet::composite::validBboReconstruction(view) &&
       orderBook.initialized.raw == trading_core::kAlgoFlagTrue.raw) {
     (void)trading_core::applyBboOverlay(
@@ -106,6 +118,19 @@ void applyBacktestReconstructedBbo(trading_core::StrategyMarketSnapshot& snapsho
         trading_core::AlgoFlag{view.askQtyKnown.raw});
     trading_core::bindOrderBookSnapshot(snapshot, orderBook);
   }
+}
+
+void publishBacktestReconstructedBbo(
+    trading_core::StrategyMarketSnapshot& snapshot,
+    trading_core::LocalOrderBookState& orderBook,
+    const cxet::composite::BboReconstructionState& bbo,
+    std::uint64_t receiveMonotonicNs) noexcept {
+  const cxet::composite::BboReconstructionView view = cxet::composite::bboReconstructionView(bbo);
+  TimeNs receiveMonotonic{};
+  receiveMonotonic.raw = receiveMonotonicNs;
+  trading_core::copyReconstructedBboSnapshot(
+      snapshot, view, receiveMonotonic);
+  overlayBacktestReconstructedBbo(snapshot, orderBook, view);
 }
 
 void refreshCapturedBookTicker(
@@ -128,7 +153,7 @@ void refreshCapturedBookTicker(
   }
 }
 
-void applyCapturedBookTicker(
+[[nodiscard]] bool applyCapturedBookTicker(
     trading_core::StrategyMarketSnapshot& snapshot,
     cxet::composite::BboReconstructionState& bbo,
     const detail::BookTickerRow& row,
@@ -140,42 +165,55 @@ void applyCapturedBookTicker(
   TimeNs receiveRealtime{};
   receiveRealtime.raw = static_cast<std::uint64_t>(
       event.deliveryRealtimeNs > 0 ? event.deliveryRealtimeNs : 0);
-  const auto timestampOrigin = ticker.ts.raw != 0u
+  const bool exactExchangeTimestamp =
+      hasExactExchangeTimestamp(row.arrival, row.tsNs);
+  const auto timestampOrigin = exactExchangeTimestamp
       ? trading_core::MarketTimestampOrigin::Exchange
       : trading_core::MarketTimestampOrigin::Receive;
+  const auto reconstructionOrigin =
+      reconstructionTimestampOrigin(row.arrival, row.tsNs);
   if (row.bidPresent && row.askPresent) {
+    if (!cxet::composite::applyBboReconstructionBookTicker(
+            bbo, ticker, reconstructionOrigin)) {
+      return false;
+    }
     trading_core::copyBookTickerSnapshot(
         snapshot, ticker, receiveMonotonic, receiveRealtime,
         timestampOrigin);
-    (void)cxet::composite::applyBboReconstructionBookTicker(bbo, ticker);
-    return;
+    return true;
   }
 
-  cxet::composite::BboReconstructionState captured{};
-  captured.bookTicker = ticker;
-  captured.lastBookTickerTs = ticker.ts;
-  captured.source = cxet::composite::kBboReconstructionSourceBookTicker;
-  captured.bidPresent = row.bidPresent
-      ? cxet::composite::kBboReconstructionFlagTrue
-      : cxet::composite::kBboReconstructionFlagFalse;
-  captured.askPresent = row.askPresent
-      ? cxet::composite::kBboReconstructionFlagTrue
-      : cxet::composite::kBboReconstructionFlagFalse;
-  captured.bidQtyKnown = row.bidPresent && ticker.bid.qty.raw > 0
-      ? cxet::composite::kBboReconstructionFlagTrue
-      : cxet::composite::kBboReconstructionFlagFalse;
-  captured.askQtyKnown = row.askPresent && ticker.ask.qty.raw > 0
-      ? cxet::composite::kBboReconstructionFlagTrue
-      : cxet::composite::kBboReconstructionFlagFalse;
-  captured.valid = cxet::composite::kBboReconstructionFlagFalse;
-  const auto capturedView = cxet::composite::bboReconstructionView(captured);
-  trading_core::copyPartialBookTickerSnapshot(
-      snapshot, capturedView, receiveMonotonic, receiveRealtime,
-      timestampOrigin);
-  if (!cxet::composite::bboReconstructionTimestampRollback(
-          bbo, ticker.ts)) {
-    bbo = captured;
+  if (!row.bidPresent && !row.askPresent) return false;
+  cxet::composite::BookTickerSideUpdateRuntimeV1 update{};
+  update.ts = ticker.ts;
+  bool applied = false;
+  if (row.bidPresent) {
+    update.side = Side::Buy();
+    update.action = cxet::composite::BookTickerSideAction::Upsert;
+    update.level = ticker.bid;
+    applied = cxet::composite::applyBboReconstructionBookTickerSide(
+        bbo, update, reconstructionOrigin);
+    if (!applied) return false;
   }
+  if (row.askPresent) {
+    update.side = Side::Sell();
+    update.action = cxet::composite::BookTickerSideAction::Upsert;
+    update.level = ticker.ask;
+    applied = cxet::composite::applyBboReconstructionBookTickerSide(
+        bbo, update, reconstructionOrigin);
+    if (!applied) return false;
+  }
+  const auto capturedView = cxet::composite::bboReconstructionView(bbo);
+  if (cxet::composite::validBboReconstruction(capturedView)) {
+    trading_core::copyBookTickerSnapshot(
+        snapshot, capturedView.bookTicker, receiveMonotonic, receiveRealtime,
+        timestampOrigin);
+  } else {
+    trading_core::copyPartialBookTickerSnapshot(
+        snapshot, capturedView, receiveMonotonic, receiveRealtime,
+        timestampOrigin);
+  }
+  return applied;
 }
 
 std::int64_t nextWakeTs(const trading_core::StrategyDescriptor& descriptor, const void* state) noexcept {
@@ -709,6 +747,58 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   trading_core::StrategyCandleSnapshot& candle = strategyVisible ? engine.candle : engine.venueCandle;
   trading_core::LocalOrderBookState& orderBook = strategyVisible ? engine.orderBook : engine.venueOrderBook;
   cxet::composite::BboReconstructionState& bbo = strategyVisible ? engine.bboReconstruction : engine.venueBboReconstruction;
+  detail::ReconstructionSourceIdentity* identity = nullptr;
+  detail::ReconstructionSourceIdentity* counterpart = nullptr;
+  if (event.kind == detail::kTimelineKindBookTicker) {
+    identity = strategyVisible
+        ? &engine.reconstructionBookTickerIdentity
+        : &engine.venueReconstructionBookTickerIdentity;
+    counterpart = strategyVisible
+        ? &engine.reconstructionTradeIdentity
+        : &engine.venueReconstructionTradeIdentity;
+  } else if (event.kind == detail::kTimelineKindTrade) {
+    identity = strategyVisible
+        ? &engine.reconstructionTradeIdentity
+        : &engine.venueReconstructionTradeIdentity;
+    counterpart = strategyVisible
+        ? &engine.reconstructionBookTickerIdentity
+        : &engine.venueReconstructionBookTickerIdentity;
+  }
+  if (identity) {
+    const detail::ReconstructionSourceIdentity nextIdentity{
+        .producerEpoch = event.producerEpoch,
+        .sourceGeneration = event.sourceGeneration,
+        .sessionEpoch = event.sessionEpoch,
+        .sourceId = event.sourceId,
+        .initialized = true,
+    };
+    const auto sameIdentity = [](const detail::ReconstructionSourceIdentity& left,
+                                 const detail::ReconstructionSourceIdentity& right) noexcept {
+      return left.initialized == right.initialized &&
+          left.producerEpoch == right.producerEpoch &&
+          left.sourceGeneration == right.sourceGeneration &&
+          left.sessionEpoch == right.sessionEpoch &&
+          left.sourceId == right.sourceId;
+    };
+    const bool changed = identity->initialized &&
+        !sameIdentity(*identity, nextIdentity);
+    const bool counterpartAlreadyCurrent =
+        counterpart && counterpart->initialized &&
+        sameIdentity(*counterpart, nextIdentity);
+    *identity = nextIdentity;
+    if (changed && !counterpartAlreadyCurrent) {
+      cxet::composite::resetBboReconstruction(bbo);
+      trading_core::clearBookTickerSnapshot(snapshot);
+      trading_core::copyReconstructedBboSnapshot(
+          snapshot, cxet::composite::BboReconstructionView{});
+      const trading_core::LocalOrderBookConfig config = orderBook.config;
+      const Symbol symbol = orderBook.symbol;
+      orderBook.reset();
+      orderBook.config = config;
+      orderBook.symbol = symbol;
+      trading_core::clearOrderBookSnapshot(snapshot);
+    }
+  }
   const std::int64_t replayReceiveMonotonic =
       strategyVisible ? event.deliveryTsNs : event.tsNs;
   // Synthetic execution is sequenced on replay delivery, the same causal
@@ -722,7 +812,13 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   bool changed = false;
   if (event.kind == detail::kTimelineKindDepth) {
     const detail::DepthRow& depth = session.depths[event.index];
-    if (depth.resetBookBeforeApply) orderBook.reset();
+    if (depth.resetBookBeforeApply) {
+      const trading_core::LocalOrderBookConfig config = orderBook.config;
+      const Symbol symbol = orderBook.symbol;
+      orderBook.reset();
+      orderBook.config = config;
+      orderBook.symbol = symbol;
+    }
     cxet::composite::OrderBookTapeRuntimeV1 tape{};
     cxet::composite::OrderBookTapeSidesRuntimeV1 sides{};
     detail::toRuntime(depth, tape, sides);
@@ -738,16 +834,23 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     }
     (void)trading_core::applyTapeDelta(
         orderBook, tape, sides);
-    applyBacktestReconstructedBbo(
-        snapshot, orderBook, bbo, replayReceiveMonotonicNs);
+    overlayBacktestReconstructedBbo(
+        snapshot, orderBook,
+        cxet::composite::bboReconstructionView(bbo));
     trading_core::bindOrderBookSnapshot(snapshot, orderBook);
     changed = true;
   } else if (event.kind == detail::kTimelineKindTrade) {
-    const auto trade = detail::toRuntime(session.trades[event.index]);
+    const auto& row = session.trades[event.index];
+    const auto trade = detail::toRuntime(row);
     trading_core::copyTradeSnapshot(snapshot, trade);
-    (void)cxet::composite::applyBboReconstructionKnownInitiatorTrade(bbo, trade);
-    applyBacktestReconstructedBbo(
-        snapshot, orderBook, bbo, replayReceiveMonotonicNs);
+    const bool reconstructionApplied =
+        cxet::composite::applyBboReconstructionKnownInitiatorTrade(
+        bbo, trade,
+        reconstructionTimestampOrigin(row.arrival, row.tsNs));
+    if (reconstructionApplied) {
+      publishBacktestReconstructedBbo(
+          snapshot, orderBook, bbo, replayReceiveMonotonicNs);
+    }
     if (!strategyVisible) detail::tryFillOnTrade(engine, trade, executionTsNs);
     changed = true;
   } else if (event.kind == detail::kTimelineKindBookTicker) {
@@ -759,10 +862,13 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
       }
     } else {
       const auto ticker = detail::toRuntime(row);
-      applyCapturedBookTicker(snapshot, bbo, row, event,
-                              replayReceiveMonotonicNs, ticker);
-      applyBacktestReconstructedBbo(
-          snapshot, orderBook, bbo, replayReceiveMonotonicNs);
+      const bool reconstructionApplied = applyCapturedBookTicker(
+          snapshot, bbo, row, event,
+          replayReceiveMonotonicNs, ticker);
+      if (reconstructionApplied) {
+        publishBacktestReconstructedBbo(
+            snapshot, orderBook, bbo, replayReceiveMonotonicNs);
+      }
       trading_core::bindOrderBookSnapshot(snapshot, orderBook);
       if (!strategyVisible) {
         detail::tryFillOnTop(engine, executionTsNs, true);

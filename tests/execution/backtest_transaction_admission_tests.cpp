@@ -198,6 +198,13 @@ Id asyncRejectAllocateClientId(void*) noexcept {
 trading_core::StrategyDescriptor asyncRejectDescriptor() noexcept {
   trading_core::StrategyDescriptor descriptor{};
   descriptor.name = "async_reject_fail_stop_probe";
+  descriptor.universeTopology =
+      trading_core::StrategyUniverseTopology::SingleSource;
+  descriptor.domainMask = trading_core::StrategyDomainMask::All;
+  descriptor.requiredOrderCapabilities =
+      trading_core::StrategyOrderCapability::Limit;
+  descriptor.minLegs = 1u;
+  descriptor.maxLegs = 1u;
   descriptor.streamCount = 1u;
   descriptor.streams[0] =
       cxet::api::market::PublicMarketDataStream::BookTicker;
@@ -311,6 +318,14 @@ bool testTerminalRejectStopsTransactionAndDefersOnlyOverlap() {
               "terminal-reject fixture has valid transaction bindings")) return false;
 
   trading_core::StrategyDescriptor descriptor{};
+  descriptor.universeTopology =
+      trading_core::StrategyUniverseTopology::ExplicitGroup;
+  descriptor.domainMask = trading_core::StrategyDomainMask::All;
+  descriptor.requiredOrderCapabilities =
+      trading_core::StrategyOrderCapability::Market |
+      trading_core::StrategyOrderCapability::Limit;
+  descriptor.minLegs = 2u;
+  descriptor.maxLegs = 2u;
   descriptor.applyEmitReport = &captureReport;
   descriptor.replayTransaction = &replayTransaction;
   descriptor.allocateClientId = &allocateClientId;
@@ -390,6 +405,13 @@ bool testPartialAcceptedTransactionSchedulesCleanup() {
               "partial-admission fixture has valid transaction bindings")) return false;
 
   trading_core::StrategyDescriptor descriptor{};
+  descriptor.universeTopology =
+      trading_core::StrategyUniverseTopology::ExplicitGroup;
+  descriptor.domainMask = trading_core::StrategyDomainMask::All;
+  descriptor.requiredOrderCapabilities =
+      trading_core::StrategyOrderCapability::Limit;
+  descriptor.minLegs = 2u;
+  descriptor.maxLegs = 2u;
   descriptor.applyEmitReport = &captureReport;
   descriptor.replayTransaction = &replayTransaction;
   descriptor.allocateClientId = &allocateClientId;

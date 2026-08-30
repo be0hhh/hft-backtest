@@ -36,6 +36,21 @@ endif()
 option(CXET_PORTABLE_BUILD
   "If ON: disable -march=native for hft-backtest Release builds." OFF)
 
+if(CXET_SANITIZER_PROFILE STREQUAL "address-undefined")
+  add_compile_options(
+    -O2 -g3 -fsanitize=address,undefined
+    -fsanitize-address-use-after-scope -fno-omit-frame-pointer
+    -fno-optimize-sibling-calls -fno-sanitize-recover=all)
+  add_link_options(
+    -fsanitize=address,undefined -fno-omit-frame-pointer
+    -fno-sanitize-recover=all)
+elseif(CXET_SANITIZER_PROFILE STREQUAL "thread")
+  add_compile_options(
+    -O2 -g3 -fsanitize=thread -fno-omit-frame-pointer
+    -fno-optimize-sibling-calls)
+  add_link_options(-fsanitize=thread -fno-omit-frame-pointer)
+endif()
+
 find_package(Threads REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 

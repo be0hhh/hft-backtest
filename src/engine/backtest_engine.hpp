@@ -360,6 +360,14 @@ struct PendingAction {
   Id commandClientIntentId{};
 };
 
+struct ReconstructionSourceIdentity {
+  std::uint64_t producerEpoch{0u};
+  std::uint64_t sourceGeneration{0u};
+  std::uint64_t sessionEpoch{0u};
+  std::uint32_t sourceId{0u};
+  bool initialized{false};
+};
+
 struct EngineState {
   std::vector<JsonOrder> orders{};
   std::vector<JsonFill> fills{};
@@ -396,6 +404,10 @@ struct EngineState {
   std::string depthFallbackReason{};
   cxet::composite::BboReconstructionState bboReconstruction{};
   cxet::composite::BboReconstructionState venueBboReconstruction{};
+  ReconstructionSourceIdentity reconstructionBookTickerIdentity{};
+  ReconstructionSourceIdentity reconstructionTradeIdentity{};
+  ReconstructionSourceIdentity venueReconstructionBookTickerIdentity{};
+  ReconstructionSourceIdentity venueReconstructionTradeIdentity{};
   std::uint64_t contextRevision{1u};
   std::array<std::int64_t,
              cxet::api::market::kPublicMarketDataStreamCount>

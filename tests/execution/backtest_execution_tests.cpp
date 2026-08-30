@@ -314,6 +314,13 @@ void warmupGateProbeRestoreState(void* rawState, const trading_core::StrategySta
 bool testBacktestWarmupGateAllowsRealOrderAfterWarmupAckMarksHot() {
   trading_core::StrategyDescriptor descriptor{};
   descriptor.name = "warmup_gate_probe";
+  descriptor.universeTopology =
+      trading_core::StrategyUniverseTopology::SingleSource;
+  descriptor.domainMask = trading_core::StrategyDomainMask::All;
+  descriptor.requiredOrderCapabilities =
+      trading_core::StrategyOrderCapability::Market;
+  descriptor.minLegs = 1u;
+  descriptor.maxLegs = 1u;
   descriptor.streamCount = 1u;
   descriptor.streams[0] =
       cxet::api::market::PublicMarketDataStream::BookTicker;
@@ -435,6 +442,13 @@ void reservedSequenceProbeRestoreState(
 bool testRunCycleRejectsReservedSequenceMetadataBeforeApply() {
   trading_core::StrategyDescriptor descriptor{};
   descriptor.name = "reserved_sequence_probe";
+  descriptor.universeTopology =
+      trading_core::StrategyUniverseTopology::SingleSource;
+  descriptor.domainMask = trading_core::StrategyDomainMask::All;
+  descriptor.requiredOrderCapabilities =
+      trading_core::StrategyOrderCapability::Limit;
+  descriptor.minLegs = 1u;
+  descriptor.maxLegs = 1u;
   descriptor.streamCount = 1u;
   descriptor.streams[0] =
       cxet::api::market::PublicMarketDataStream::BookTicker;
@@ -537,6 +551,11 @@ bool userSemanticProbeRunCycle(
 bool testRunCycleAdmitsSimulatedUserEventSemantics() {
   trading_core::StrategyDescriptor descriptor{};
   descriptor.name = "user_semantic_probe";
+  descriptor.universeTopology =
+      trading_core::StrategyUniverseTopology::SingleSource;
+  descriptor.domainMask = trading_core::StrategyDomainMask::All;
+  descriptor.minLegs = 1u;
+  descriptor.maxLegs = 1u;
   descriptor.streamCount = 1u;
   descriptor.streams[0] =
       cxet::api::market::PublicMarketDataStream::BookTicker;
