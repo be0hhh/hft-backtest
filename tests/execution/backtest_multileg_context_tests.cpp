@@ -1249,10 +1249,19 @@ bool testRunCycleMultiRetainsCancelsWhenDefaultPrimaryIsStale() {
 bool testRunCycleMultiBridgesTransactionOutputToEmitReport() {
   constexpr std::size_t kLegs = 2u;
   std::vector<EngineState> engines(kLegs);
+  std::vector<EngineState> blockedEngines(kLegs);
+  std::vector<EngineState> filteredEngines(kLegs);
   std::vector<StrategyInstrumentSpec> instruments(kLegs);
+  const auto initializeEngines = [](std::vector<EngineState>& target) noexcept {
+    for (std::size_t i = 0u; i < target.size(); ++i) {
+      setTop(target[i], kPx100, kPx100 + 100000000ll);
+      target[i].legIndex = static_cast<std::uint32_t>(i);
+    }
+  };
+  initializeEngines(engines);
+  initializeEngines(blockedEngines);
+  initializeEngines(filteredEngines);
   for (std::size_t i = 0u; i < kLegs; ++i) {
-    setTop(engines[i], kPx100, kPx100 + 100000000ll);
-    engines[i].legIndex = static_cast<std::uint32_t>(i);
     instruments[i].tickSizeRaw = 100000000ll;
     instruments[i].stepSizeRaw = 100000000ll;
     instruments[i].tickGrid = trading_core::prepareFastStepGrid(instruments[i].tickSizeRaw);
@@ -1270,8 +1279,6 @@ bool testRunCycleMultiBridgesTransactionOutputToEmitReport() {
   trading_core::SymbolShardConfig shard{};
   trading_core::ShardControlState control{};
   BacktestRunRequest request{};
-  std::vector<EngineState> blockedEngines = engines;
-  std::vector<EngineState> filteredEngines = engines;
 
   const bool ok = runCycleMulti(
       descriptor, probeInputPolicy(descriptor), &state, engines,

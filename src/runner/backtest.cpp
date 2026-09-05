@@ -602,6 +602,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     return result;
   }
   detail::EngineState& engine = *engineStorage;
+  std::unique_ptr<detail::EngineState> aggregateEngineStorage;
+  const detail::EngineState* artifactEngine = &engine;
   const auto prepareEngineOrderBookStorage =
       [&](detail::EngineState& target) noexcept {
         if (descriptor->orderBookViewLevelsPerSide != 0u) {
@@ -665,9 +667,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       return result;
     }
   }
-  std::vector<detail::EngineState> legEngines;
+  std::vector<detail::EngineState> legEngines(
+      hasExplicitSessions ? sessions.size() : 0u);
   if (hasExplicitSessions) {
-    legEngines.resize(sessions.size());
     for (std::size_t leg = 0; leg < sessions.size(); ++leg) {
       detail::EngineState& legEngine = legEngines[leg];
       if (!prepareEngineOrderBookStorage(legEngine)) {
@@ -711,7 +713,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
         return result;
       }
     }
-    if (!legEngines.empty()) engine = legEngines[0];
   }
   if (loadPlan.loadDepths) {
     if (hasExplicitSessions) {
@@ -721,7 +722,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
           legEngines[leg].depthExecutionMode = BacktestDepthExecutionMode::Depth;
         }
       }
-      if (!legEngines.empty()) engine = legEngines[0];
     } else {
       engine.venueOrderBookExecutionEnabled = !session.depths.empty();
       if (engine.venueOrderBookExecutionEnabled) engine.depthExecutionMode = BacktestDepthExecutionMode::Depth;
@@ -758,7 +758,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
           legEngines[leg].depthFallbackReason = provider->failureReason();
         }
       }
-      if (!legEngines.empty()) engine = legEngines[0];
     } else {
       trading_core::LocalOrderBookConfig bookConfig{};
       bookConfig.maxStoredLevelsPerSide.raw = rawdata::kMaxOrderbookLevels;
@@ -1351,9 +1350,11 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     }
     populatePortfolioResultPnl(result, sessions, legEngines, portfolioInitialBalance);
     try {
-      auto aggregate = std::make_unique<detail::EngineState>();
-      populateAggregateArtifactEngine(legEngines, portfolioInitialBalance, finalTsNs, *aggregate);
-      engine = std::move(*aggregate);
+      aggregateEngineStorage = std::make_unique<detail::EngineState>();
+      populateAggregateArtifactEngine(
+          legEngines, portfolioInitialBalance, finalTsNs,
+          *aggregateEngineStorage);
+      artifactEngine = aggregateEngineStorage.get();
     } catch (...) {
       result.status = Status::IoError;
       result.error = "failed to allocate aggregate backtest engine state";
@@ -1370,33 +1371,49 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     result.orders = engine.orders.size();
     result.fills = engine.fills.size();
   }
-  appendRateLimitWarnings(result, engine, hasExplicitSessions ? &legEngines : nullptr);
-  appendDepthExecutionWarnings(result, engine, hasExplicitSessions ? &legEngines : nullptr);
-  result.rateLimitRejectedCommands = rateLimitRejectedCommands(engine, hasExplicitSessions ? &legEngines : nullptr);
+  const detail::EngineState& finalArtifactEngine = *artifactEngine;
+  appendRateLimitWarnings(
+      result, finalArtifactEngine,
+      hasExplicitSessions ? &legEngines : nullptr);
+  appendDepthExecutionWarnings(
+      result, finalArtifactEngine,
+      hasExplicitSessions ? &legEngines : nullptr);
+  result.rateLimitRejectedCommands = rateLimitRejectedCommands(
+      finalArtifactEngine, hasExplicitSessions ? &legEngines : nullptr);
   result.performance.finalizeNs = elapsedNs(finalizeStart);
   markTotalTime();
   if (legLiquidationProblem) {
     result.status = Status::Ok;
     result.warnings.push_back(result.error.empty() ? std::string{"leg liquidated"} : result.error);
     result.error.clear();
-    (void)applyStrictRateLimitStatus(result, engine, hasExplicitSessions ? &legEngines : nullptr);
-    refreshArtifactCounters(engine);
-    Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
+    (void)applyStrictRateLimitStatus(
+        result, finalArtifactEngine,
+        hasExplicitSessions ? &legEngines : nullptr);
+    refreshArtifactCounters(finalArtifactEngine);
+    Status writeStatus = hasExplicitSessions && request.writeArtifacts
+        ? detail::writeResult(result, finalArtifactEngine, &legEngines)
+        : writeArtifacts(finalArtifactEngine);
     if (!isOk(writeStatus)) result.status = writeStatus;
     return result;
   }
   if (traderRiskCloseProblem) {
     result.status = Status::InvalidArgument;
     result.error = "trader risk stop could not force-close all open positions";
-    refreshArtifactCounters(engine);
-    Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
+    refreshArtifactCounters(finalArtifactEngine);
+    Status writeStatus = hasExplicitSessions && request.writeArtifacts
+        ? detail::writeResult(result, finalArtifactEngine, &legEngines)
+        : writeArtifacts(finalArtifactEngine);
     if (!isOk(writeStatus)) result.status = writeStatus;
     return result;
   }
   result.status = Status::Ok;
-  (void)applyStrictRateLimitStatus(result, engine, hasExplicitSessions ? &legEngines : nullptr);
-  refreshArtifactCounters(engine);
-  Status writeStatus = hasExplicitSessions && request.writeArtifacts ? detail::writeResult(result, engine, &legEngines) : writeArtifacts(engine);
+  (void)applyStrictRateLimitStatus(
+      result, finalArtifactEngine,
+      hasExplicitSessions ? &legEngines : nullptr);
+  refreshArtifactCounters(finalArtifactEngine);
+  Status writeStatus = hasExplicitSessions && request.writeArtifacts
+      ? detail::writeResult(result, finalArtifactEngine, &legEngines)
+      : writeArtifacts(finalArtifactEngine);
   if (!isOk(writeStatus)) result.status = writeStatus;
   (void)reportProgress(timeline.size(), timeline.size(), "complete", progressCallback, userData);
   return result;
