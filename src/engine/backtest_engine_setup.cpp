@@ -7,7 +7,10 @@ namespace hft_backtest {
 bool applyRateLimitSchedule(detail::EngineState& engine,
                             const BacktestRateLimitSchedule& schedule,
                             std::string& error) {
-  engine.rateLimits = trading_core::RateLimitState{};
+  if (!engine.rateLimits.reset()) {
+    error = "backtest rate-limit reset requires completed reservations";
+    return false;
+  }
   auto hasBucket = [&](trading_core::RateLimitBucketKind kind) noexcept {
     for (const trading_core::RateLimitBucketConfig& bucket : schedule.buckets) {
       if (bucket.enabled && bucket.kind == kind) return true;
