@@ -59,7 +59,7 @@ set(HFT_BACKTEST_GENERATED_STRATEGY_METADATA
   "${HFT_BACKTEST_GENERATED_DIR}/hft_backtest/generated/StrategyMetadata.hpp")
 file(GLOB_RECURSE HFT_BACKTEST_STRATEGY_PROFILES CONFIGURE_DEPENDS
   LIST_DIRECTORIES false
-  "${CMAKE_CURRENT_LIST_DIR}/../trading-core/strategy_profiles/*.ini")
+  "${CMAKE_CURRENT_LIST_DIR}/../trading-core/StrategyProfiles/*.ini")
 list(SORT HFT_BACKTEST_STRATEGY_PROFILES)
 if(NOT HFT_BACKTEST_STRATEGY_PROFILES)
   message(FATAL_ERROR
@@ -80,13 +80,13 @@ endforeach()
 add_custom_command(
   OUTPUT "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}"
   COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_strategy_metadata.py"
-    --profile-root "${CMAKE_CURRENT_LIST_DIR}/../trading-core/strategy_profiles"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/GenerateStrategyMetadata.py"
+    --profile-root "${CMAKE_CURRENT_LIST_DIR}/../trading-core/StrategyProfiles"
     --output "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}"
     ${HFT_BACKTEST_REQUIRED_STRATEGY_ARGS}
     ${HFT_BACKTEST_STRATEGY_PROFILES}
   DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_strategy_metadata.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/GenerateStrategyMetadata.py"
     ${HFT_BACKTEST_STRATEGY_PROFILES}
   COMMENT "Generating bounded hft-backtest strategy metadata"
   VERBATIM
@@ -95,41 +95,41 @@ add_custom_target(hft_backtest_generate_strategy_metadata
   DEPENDS "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}")
 
 add_library(hft_backtest_core SHARED
-  src/accounting/backtest_accounting.cpp
-  src/accounting/backtest_metrics.cpp
-  src/accounting/backtest_result_aggregation.cpp
-  src/config/backtest_run_config.cpp
-  src/config/backtest_strategy_config.cpp
-  src/config/strategy_metadata.cpp
+  src/Runtime/src/Accounting/BacktestAccounting.cpp
+  src/Runtime/src/Accounting/BacktestMetrics.cpp
+  src/Runtime/src/Accounting/BacktestResultAggregation.cpp
+  src/Runtime/src/Config/BacktestRunConfig.cpp
+  src/Runtime/src/Config/BacktestStrategyConfig.cpp
+  src/Runtime/src/Config/StrategyMetadata.cpp
   "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}"
-  src/engine/backtest_common.cpp
-  src/engine/backtest_engine_setup.cpp
-  src/engine/backtest_prepared.cpp
-  src/engine/backtest_replay_clock.cpp
-  src/engine/backtest_timeline.cpp
-  src/execution/backtest_execution.cpp
-  src/execution/backtest_execution_depth.cpp
-  src/execution/backtest_fill_model.cpp
-  src/execution/backtest_latency.cpp
-  src/input/binary_corpus_loader.cpp
-  src/input/session_loader.cpp
-  src/results/backtest_result_writer.cpp
-  src/runner/backtest.cpp
-  src/strategy/backtest_strategy_intent_lowering.cpp
-  src/strategy/backtest_strategy_input_freshness.cpp
-  src/strategy/backtest_strategy_runtime.cpp
-  src/strategy/backtest_strategy_trace.cpp
-  src/strategy/backtest_strategy_warmup.cpp
-  src/sweep/backtest_sweep.cpp
-  src/sweep/backtest_sweep_search.cpp
-  src/sweep/backtest_sweep_writer.cpp
+  src/Runtime/src/BacktestCommon.cpp
+  src/Runtime/src/BacktestEngineSetup.cpp
+  src/Runtime/src/BacktestPrepared.cpp
+  src/Runtime/src/BacktestReplayClock.cpp
+  src/Runtime/src/BacktestTimeline.cpp
+  src/Runtime/src/Execution/BacktestExecution.cpp
+  src/Runtime/src/Execution/BacktestExecutionDepth.cpp
+  src/Runtime/src/Execution/BacktestFillModel.cpp
+  src/Runtime/src/Execution/BacktestLatency.cpp
+  src/Runtime/src/Input/BinaryCorpusLoader.cpp
+  src/Runtime/src/Input/SessionLoader.cpp
+  src/Runtime/src/Results/BacktestResultWriter.cpp
+  src/Runtime/src/Backtest.cpp
+  src/Runtime/src/Strategy/BacktestStrategyIntentLowering.cpp
+  src/Runtime/src/Strategy/BacktestStrategyInputFreshness.cpp
+  src/Runtime/src/Strategy/BacktestStrategyRuntime.cpp
+  src/Runtime/src/Strategy/BacktestStrategyTrace.cpp
+  src/Runtime/src/Strategy/BacktestStrategyWarmup.cpp
+  src/Runtime/src/Sweep/BacktestSweep.cpp
+  src/Runtime/src/Sweep/BacktestSweepSearch.cpp
+  src/Runtime/src/Sweep/BacktestSweepWriter.cpp
 )
 add_library(hft_backtest::core ALIAS hft_backtest_core)
 
 target_include_directories(hft_backtest_core
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src/Runtime/include"
   PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Runtime/src"
     "${HFT_BACKTEST_GENERATED_DIR}"
 )
 add_dependencies(hft_backtest_core hft_backtest_generate_strategy_metadata)
@@ -162,7 +162,7 @@ set_target_properties(hft_backtest_core PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
-add_executable(hft-backtest tools/hft_backtest.cpp)
+add_executable(hft-backtest src/Process/HftBacktest.cpp)
 target_link_libraries(hft-backtest PRIVATE hft_backtest_core)
 target_compile_features(hft-backtest PRIVATE cxx_std_23)
 set_target_properties(hft-backtest PROPERTIES
@@ -171,7 +171,7 @@ set_target_properties(hft-backtest PROPERTIES
 
 function(add_hft_backtest_test target source)
   add_executable(${target} ${source})
-  target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/Runtime/src")
   target_link_libraries(${target}
     PRIVATE hft_backtest_core trading_core::strategy
             hftrec::corpus_contract ${ARGN})
@@ -186,41 +186,41 @@ function(add_hft_backtest_test target source)
 endfunction()
 
 add_hft_backtest_test(hft-backtest-execution-tests
-  tests/execution/backtest_execution_tests.cpp)
+  tests/Execution/BacktestExecutionTests.cpp)
 add_hft_backtest_test(hft-backtest-client-order-id-tests
-  tests/execution/backtest_client_order_id_tests.cpp)
+  tests/Execution/BacktestClientOrderIdTests.cpp)
 add_hft_backtest_test(hft-backtest-replace-lifecycle-tests
-  tests/execution/backtest_replace_lifecycle_tests.cpp)
+  tests/Execution/BacktestReplaceLifecycleTests.cpp)
 add_hft_backtest_test(hft-backtest-stat-arb-late-fill-lifecycle-tests
-  tests/execution/backtest_stat_arb_late_fill_lifecycle_tests.cpp)
+  tests/Execution/BacktestStatArbLateFillLifecycleTests.cpp)
 add_hft_backtest_test(hft-backtest-strategy-config-tests
-  tests/config/backtest_strategy_config_tests.cpp)
+  tests/config/BacktestStrategyConfigTests.cpp)
 add_hft_backtest_test(hft-backtest-passive-bbo-touch-tests
-  tests/execution/backtest_passive_bbo_touch_tests.cpp)
+  tests/Execution/BacktestPassiveBboTouchTests.cpp)
 add_hft_backtest_test(hft-backtest-stop-limit-tests
-  tests/execution/backtest_stop_limit_tests.cpp)
+  tests/Execution/BacktestStopLimitTests.cpp)
 add_hft_backtest_test(hft-backtest-rate-limit-tests
-  tests/execution/backtest_rate_limit_tests.cpp)
+  tests/Execution/BacktestRateLimitTests.cpp)
 add_hft_backtest_test(hft-backtest-multileg-context-tests
-  tests/execution/backtest_multileg_context_tests.cpp)
+  tests/Execution/BacktestMultilegContextTests.cpp)
 add_hft_backtest_test(hft-backtest-transaction-admission-tests
-  tests/execution/backtest_transaction_admission_tests.cpp)
+  tests/Execution/BacktestTransactionAdmissionTests.cpp)
 add_hft_backtest_test(hft-backtest-stat-arb-replay-tests
-  tests/replay/stat_arb_edge_maker_replay_tests.cpp)
+  tests/Replay/StatArbEdgeMakerReplayTests.cpp)
 add_hft_backtest_test(hft-backtest-uptick-replay-tests
-  tests/replay/uptick_replay_tests.cpp)
+  tests/Replay/UptickReplayTests.cpp)
 add_hft_backtest_test(hft-backtest-strategy-indicator-tests
-  tests/strategy/backtest_strategy_indicator_tests.cpp)
+  tests/Strategy/BacktestStrategyIndicatorTests.cpp)
 add_hft_backtest_test(hft-backtest-strategy-profile-tests
-  tests/strategy/backtest_strategy_profile_tests.cpp)
+  tests/Strategy/BacktestStrategyProfileTests.cpp)
 add_hft_backtest_test(hft-backtest-metrics-tests
-  tests/metrics/backtest_metrics_tests.cpp)
+  tests/Metrics/BacktestMetricsTests.cpp)
 add_hft_backtest_test(hft-backtest-accounting-tests
-  tests/accounting/backtest_accounting_tests.cpp)
+  tests/Accounting/BacktestAccountingTests.cpp)
 add_hft_backtest_test(hft-backtest-session-loader-tests
-  tests/input/session_loader_tests.cpp)
+  tests/Input/SessionLoaderTests.cpp)
 add_hft_backtest_test(hft-backtest-sweep-tests
-  tests/sweep/backtest_sweep_tests.cpp)
+  tests/Sweep/BacktestSweepTests.cpp)
 
 set_property(TEST
   hft-backtest-execution-tests
