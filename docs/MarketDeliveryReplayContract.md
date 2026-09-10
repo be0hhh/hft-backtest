@@ -3,7 +3,7 @@
 Status: implemented source contract, static-only evidence.
 
 The detailed cross-product contract lives in
-[`../../hft-recorder/doc/BACKTEST_ENGINE_PLAN.md`](../../hft-recorder/doc/BACKTEST_ENGINE_PLAN.md).
+[`BacktestEngineContract.md`](../../hft-recorder/docs/BacktestEngineContract.md).
 This document records the backtest-owned rules.
 
 ## One market-delivery mode
