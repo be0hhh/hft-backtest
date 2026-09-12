@@ -9,9 +9,9 @@ if [[ $(uname -s) != Linux ]]; then
   echo "hft-backtest must be built from WSL/Linux through the CXET root graph." >&2
   exit 1
 fi
-if [[ ! -x "$ROOT_WRAPPER" ]]; then
-  echo "Missing executable CXET root build wrapper: $ROOT_WRAPPER" >&2
+if [[ ! -f "$ROOT_WRAPPER" || ! -r "$ROOT_WRAPPER" ]]; then
+  echo "Missing readable CXET root build wrapper: $ROOT_WRAPPER" >&2
   exit 1
 fi
 
-exec "$ROOT_WRAPPER" hft-backtest "$@"
+exec bash "$ROOT_WRAPPER" hft-backtest "$@"
