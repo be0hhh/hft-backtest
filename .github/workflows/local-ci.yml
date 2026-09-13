@@ -1,0 +1,106 @@
+name: local-ci
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: /home/gha-runner/github-actions/bin/gha-heavy-shell {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CCACHE_DIR: /home/gha-runner/github-actions/cache/ccache
+  CCACHE_MAXSIZE: 15G
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+  CTEST_PARALLEL_LEVEL: 4
+  PATH: /usr/bin:/bin:/usr/sbin:/sbin
+
+jobs:
+  hft-backtest:
+    name: hft-backtest
+    runs-on: [self-hosted, linux, x64, wsl, local-ci, hft-backtest]
+    timeout-minutes: 180
+
+    steps:
+      - name: Require private CXETCPP checkout key
+        env:
+          CI_CXETCPP_SSH_KEY: ${{ secrets.CI_CXETCPP_SSH_KEY }}
+        run: |
+          if [ -z "$CI_CXETCPP_SSH_KEY" ]; then
+            {
+              echo "### Private root checkout unavailable"
+              echo "CI_CXETCPP_SSH_KEY is required to compose hft-backtest in the CXETCPP root graph."
+              echo "Pull requests from forks do not receive this secret, so this run cannot provide a passing build result."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::CI_CXETCPP_SSH_KEY is required for the private CXETCPP root checkout"
+            exit 1
+          fi
+
+      - name: Checkout CXETCPP root and pinned dependencies
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: be0hhh/CXETCPP
+          ref: main
+          ssh-key: ${{ secrets.CI_CXETCPP_SSH_KEY }}
+          submodules: true
+          path: source/CXETCPP
+          persist-credentials: false
+
+      - name: Overlay triggering hft-backtest revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: source/CXETCPP/apps/hft-backtest
+          persist-credentials: false
+
+      - name: Record source revisions
+        run: |
+          root_sha="$(git -C source/CXETCPP rev-parse HEAD)"
+          app_sha="$(git -C source/CXETCPP/apps/hft-backtest rev-parse HEAD)"
+          printf 'CXETCPP root: %s\nhft-backtest overlay: %s\n' "$root_sha" "$app_sha"
+          {
+            echo "### Source revisions"
+            echo "| Source | Commit |"
+            echo "| --- | --- |"
+            printf '| CXETCPP root | %s |\n' "$root_sha"
+            printf '| hft-backtest overlay | %s |\n' "$app_sha"
+          } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '```text'
+            git -C source/CXETCPP submodule status
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Set up pinned LLVM
+        uses: ./source/CXETCPP/.github/actions/setup-toolchain
+        with:
+          source-root: source/CXETCPP
+
+      - name: Report CMake and CTest binaries
+        run: |
+          /usr/bin/cmake --version
+          /usr/bin/ctest --version
+
+      - name: Build hft-backtest and its offline tests
+        working-directory: source/CXETCPP/apps/hft-backtest
+        run: ./compile.sh --force all low portable p
+
+      - name: Run hft-backtest offline tests
+        run: >-
+          /usr/bin/ctest
+          --test-dir source/CXETCPP/build
+          -L '^hft-backtest$'
+          --output-on-failure
+          --no-tests=error
+          --timeout 180
