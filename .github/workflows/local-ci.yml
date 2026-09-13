@@ -1,141 +1,299 @@
 name: local-ci
 
 on:
-  push:
-    branches:
-      - main
+  repository_dispatch:
+    types: [family-build]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Build the repository itself or revalidate a dependency snapshot
+        required: true
+        default: own
+        type: choice
+        options: [own, dependency]
 
 permissions:
   contents: read
-
-defaults:
-  run:
-    shell: /home/gha-runner/github-actions/bin/gha-heavy-shell {0}
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 env:
   CCACHE_DIR: /home/gha-runner/github-actions/cache/ccache
   CCACHE_MAXSIZE: 15G
   CMAKE_BUILD_PARALLEL_LEVEL: 4
   CTEST_PARALLEL_LEVEL: 4
-  PATH: /usr/bin:/bin:/usr/sbin:/sbin
+  PRODUCT_TARGET: hft-backtest-product
+  PRODUCTION_BUILD_DIR: ${{ github.workspace }}/source/CXETCPP/build/modes/ci-hft-backtest-production
+  TEST_BUILD_DIR: ${{ github.workspace }}/source/CXETCPP/build/modes/clang-ci-family-incremental
+  ASAN_BUILD_DIR: ${{ github.workspace }}/source/CXETCPP/build/modes/clang-ci-family-address-undefined-incremental
+
+concurrency:
+  group: local-ci-${{ github.repository }}-${{ github.event.client_payload.snapshot_id || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: /home/gha-runner/github-actions/bin/gha-heavy-shell {0}
 
 jobs:
-  resolve-family-revisions:
-    name: resolve-family-revisions
-    runs-on: [self-hosted, linux, x64, wsl, benchmark, hft-bench, hft-backtest]
+  snapshot:
+    name: snapshot
+    runs-on: [self-hosted, linux, x64, wsl, local-control, hft-backtest]
     timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
     outputs:
-      cxetcpp_sha: ${{ steps.snapshot.outputs.cxetcpp_sha }}
-      hft_recorder_sha: ${{ steps.snapshot.outputs.hft_recorder_sha }}
-      trading_core_sha: ${{ steps.snapshot.outputs.trading_core_sha }}
+      mode: ${{ steps.normalize.outputs.mode }}
+      snapshot_id: ${{ steps.normalize.outputs.snapshot_id }}
+      snapshot_json: ${{ steps.normalize.outputs.snapshot_json }}
+      cxetcpp_sha: ${{ steps.normalize.outputs.cxetcpp_sha }}
+      hft_recorder_sha: ${{ steps.normalize.outputs.hft_recorder_sha }}
+      trading_core_sha: ${{ steps.normalize.outputs.trading_core_sha }}
+      hft_backtest_sha: ${{ steps.normalize.outputs.hft_backtest_sha }}
     steps:
-      - name: Checkout revision resolver
+      - name: Checkout family controller and manual resolver
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: be0hhh/CXETCPP
           ref: main
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          sparse-checkout: .github/actions/resolve-family-revisions
+          sparse-checkout: |
+            .github/actions/resolve-family-revisions
+            tools/Ci
           persist-credentials: false
-
-      - name: Snapshot family main revisions
-        id: snapshot
+      - name: Resolve manual family snapshot
+        if: github.event_name == 'workflow_dispatch'
+        id: manual
         uses: ./.github/actions/resolve-family-revisions
         with:
           family-read-token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
+      - name: Validate and normalize snapshot
+        id: normalize
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          MANUAL_MODE: ${{ inputs.mode }}
+          MANUAL_CXETCPP: ${{ steps.manual.outputs.cxetcpp_sha }}
+          MANUAL_HFT_BACKTEST: ${{ steps.manual.outputs.hft_backtest_sha }}
+          MANUAL_HFT_COMPRESSOR: ${{ steps.manual.outputs.hft_compressor_sha }}
+          MANUAL_HFT_PARSER: ${{ steps.manual.outputs.hft_parser_sha }}
+          MANUAL_HFT_RECORDER: ${{ steps.manual.outputs.hft_recorder_sha }}
+          MANUAL_HFT_TRADER: ${{ steps.manual.outputs.hft_trader_sha }}
+          MANUAL_TRADER: ${{ steps.manual.outputs.trader_sha }}
+          MANUAL_TRADING_CORE: ${{ steps.manual.outputs.trading_core_sha }}
+          MANUAL_VETRON: ${{ steps.manual.outputs.vetron_sha }}
+          MANUAL_TEST_HELPER: ${{ steps.manual.outputs.test_exchanges_helper_sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          keys = ("cxetcpp", "hft_parser", "hft_compressor", "hft_recorder", "trading_core", "hft_trader", "hft_backtest", "trader", "vetron", "test_exchanges_helper")
+          if os.environ["EVENT_NAME"] == "repository_dispatch":
+              payload = json.loads(os.environ["DISPATCH_PAYLOAD"])
+              if payload.get("schema_version") != 1:
+                  raise SystemExit("family-build requires schema_version=1")
+              mode, snapshot = payload.get("mode"), payload.get("snapshot")
+              snapshot_id = payload.get("snapshot_id")
+              if not isinstance(snapshot, dict):
+                  raise SystemExit("family-build snapshot must be an object")
+              if not isinstance(snapshot_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", snapshot_id):
+                  raise SystemExit("invalid family-build snapshot_id")
+              if not isinstance(payload.get("trigger_repo"), str) or not payload["trigger_repo"]:
+                  raise SystemExit("invalid family-build trigger_repo")
+              if not isinstance(payload.get("trigger_sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", payload["trigger_sha"]):
+                  raise SystemExit("invalid family-build trigger_sha")
+          else:
+              mode = os.environ["MANUAL_MODE"]
+              snapshot = {"cxetcpp": os.environ["MANUAL_CXETCPP"], "hft_parser": os.environ["MANUAL_HFT_PARSER"], "hft_compressor": os.environ["MANUAL_HFT_COMPRESSOR"], "hft_recorder": os.environ["MANUAL_HFT_RECORDER"], "trading_core": os.environ["MANUAL_TRADING_CORE"], "hft_trader": os.environ["MANUAL_HFT_TRADER"], "hft_backtest": os.environ["MANUAL_HFT_BACKTEST"], "trader": os.environ["MANUAL_TRADER"], "vetron": os.environ["MANUAL_VETRON"], "test_exchanges_helper": os.environ["MANUAL_TEST_HELPER"]}
+              snapshot_id = None
+          if mode not in {"own", "dependency"} or set(snapshot) != set(keys):
+              raise SystemExit("invalid family-build mode or snapshot keys")
+          for key in keys:
+              if not isinstance(snapshot[key], str) or not re.fullmatch(r"[0-9a-f]{40}", snapshot[key]):
+                  raise SystemExit(f"invalid SHA for {key}")
+          compact = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+          expected_id = subprocess.check_output(["python3", "tools/Ci/FamilyCiController.py", "snapshot-id", "--repository", os.environ["GITHUB_REPOSITORY"], "--snapshot-json", compact], text=True).strip()
+          if snapshot_id is None:
+              snapshot_id = expected_id
+          elif snapshot_id != expected_id:
+              raise SystemExit(f"snapshot_id mismatch: expected {expected_id}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"mode={mode}\nsnapshot_id={snapshot_id}\nsnapshot_json={compact}\ncxetcpp_sha={snapshot['cxetcpp']}\nhft_recorder_sha={snapshot['hft_recorder']}\ntrading_core_sha={snapshot['trading_core']}\nhft_backtest_sha={snapshot['hft_backtest']}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(f"### Snapshot `{snapshot_id}` ({mode})\n\n")
+              for key in keys:
+                  summary.write(f"- {key}: `{snapshot[key]}`\n")
+          PY
+      - name: Claim current dispatched snapshot
+        if: github.event_name == 'repository_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
+          SNAPSHOT_JSON: ${{ steps.normalize.outputs.snapshot_json }}
+          SNAPSHOT_ID: ${{ steps.normalize.outputs.snapshot_id }}
+        run: >-
+          python3 tools/Ci/FamilyCiController.py claim
+          --repository "$GITHUB_REPOSITORY" --snapshot-json "$SNAPSHOT_JSON"
+          --snapshot-id "$SNAPSHOT_ID"
 
-  hft-backtest:
-    name: hft-backtest
-    needs: resolve-family-revisions
+  production-build:
+    name: production-build
+    if: needs.snapshot.outputs.mode == 'own'
+    needs: snapshot
     runs-on: [self-hosted, linux, x64, wsl, local-ci, hft-backtest]
-    timeout-minutes: 180
-
+    timeout-minutes: 240
     steps:
-      - name: Checkout snapshotted CXETCPP root
+      - &checkout-root
+        name: Checkout exact root snapshot without deleting build trees
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: be0hhh/CXETCPP
-          ref: ${{ needs.resolve-family-revisions.outputs.cxetcpp_sha }}
+          ref: ${{ needs.snapshot.outputs.cxetcpp_sha }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
           submodules: true
           path: source/CXETCPP
+          clean: false
           persist-credentials: false
-
-      - name: Overlay snapshotted trading-core revision
+      - &checkout-core
+        name: Overlay exact trading-core snapshot
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: be0hhh/trading-core
-          ref: ${{ needs.resolve-family-revisions.outputs.trading_core_sha }}
+          ref: ${{ needs.snapshot.outputs.trading_core_sha }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
           path: source/CXETCPP/apps/trading-core
           persist-credentials: false
-
-      - name: Overlay snapshotted hft-recorder revision
+      - &checkout-recorder
+        name: Overlay exact hft-recorder contracts snapshot
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: be0hhh/hft-recorder
-          ref: ${{ needs.resolve-family-revisions.outputs.hft_recorder_sha }}
+          ref: ${{ needs.snapshot.outputs.hft_recorder_sha }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
           path: source/CXETCPP/apps/hft-recorder
           persist-credentials: false
-
-      - name: Overlay triggering hft-backtest revision
+      - &checkout-product
+        name: Overlay exact hft-backtest snapshot
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ github.repository }}
-          ref: ${{ github.sha }}
+          ref: ${{ needs.snapshot.outputs.hft_backtest_sha }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
           path: source/CXETCPP/apps/hft-backtest
           persist-credentials: false
-
-      - name: Record source revisions
-        run: |
-          root_sha="$(git -C source/CXETCPP rev-parse HEAD)"
-          trading_core_sha="$(git -C source/CXETCPP/apps/trading-core rev-parse HEAD)"
-          recorder_sha="$(git -C source/CXETCPP/apps/hft-recorder rev-parse HEAD)"
-          app_sha="$(git -C source/CXETCPP/apps/hft-backtest rev-parse HEAD)"
-          printf 'CXETCPP root: %s\ntrading-core: %s\nhft-recorder: %s\nhft-backtest overlay: %s\n' "$root_sha" "$trading_core_sha" "$recorder_sha" "$app_sha"
-          {
-            echo "### Source revisions"
-            echo "| Source | Commit |"
-            echo "| --- | --- |"
-            printf '| CXETCPP root | %s |\n' "$root_sha"
-            printf '| trading-core snapshot | %s |\n' "$trading_core_sha"
-            printf '| hft-recorder snapshot | %s |\n' "$recorder_sha"
-            printf '| hft-backtest overlay | %s |\n' "$app_sha"
-          } >> "$GITHUB_STEP_SUMMARY"
-          {
-            echo '```text'
-            git -C source/CXETCPP submodule status
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-
-      - name: Set up pinned LLVM
+      - &setup-toolchain
+        name: Set up pinned LLVM
         uses: ./source/CXETCPP/.github/actions/setup-toolchain
         with:
           source-root: source/CXETCPP
           local-cache-root: /home/gha-runner/github-actions/cache/toolchains/wsl-ci-cxetcpp
+      - name: Build production target without cleaning
+        working-directory: source/CXETCPP
+        env:
+          CXET_BUILD_DIR: ${{ env.PRODUCTION_BUILD_DIR }}
+        run: ./compile.sh hft-backtest low portable
 
-      - name: Report CMake and CTest binaries
+  root-integration-build:
+    name: root-integration-build
+    if: always() && needs.snapshot.result == 'success' && (needs.snapshot.outputs.mode == 'dependency' || needs.production-build.result == 'success')
+    needs: [snapshot, production-build]
+    runs-on: [self-hosted, linux, x64, wsl, local-ci, hft-backtest]
+    timeout-minutes: 240
+    steps:
+      - *checkout-root
+      - *checkout-core
+      - *checkout-recorder
+      - *checkout-product
+      - *setup-toolchain
+      - name: Incrementally validate the root composition
+        working-directory: source/CXETCPP
+        env:
+          CXET_BUILD_DIR: ${{ env.PRODUCTION_BUILD_DIR }}
+        run: ./compile.sh hft-backtest low portable
+
+  test-build:
+    name: test-build
+    needs: [snapshot, root-integration-build]
+    runs-on: [self-hosted, linux, x64, wsl, local-ci, hft-backtest]
+    timeout-minutes: 240
+    steps:
+      - name: Configure persistent family test tree
+        working-directory: source/CXETCPP
+        run: /usr/bin/cmake --preset clang-ci-family-incremental
+      - name: Build only registered hft-backtest test targets
+        working-directory: source/CXETCPP
+        run: /usr/bin/cmake --build "$TEST_BUILD_DIR" --target hft-backtest-all --parallel 4
+
+  test-groups:
+    name: tests-${{ matrix.group }}
+    needs: [snapshot, test-build]
+    runs-on: [self-hosted, linux, x64, wsl, local-ci, hft-backtest]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {group: execution-lifecycle, selector: '^hft-backtest-(execution|client-order-id|replace-lifecycle|stat-arb-late-fill-lifecycle|passive-bbo-touch|stop-limit|rate-limit|multileg-context|transaction-admission)-tests$'}
+          - {group: replay-strategy, selector: '^hft-backtest-(stat-arb-replay|uptick-replay|strategy-config|strategy-indicator|strategy-profile)-tests$'}
+          - {group: accounting-metrics-sweep, selector: '^hft-backtest-(metrics|accounting|sweep)-tests$'}
+          - {group: corpus-contract, selector: '^hft-backtest-session-loader-tests$'}
+    steps:
+      - name: Run ${{ matrix.group }} tests
+        run: /usr/bin/ctest --test-dir "$TEST_BUILD_DIR" -R '${{ matrix.selector }}' --output-on-failure --no-tests=error --timeout 180
+
+  sanitizer-address-undefined:
+    name: sanitizer-address-undefined
+    continue-on-error: true
+    if: always() && needs.snapshot.outputs.mode == 'own' && needs.root-integration-build.result == 'success'
+    needs: [snapshot, root-integration-build, test-groups]
+    runs-on: [self-hosted, linux, x64, wsl, local-ci, hft-backtest]
+    timeout-minutes: 300
+    steps:
+      - *checkout-root
+      - *checkout-core
+      - *checkout-recorder
+      - *checkout-product
+      - *setup-toolchain
+      - name: Configure ASan and UBSan tree
+        working-directory: source/CXETCPP
+        run: /usr/bin/cmake --preset clang-ci-family-address-undefined-incremental
+      - name: Build and run sanitized hft-backtest tests
+        working-directory: source/CXETCPP
         run: |
-          /usr/bin/cmake --version
-          /usr/bin/ctest --version
+          /usr/bin/cmake --build "$ASAN_BUILD_DIR" --target "$PRODUCT_TARGET" hft-backtest-all --parallel 4
+          /usr/bin/ctest --test-dir "$ASAN_BUILD_DIR" -L '^hft-backtest$' --output-on-failure --no-tests=error --timeout 180
 
-      - name: Build hft-backtest and its offline tests
-        working-directory: source/CXETCPP/apps/hft-backtest
-        run: ./compile.sh --force all low portable p
+  publish-ready:
+    name: publish-ready
+    if: always() && needs.snapshot.outputs.mode == 'own' && needs.production-build.result == 'success' && needs.root-integration-build.result == 'success'
+    needs: [snapshot, production-build, root-integration-build]
+    runs-on: [self-hosted, linux, x64, wsl, local-control, hft-backtest]
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps: &publish-steps
+      - name: Checkout family controller
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: be0hhh/CXETCPP
+          ref: main
+          token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
+          sparse-checkout: tools/Ci
+          path: controller
+          persist-credentials: false
+      - name: Publish readiness
+        env:
+          GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
+          SNAPSHOT_JSON: ${{ needs.snapshot.outputs.snapshot_json }}
+          SNAPSHOT_ID: ${{ needs.snapshot.outputs.snapshot_id }}
+          CI_MODE: ${{ needs.snapshot.outputs.mode }}
+        run: python3 controller/tools/Ci/FamilyCiController.py publish --repository "$GITHUB_REPOSITORY" --snapshot-json "$SNAPSHOT_JSON" --snapshot-id "$SNAPSHOT_ID" --mode "$CI_MODE"
 
-      - name: Run hft-backtest offline tests
-        run: >-
-          /usr/bin/ctest
-          --test-dir source/CXETCPP/build
-          -L '^hft-backtest$'
-          --output-on-failure
-          --no-tests=error
-          --timeout 180
+  publish-dependency-ready:
+    name: publish-ready-dependency
+    if: always() && needs.snapshot.outputs.mode == 'dependency' && needs.root-integration-build.result == 'success' && needs.test-build.result == 'success' && needs.test-groups.result == 'success'
+    needs: [snapshot, root-integration-build, test-build, test-groups]
+    runs-on: [self-hosted, linux, x64, wsl, local-control, hft-backtest]
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps: *publish-steps
