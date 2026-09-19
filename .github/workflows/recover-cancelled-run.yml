@@ -1,0 +1,53 @@
+name: Recover cancelled Backtest CI run
+on:
+  workflow_dispatch:
+permissions:
+  actions: read
+jobs:
+  recover:
+    runs-on: [self-hosted, linux, x64, wsl, local-control, hft-backtest]
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Stop only processes from the cancelled run
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, signal, subprocess, time
+          repository = 'be0hhh/hft-backtest'
+          run_id = '35447482490'
+          result = json.loads(subprocess.check_output([
+              'gh', 'api', f'repos/{repository}/actions/runs/{run_id}'
+          ], text=True))
+          if result.get('status') != 'completed' or result.get('conclusion') != 'cancelled':
+              raise SystemExit('Refusing recovery: target run is not completed/cancelled')
+          def belongs(pid):
+              try:
+                  path = pathlib.Path('/proc') / str(pid)
+                  if path.stat().st_uid != os.getuid():
+                      return False
+                  env = dict(item.split(b'=', 1) for item in
+                             (path / 'environ').read_bytes().split(b'\0') if b'=' in item)
+                  return (env.get(b'GITHUB_REPOSITORY') == repository.encode() and
+                          env.get(b'GITHUB_RUN_ID') == run_id.encode())
+              except (OSError, ValueError):
+                  return False
+          def matching():
+              return [int(path.name) for path in pathlib.Path('/proc').iterdir()
+                      if path.name.isdecimal() and belongs(int(path.name))]
+          targets = matching()
+          print(f'Cancelled run {run_id}: {len(targets)} matching processes')
+          for signum in (signal.SIGTERM, signal.SIGKILL):
+              for pid in matching():
+                  if belongs(pid):
+                      try:
+                          os.kill(pid, signum)
+                      except ProcessLookupError:
+                          pass
+              time.sleep(5)
+          remaining = matching()
+          if remaining:
+              raise SystemExit(f'Recovery incomplete; remaining PIDs: {remaining}')
+          print('Cancelled run process tree stopped; no service or OS changes')
+          PY
