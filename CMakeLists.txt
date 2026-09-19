@@ -187,6 +187,12 @@ endfunction()
 
 add_hft_backtest_test(hft-backtest-execution-tests
   tests/Execution/BacktestExecutionTests.cpp)
+if(CXET_SANITIZER_PROFILE STREQUAL "address-undefined")
+  # Keep this large test translation unit below the CI runner's memory limit.
+  # Retain sanitizer instrumentation and source lines in diagnostic stacks.
+  target_compile_options(hft-backtest-execution-tests PRIVATE
+    -O1 -gline-tables-only)
+endif()
 add_hft_backtest_test(hft-backtest-client-order-id-tests
   tests/Execution/BacktestClientOrderIdTests.cpp)
 add_hft_backtest_test(hft-backtest-replace-lifecycle-tests
