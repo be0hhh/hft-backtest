@@ -229,7 +229,7 @@ jobs:
 
   root-integration-build:
     name: root-integration-build
-    if: always() && needs.snapshot.result == 'success' && (needs.snapshot.outputs.mode == 'dependency' || needs.production-build.result == 'success')
+    if: ${{ !cancelled() && needs.snapshot.result == 'success' && (needs.snapshot.outputs.mode == 'dependency' || needs.production-build.result == 'success') }}
     needs: [snapshot, production-build]
     runs-on: [self-hosted, linux, x64, wsl, local-ci, hft-backtest]
     timeout-minutes: 240
@@ -362,7 +362,7 @@ jobs:
   sanitizer-address-undefined:
     continue-on-error: true
     name: sanitizer-address-undefined
-    if: always() && needs.snapshot.outputs.mode == 'own' && needs.root-integration-build.result == 'success'
+    if: ${{ !cancelled() && needs.snapshot.outputs.mode == 'own' && needs.root-integration-build.result == 'success' }}
     needs: [snapshot, root-integration-build, test-groups]
     runs-on: [self-hosted, linux, x64, wsl, local-ci, hft-backtest]
     timeout-minutes: 300
