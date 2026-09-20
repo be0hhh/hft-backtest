@@ -1,6 +1,6 @@
 name: local-ci
 
-run-name: local-ci ${{ github.event.client_payload.snapshot_id || github.run_id }}
+run-name: local-ci ${{ github.event.client_payload.snapshot_id || github.run_id }} ${{ github.event.client_payload.dispatch_id || 'manual' }}
 
 on:
   repository_dispatch:
@@ -227,6 +227,8 @@ jobs:
     timeout-minutes: 240
     env:
       FAMILY_SNAPSHOT_JSON: ${{ needs.snapshot.outputs.snapshot_json }}
+      FAMILY_REPOSITORY_SNAPSHOT_ID: ${{ needs.snapshot.outputs.snapshot_id }}
+      GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
     steps:
       - name: Checkout exact root snapshot without deleting build trees
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -301,6 +303,7 @@ jobs:
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
           /usr/bin/cmake --build --preset clang-ci-family-incremental --target hft-backtest-product --parallel 4
+          python3 tools/Ci/FamilyCiController.py stage-artifact --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --snapshot-id "$FAMILY_REPOSITORY_SNAPSHOT_ID" --artifact-path "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
 
   test-build:
     name: test-build
@@ -344,9 +347,8 @@ jobs:
           /usr/bin/ctest --test-dir "$TEST_BUILD_DIR" -R '${{ matrix.selector }}' --output-on-failure --no-tests=error --timeout 180
 
   sanitizer-address-undefined:
-    continue-on-error: true
     name: sanitizer-address-undefined
-    if: ${{ !cancelled() && needs.snapshot.outputs.mode == 'own' && needs.root-integration-build.result == 'success' }}
+    if: ${{ !cancelled() && needs.root-integration-build.result == 'success' }}
     needs: [snapshot, root-integration-build, test-groups]
     runs-on: [self-hosted, linux, x64, wsl, local-ci, hft-backtest]
     timeout-minutes: 300
@@ -498,13 +500,14 @@ jobs:
 
   publish-ready:
     name: publish-ready
-    needs: [snapshot, production-build, root-integration-build, test-build, test-groups]
+    needs: [snapshot, production-build, root-integration-build, test-build, test-groups, sanitizer-address-undefined]
     if: >-
       always() && github.event_name == 'repository_dispatch' && needs.snapshot.result == 'success' &&
       (needs.production-build.result == 'success' || (needs.snapshot.outputs.mode == 'dependency' && needs.production-build.result == 'skipped')) &&
       needs.root-integration-build.result == 'success' &&
       needs.test-build.result == 'success' &&
-      needs.test-groups.result == 'success'
+      needs.test-groups.result == 'success' &&
+      needs.sanitizer-address-undefined.result == 'success'
     runs-on: [self-hosted, linux, x64, wsl, local-control, hft-backtest]
     defaults:
       run: {shell: bash}
@@ -565,11 +568,11 @@ jobs:
 
   publish-checks-failed:
     name: publish-checks-failed
-    needs: [snapshot, production-build, root-integration-build, test-build, test-groups]
+    needs: [snapshot, production-build, root-integration-build, test-build, test-groups, sanitizer-address-undefined]
     if: >-
       always() && github.event_name == 'repository_dispatch' && needs.snapshot.result == 'success' &&
       !(needs.production-build.result == 'failure' || needs.production-build.result == 'cancelled' || needs.root-integration-build.result == 'failure' || needs.root-integration-build.result == 'cancelled') &&
-      (needs.test-build.result == 'failure' || needs.test-build.result == 'cancelled' || needs.test-groups.result == 'failure' || needs.test-groups.result == 'cancelled')
+      (needs.test-build.result == 'failure' || needs.test-build.result == 'cancelled' || needs.test-groups.result == 'failure' || needs.test-groups.result == 'cancelled' || needs.sanitizer-address-undefined.result == 'failure' || needs.sanitizer-address-undefined.result == 'cancelled')
     runs-on: [self-hosted, linux, x64, wsl, local-control, hft-backtest]
     defaults:
       run: {shell: bash}
