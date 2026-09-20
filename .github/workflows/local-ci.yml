@@ -23,9 +23,9 @@ env:
   CMAKE_BUILD_PARALLEL_LEVEL: 4
   CTEST_PARALLEL_LEVEL: 4
   PRODUCT_TARGET: hft-backtest-product
-  PRODUCTION_BUILD_DIR: ${{ github.workspace }}/source/CXETCPP/build/modes/ci-hft-backtest-production
-  TEST_BUILD_DIR: ${{ github.workspace }}/source/CXETCPP/build/modes/clang-ci-family-incremental
-  ASAN_BUILD_DIR: ${{ github.workspace }}/source/CXETCPP/build/modes/clang-ci-family-address-undefined-incremental
+  PRODUCTION_BUILD_DIR: ${{ github.workspace }}/source/family-ci-v3/CXETCPP/build/modes/ci-hft-backtest-production
+  TEST_BUILD_DIR: ${{ github.workspace }}/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental
+  ASAN_BUILD_DIR: ${{ github.workspace }}/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-address-undefined-incremental
 
 concurrency:
   group: local-ci-${{ github.repository }}-${{ github.event.client_payload.snapshot_id || github.run_id }}
@@ -152,11 +152,11 @@ jobs:
           ref: ${{ needs.snapshot.outputs.cxetcpp_sha }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
           submodules: false
-          path: source/CXETCPP
+          path: source/family-ci-v3/CXETCPP
           clean: false
           persist-credentials: false
       - name: Restore pinned source graph without shallow history
-        working-directory: source/CXETCPP
+        working-directory: source/family-ci-v3/CXETCPP
         env:
           GIT_CONFIG_COUNT: 2
           GIT_CONFIG_KEY_0: 'url.https://x-access-token:${{ secrets.CI_FAMILY_READ_TOKEN }}@github.com/.insteadOf'
@@ -169,62 +169,57 @@ jobs:
             exit 1
           }
       - name: Overlay exact hft-backtest snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-backtest
           repository: be0hhh/hft-backtest
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_backtest }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_backtest }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-backtest
-          clean: false
-          persist-credentials: false
       - name: Overlay exact hft-compressor snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-compressor
           repository: be0hhh/hft-compressor
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_compressor }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_compressor }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-compressor
-          clean: false
-          persist-credentials: false
       - name: Overlay exact hft-parser snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-parser
           repository: be0hhh/hft-parser
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_parser }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_parser }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-parser
-          clean: false
-          persist-credentials: false
       - name: Overlay exact hft-recorder snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-recorder
           repository: be0hhh/hft-recorder
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_recorder }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_recorder }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-recorder
-          clean: false
-          persist-credentials: false
       - name: Overlay exact trading-core snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/trading-core
           repository: be0hhh/trading-core
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).trading_core }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).trading_core }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/trading-core
-          clean: false
-          persist-credentials: false
       - name: Set up pinned LLVM
-        uses: ./source/CXETCPP/.github/actions/setup-toolchain
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/setup-toolchain
         with:
-          source-root: source/CXETCPP
+          source-root: source/family-ci-v3/CXETCPP
           local-cache-root: /home/gha-runner/github-actions/cache/toolchains/wsl-ci-cxetcpp
       - name: Build production target without cleaning
-        working-directory: source/CXETCPP
+        working-directory: source/family-ci-v3/CXETCPP
         run: |
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
           /usr/bin/cmake --preset clang-ci-family-incremental
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/CXETCPP/build/modes/clang-ci-family-incremental"
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/CXETCPP/build/modes/clang-ci-family-incremental"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
           /usr/bin/cmake --build --preset clang-ci-family-incremental --target hft-backtest-product --parallel 4
 
   root-integration-build:
@@ -243,11 +238,11 @@ jobs:
           ref: ${{ needs.snapshot.outputs.cxetcpp_sha }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
           submodules: false
-          path: source/CXETCPP
+          path: source/family-ci-v3/CXETCPP
           clean: false
           persist-credentials: false
       - name: Restore pinned source graph without shallow history
-        working-directory: source/CXETCPP
+        working-directory: source/family-ci-v3/CXETCPP
         env:
           GIT_CONFIG_COUNT: 2
           GIT_CONFIG_KEY_0: 'url.https://x-access-token:${{ secrets.CI_FAMILY_READ_TOKEN }}@github.com/.insteadOf'
@@ -260,62 +255,57 @@ jobs:
             exit 1
           }
       - name: Overlay exact hft-backtest snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-backtest
           repository: be0hhh/hft-backtest
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_backtest }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_backtest }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-backtest
-          clean: false
-          persist-credentials: false
       - name: Overlay exact hft-compressor snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-compressor
           repository: be0hhh/hft-compressor
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_compressor }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_compressor }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-compressor
-          clean: false
-          persist-credentials: false
       - name: Overlay exact hft-parser snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-parser
           repository: be0hhh/hft-parser
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_parser }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_parser }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-parser
-          clean: false
-          persist-credentials: false
       - name: Overlay exact hft-recorder snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-recorder
           repository: be0hhh/hft-recorder
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_recorder }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_recorder }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-recorder
-          clean: false
-          persist-credentials: false
       - name: Overlay exact trading-core snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/trading-core
           repository: be0hhh/trading-core
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).trading_core }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).trading_core }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/trading-core
-          clean: false
-          persist-credentials: false
       - name: Set up pinned LLVM
-        uses: ./source/CXETCPP/.github/actions/setup-toolchain
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/setup-toolchain
         with:
-          source-root: source/CXETCPP
+          source-root: source/family-ci-v3/CXETCPP
           local-cache-root: /home/gha-runner/github-actions/cache/toolchains/wsl-ci-cxetcpp
       - name: Incrementally validate the root composition
-        working-directory: source/CXETCPP
+        working-directory: source/family-ci-v3/CXETCPP
         run: |
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
           /usr/bin/cmake --preset clang-ci-family-incremental
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/CXETCPP/build/modes/clang-ci-family-incremental"
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/CXETCPP/build/modes/clang-ci-family-incremental"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
           /usr/bin/cmake --build --preset clang-ci-family-incremental --target hft-backtest-product --parallel 4
 
   test-build:
@@ -327,15 +317,15 @@ jobs:
       FAMILY_SNAPSHOT_JSON: ${{ needs.snapshot.outputs.snapshot_json }}
     steps:
       - name: Configure persistent family test tree
-        working-directory: source/CXETCPP
+        working-directory: source/family-ci-v3/CXETCPP
         run: |
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
           /usr/bin/cmake --preset clang-ci-family-incremental
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/CXETCPP/build/modes/clang-ci-family-incremental"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
       - name: Build only registered hft-backtest test targets
-        working-directory: source/CXETCPP
+        working-directory: source/family-ci-v3/CXETCPP
         run: |
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$TEST_BUILD_DIR"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$TEST_BUILD_DIR"
           /usr/bin/cmake --build "$TEST_BUILD_DIR" --target hft-backtest-all --parallel 4
 
   test-groups:
@@ -356,7 +346,7 @@ jobs:
     steps:
       - name: Run ${{ matrix.group }} tests
         run: |
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$TEST_BUILD_DIR"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$TEST_BUILD_DIR"
           /usr/bin/ctest --test-dir "$TEST_BUILD_DIR" -R '${{ matrix.selector }}' --output-on-failure --no-tests=error --timeout 180
 
   sanitizer-address-undefined:
@@ -376,11 +366,11 @@ jobs:
           ref: ${{ needs.snapshot.outputs.cxetcpp_sha }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
           submodules: false
-          path: source/CXETCPP
+          path: source/family-ci-v3/CXETCPP
           clean: false
           persist-credentials: false
       - name: Restore pinned source graph without shallow history
-        working-directory: source/CXETCPP
+        working-directory: source/family-ci-v3/CXETCPP
         env:
           GIT_CONFIG_COUNT: 2
           GIT_CONFIG_KEY_0: 'url.https://x-access-token:${{ secrets.CI_FAMILY_READ_TOKEN }}@github.com/.insteadOf'
@@ -393,67 +383,62 @@ jobs:
             exit 1
           }
       - name: Overlay exact hft-backtest snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-backtest
           repository: be0hhh/hft-backtest
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_backtest }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_backtest }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-backtest
-          clean: false
-          persist-credentials: false
       - name: Overlay exact hft-compressor snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-compressor
           repository: be0hhh/hft-compressor
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_compressor }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_compressor }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-compressor
-          clean: false
-          persist-credentials: false
       - name: Overlay exact hft-parser snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-parser
           repository: be0hhh/hft-parser
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_parser }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_parser }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-parser
-          clean: false
-          persist-credentials: false
       - name: Overlay exact hft-recorder snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/hft-recorder
           repository: be0hhh/hft-recorder
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_recorder }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).hft_recorder }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/hft-recorder
-          clean: false
-          persist-credentials: false
       - name: Overlay exact trading-core snapshot
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/overlay-family-revision
         with:
+          source-root: source/family-ci-v3/CXETCPP
+          repository-path: apps/trading-core
           repository: be0hhh/trading-core
-          ref: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).trading_core }}
+          revision: ${{ fromJSON(needs.snapshot.outputs.snapshot_json).trading_core }}
           token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          path: source/CXETCPP/apps/trading-core
-          clean: false
-          persist-credentials: false
       - name: Set up pinned LLVM
-        uses: ./source/CXETCPP/.github/actions/setup-toolchain
+        uses: ./source/family-ci-v3/CXETCPP/.github/actions/setup-toolchain
         with:
-          source-root: source/CXETCPP
+          source-root: source/family-ci-v3/CXETCPP
           local-cache-root: /home/gha-runner/github-actions/cache/toolchains/wsl-ci-cxetcpp
       - name: Configure ASan and UBSan tree
-        working-directory: source/CXETCPP
+        working-directory: source/family-ci-v3/CXETCPP
         run: |
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
           /usr/bin/cmake --preset clang-ci-family-address-undefined-incremental
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/CXETCPP/build/modes/clang-ci-family-address-undefined-incremental"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-address-undefined-incremental"
       - name: Build and run sanitized hft-backtest tests
-        working-directory: source/CXETCPP
+        working-directory: source/family-ci-v3/CXETCPP
         run: |
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$ASAN_BUILD_DIR"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$ASAN_BUILD_DIR"
           /usr/bin/cmake --build "$ASAN_BUILD_DIR" --target "$PRODUCT_TARGET" hft-backtest-all --parallel 4
-          python3 "$GITHUB_WORKSPACE/source/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$ASAN_BUILD_DIR"
+          python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$ASAN_BUILD_DIR"
           /usr/bin/ctest --test-dir "$ASAN_BUILD_DIR" -L '^hft-backtest$' --output-on-failure --no-tests=error --timeout 180
 
   publish-buildable-own:
