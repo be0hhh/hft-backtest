@@ -54,7 +54,7 @@ bool testStatArbPairwiseTakerDiscoversAllPairsProfile() {
   return expect(metadata != nullptr, "stat_arb_pairwise_taker metadata is exported") &&
          expect(metadata->configTemplateFile != nullptr &&
                     std::string_view{metadata->configTemplateFile} ==
-                        "strategy_profiles/stat_arb_pairwise_taker.ini",
+                        "strategy_profiles/StatArbPairwiseTaker.ini",
                 "stat_arb_pairwise_taker metadata discovers all-pairs profile") &&
          expect(metadata->minSessionCount == 2u, "stat_arb_pairwise_taker requires at least two sessions") &&
          expect(metadata->maxSessionCount == 50u, "stat_arb_pairwise_taker allows the GUI multileg cap") &&

@@ -3302,7 +3302,7 @@ bool testStatArbBandLadderMetadataRequiresTwoSessions() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("stat_arb_band_ladder");
   return expect(metadata != nullptr, "stat_arb_band_ladder metadata is exported") &&
          expect(metadata->configTemplateFile != nullptr &&
-                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/stat_arb_band_ladder.ini",
+                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/StatArbBandLadder.ini",
                 "stat arb band ladder discovers strategy profile") &&
          expect(metadataDisplayNameIs(*metadata, "Стат-арбитраж band ladder"),
                 "stat arb band ladder display name comes from ini metadata") &&
@@ -3341,7 +3341,7 @@ bool testStatArbPairwiseTakerMetadataSupportsAllPairs() {
   const hft_backtest::StrategyMetadata* metadata = hft_backtest::findStrategyMetadata("stat_arb_pairwise_taker");
   return expect(metadata != nullptr, "stat_arb_pairwise_taker metadata is exported") &&
          expect(metadata->configTemplateFile != nullptr &&
-                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/stat_arb_pairwise_taker.ini",
+                    std::string_view{metadata->configTemplateFile} == "strategy_profiles/StatArbPairwiseTaker.ini",
                 "stat_arb_pairwise_taker metadata discovers strategy profile") &&
          expect(metadataDisplayNameIs(*metadata, "Стат-арбитраж all-pairs taker"),
                 "stat_arb_pairwise_taker display name comes from ini metadata") &&
