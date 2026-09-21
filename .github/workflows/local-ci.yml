@@ -90,8 +90,8 @@ jobs:
           keys = ("cxetcpp", "hft_parser", "hft_compressor", "hft_recorder", "trading_core", "hft_trader", "hft_backtest", "trader", "vetron", "test_exchanges_helper")
           if os.environ["EVENT_NAME"] == "repository_dispatch":
               payload = json.loads(os.environ["DISPATCH_PAYLOAD"])
-              if payload.get("schema_version") != 2:
-                  raise SystemExit("family-build requires schema_version=2")
+              if payload.get("schema_version") not in (2, 3):
+                  raise SystemExit("family-build requires schema_version=2 or 3")
               mode, snapshot = payload.get("mode"), payload.get("snapshot")
               snapshot_id = payload.get("snapshot_id")
               if not isinstance(snapshot, dict):
