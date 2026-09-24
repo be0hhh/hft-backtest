@@ -37,7 +37,7 @@ defaults:
 
 jobs:
   snapshot:
-    name: snapshot
+    name: snapshot-contract
     runs-on: [self-hosted, linux, x64, wsl, local-control, hft-backtest]
     timeout-minutes: 10
     defaults:
