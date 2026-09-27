@@ -7,6 +7,12 @@ on:
     types: [family-build]
   workflow_dispatch:
     inputs:
+      profile:
+        description: Family CI composition
+        required: true
+        default: full
+        type: choice
+        options: [full]
       mode:
         description: Build the repository itself or revalidate a dependency snapshot
         required: true
@@ -108,12 +114,14 @@ jobs:
         uses: ./.github/actions/resolve-family-revisions
         with:
           family-read-token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
+          profile: ${{ inputs.profile }}
       - name: Validate and normalize snapshot
         id: normalize
         env:
           EVENT_NAME: ${{ github.event_name }}
           DISPATCH_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
           MANUAL_MODE: ${{ inputs.mode }}
+          MANUAL_PROFILE: ${{ inputs.profile }}
           MANUAL_CXETCPP: ${{ steps.manual.outputs.cxetcpp_sha }}
           MANUAL_HFT_BACKTEST: ${{ steps.manual.outputs.hft_backtest_sha }}
           MANUAL_HFT_COMPRESSOR: ${{ steps.manual.outputs.hft_compressor_sha }}
@@ -130,8 +138,8 @@ jobs:
           keys = ("cxetcpp", "hft_parser", "hft_compressor", "hft_recorder", "trading_core", "hft_trader", "hft_backtest", "trader", "vetron", "test_exchanges_helper")
           if os.environ["EVENT_NAME"] == "repository_dispatch":
               payload = json.loads(os.environ["DISPATCH_PAYLOAD"])
-              if payload.get("schema_version") not in (2, 3):
-                  raise SystemExit("family-build requires schema_version=2 or 3")
+              if payload.get("schema_version") != 4:
+                  raise SystemExit("family-build requires schema_version=4")
               mode, snapshot = payload.get("mode"), payload.get("snapshot")
               snapshot_id = payload.get("snapshot_id")
               if not isinstance(snapshot, dict):
@@ -145,9 +153,12 @@ jobs:
           else:
               mode = os.environ["MANUAL_MODE"]
               snapshot = {"cxetcpp": os.environ["MANUAL_CXETCPP"], "hft_parser": os.environ["MANUAL_HFT_PARSER"], "hft_compressor": os.environ["MANUAL_HFT_COMPRESSOR"], "hft_recorder": os.environ["MANUAL_HFT_RECORDER"], "trading_core": os.environ["MANUAL_TRADING_CORE"], "hft_trader": os.environ["MANUAL_HFT_TRADER"], "hft_backtest": os.environ["MANUAL_HFT_BACKTEST"], "trader": os.environ["MANUAL_TRADER"], "vetron": os.environ["MANUAL_VETRON"], "test_exchanges_helper": os.environ["MANUAL_TEST_HELPER"]}
+              snapshot["_profile"] = os.environ.get("MANUAL_PROFILE") or "full"
               snapshot_id = None
-          if mode not in {"own", "dependency"} or set(snapshot) != set(keys):
+          if mode not in {"own", "dependency"} or set(snapshot) != set(keys) | {"_profile"} or snapshot["_profile"] not in {"essential", "full"}:
               raise SystemExit("invalid family-build mode or snapshot keys")
+          if snapshot["_profile"] != "full":
+              raise SystemExit("hft-backtest requires full family profile")
           for key in keys:
               if not isinstance(snapshot[key], str) or not re.fullmatch(r"[0-9a-f]{40}", snapshot[key]):
                   raise SystemExit(f"invalid SHA for {key}")
@@ -160,7 +171,7 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"mode={mode}\nsnapshot_id={snapshot_id}\nsnapshot_json={compact}\ncxetcpp_sha={snapshot['cxetcpp']}\nhft_recorder_sha={snapshot['hft_recorder']}\ntrading_core_sha={snapshot['trading_core']}\nhft_backtest_sha={snapshot['hft_backtest']}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              summary.write(f"### Snapshot `{snapshot_id}` ({mode})\n\n")
+              summary.write(f"### Snapshot `{snapshot_id}` ({mode}, {snapshot['_profile']})\n\n")
               for key in keys:
                   summary.write(f"- {key}: `{snapshot[key]}`\n")
           PY
@@ -254,7 +265,7 @@ jobs:
         working-directory: source/family-ci-v3/CXETCPP
         run: |
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
-          /usr/bin/cmake --preset clang-ci-family-incremental
+          /usr/bin/cmake --preset clang-ci-family-incremental -DCXET_FAMILY_PROFILE="${{ fromJSON(needs.snapshot.outputs.snapshot_json)._profile }}"
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
           /usr/bin/cmake --build --preset clang-ci-family-incremental --target hft-backtest-product --parallel 4
@@ -339,7 +350,7 @@ jobs:
         working-directory: source/family-ci-v3/CXETCPP
         run: |
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
-          /usr/bin/cmake --preset clang-ci-family-incremental
+          /usr/bin/cmake --preset clang-ci-family-incremental -DCXET_FAMILY_PROFILE="${{ fromJSON(needs.snapshot.outputs.snapshot_json)._profile }}"
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" verify --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
           /usr/bin/cmake --build --preset clang-ci-family-incremental --target hft-backtest-product --parallel 4
@@ -360,7 +371,7 @@ jobs:
         working-directory: source/family-ci-v3/CXETCPP
         run: |
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
-          /usr/bin/cmake --preset clang-ci-family-incremental
+          /usr/bin/cmake --preset clang-ci-family-incremental -DCXET_FAMILY_PROFILE="${{ fromJSON(needs.snapshot.outputs.snapshot_json)._profile }}"
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-incremental"
       - name: Build only registered hft-backtest test targets
         working-directory: source/family-ci-v3/CXETCPP
@@ -470,7 +481,7 @@ jobs:
         working-directory: source/family-ci-v3/CXETCPP
         run: |
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" source --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
-          /usr/bin/cmake --preset clang-ci-family-address-undefined-incremental
+          /usr/bin/cmake --preset clang-ci-family-address-undefined-incremental -DCXET_FAMILY_PROFILE="${{ fromJSON(needs.snapshot.outputs.snapshot_json)._profile }}"
           python3 "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/tools/Ci/FamilyCiWorkspace.py" record --root "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$GITHUB_WORKSPACE/source/family-ci-v3/CXETCPP/build/modes/clang-ci-family-address-undefined-incremental"
       - name: Build and run sanitized hft-backtest tests
         working-directory: source/family-ci-v3/CXETCPP
