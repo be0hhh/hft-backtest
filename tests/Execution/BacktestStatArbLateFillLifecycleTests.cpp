@@ -122,13 +122,13 @@ struct StrategyHarness {
     trading_core::copyBookTickerSnapshot(snapshots[0], leg0);
     trading_core::copyBookTickerSnapshot(snapshots[1], leg1);
 
-    cxet::composite::BboReconstructionView reconstructed0{};
+    trading_core::BboReconstructionView reconstructed0{};
     reconstructed0.bookTicker = leg0;
-    reconstructed0.source = cxet::composite::kBboReconstructionSourceTrade;
-    reconstructed0.valid = cxet::composite::kBboReconstructionFlagTrue;
-    reconstructed0.bidQtyKnown = cxet::composite::kBboReconstructionFlagTrue;
-    reconstructed0.askQtyKnown = cxet::composite::kBboReconstructionFlagTrue;
-    cxet::composite::BboReconstructionView reconstructed1 = reconstructed0;
+    reconstructed0.source = trading_core::kBboReconstructionSourceTrade;
+    reconstructed0.valid = trading_core::kBboReconstructionFlagTrue;
+    reconstructed0.bidQtyKnown = trading_core::kBboReconstructionFlagTrue;
+    reconstructed0.askQtyKnown = trading_core::kBboReconstructionFlagTrue;
+    trading_core::BboReconstructionView reconstructed1 = reconstructed0;
     reconstructed1.bookTicker = leg1;
     trading_core::copyReconstructedBboSnapshot(
         snapshots[0], reconstructed0, timeNs(eventTs));

@@ -122,6 +122,12 @@ void applyTemplate(const generated::GeneratedStrategyTemplate& source,
         descriptor->name[0] == '\0') {
       failClosedMetadataContract();
     }
+    if (!trading_core::strategyDescriptorContractValid(*descriptor)) {
+      failClosedMetadataContract();
+    }
+    // Backtest metadata describes executable order strategies. A signal-only
+    // descriptor has no order cycle or backtest profile template.
+    if (descriptor->evaluateSignalPpm != nullptr) continue;
 
     StrategyMetadata& metadata = cache.strategies[cache.count++];
     metadata.id = descriptor->name;

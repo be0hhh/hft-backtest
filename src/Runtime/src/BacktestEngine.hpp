@@ -6,7 +6,7 @@
 #include "Input/SessionLoader.hpp"
 
 #include "cxet/Api/Market/PublicMarketDataTypes.hpp"
-#include "cxet/Primitives/Composite/BboReconstruction.hpp"
+#include "trading_core/Algorithm/Market/BboReconstruction.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
 #include "trading_core/Contracts/Intents/OrderState.hpp"
 #include "trading_core/Contracts/Intents/PositionState.hpp"
@@ -402,8 +402,8 @@ struct EngineState {
   std::uint64_t depthFallbackFills{0};
   std::int64_t firstDepthFallbackTsNs{0};
   std::string depthFallbackReason{};
-  cxet::composite::BboReconstructionState bboReconstruction{};
-  cxet::composite::BboReconstructionState venueBboReconstruction{};
+  trading_core::BboReconstructionState bboReconstruction{};
+  trading_core::BboReconstructionState venueBboReconstruction{};
   ReconstructionSourceIdentity reconstructionBookTickerIdentity{};
   ReconstructionSourceIdentity reconstructionTradeIdentity{};
   ReconstructionSourceIdentity venueReconstructionBookTickerIdentity{};

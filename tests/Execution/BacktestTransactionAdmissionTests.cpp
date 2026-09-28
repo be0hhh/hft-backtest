@@ -33,13 +33,13 @@ void setTop(EngineState& engine) noexcept {
   top.bid.qty.raw = kQtyRaw;
   top.ask.px.raw = kAskRaw;
   top.ask.qty.raw = kQtyRaw;
-  cxet::composite::BboReconstructionView reconstructed{};
+  trading_core::BboReconstructionView reconstructed{};
   reconstructed.bookTicker = top;
   reconstructed.source =
-      cxet::composite::kBboReconstructionSourceBookTicker;
-  reconstructed.valid = cxet::composite::kBboReconstructionFlagTrue;
-  reconstructed.bidPresent = cxet::composite::kBboReconstructionFlagTrue;
-  reconstructed.askPresent = cxet::composite::kBboReconstructionFlagTrue;
+      trading_core::kBboReconstructionSourceBookTicker;
+  reconstructed.valid = trading_core::kBboReconstructionFlagTrue;
+  reconstructed.bidPresent = trading_core::kBboReconstructionFlagTrue;
+  reconstructed.askPresent = trading_core::kBboReconstructionFlagTrue;
   trading_core::copyBookTickerSnapshot(engine.snapshot, top);
   trading_core::copyBookTickerSnapshot(engine.venueSnapshot, top);
   trading_core::copyReconstructedBboSnapshot(

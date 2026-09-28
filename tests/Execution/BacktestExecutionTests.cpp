@@ -138,13 +138,13 @@ void setTop(EngineState& engine, std::int64_t bid, std::int64_t ask) noexcept {
 }
 
 void markReconstructedBookTickerReady(EngineState& engine) noexcept {
-  cxet::composite::BboReconstructionView reconstructed{};
+  trading_core::BboReconstructionView reconstructed{};
   reconstructed.bookTicker = engine.snapshot.lastBookTicker;
   reconstructed.source =
-      cxet::composite::kBboReconstructionSourceBookTicker;
-  reconstructed.valid = cxet::composite::kBboReconstructionFlagTrue;
-  reconstructed.bidPresent = cxet::composite::kBboReconstructionFlagTrue;
-  reconstructed.askPresent = cxet::composite::kBboReconstructionFlagTrue;
+      trading_core::kBboReconstructionSourceBookTicker;
+  reconstructed.valid = trading_core::kBboReconstructionFlagTrue;
+  reconstructed.bidPresent = trading_core::kBboReconstructionFlagTrue;
+  reconstructed.askPresent = trading_core::kBboReconstructionFlagTrue;
   trading_core::copyReconstructedBboSnapshot(
       engine.snapshot, reconstructed, TimeNs{1000u});
   trading_core::copyReconstructedBboSnapshot(
@@ -2721,9 +2721,9 @@ bool testCapturedBboFreshnessUsesReplayClockCoordinates() {
   instrument.tickSizeRaw = 1000000;
   Price reconstructionTick{};
   reconstructionTick.raw = instrument.tickSizeRaw;
-  if (!expect(cxet::composite::configureBboReconstruction(
+  if (!expect(trading_core::configureBboReconstruction(
                   strategyEngine.bboReconstruction, reconstructionTick) &&
-                  cxet::composite::configureBboReconstruction(
+                  trading_core::configureBboReconstruction(
                       venueEngine.venueBboReconstruction, reconstructionTick),
               "freshness fixture configures strategy and venue BBO state")) {
     return false;
@@ -3227,15 +3227,23 @@ bool metadataParamDefaultIs(const hft_backtest::StrategyMetadata& metadata,
 
 bool testStrategyMetadataMirrorsTraderRegistry() {
   const std::size_t descriptorCount = trading_core::strategyDescriptorCount();
-  if (!expect(hft_backtest::strategyMetadataCount() == descriptorCount, "metadata count mirrors trader registry")) return false;
+  std::size_t executableCount = 0u;
   for (std::size_t i = 0; i < descriptorCount; ++i) {
     const trading_core::StrategyDescriptor* descriptor = trading_core::strategyDescriptorAt(i);
-    const hft_backtest::StrategyMetadata* metadata = hft_backtest::strategyMetadataAt(i);
     if (!expect(descriptor != nullptr && descriptor->name != nullptr, "registry descriptor has a name")) return false;
+    if (descriptor->evaluateSignalPpm != nullptr) {
+      if (!expect(descriptor->runCycle == nullptr, "signal-only descriptor has no order cycle")) return false;
+      if (!expect(hft_backtest::findStrategyMetadata(descriptor->name) == nullptr,
+                  "signal-only strategy is excluded from executable backtest metadata")) return false;
+      continue;
+    }
+    const hft_backtest::StrategyMetadata* metadata = hft_backtest::strategyMetadataAt(executableCount++);
     if (!expect(metadata != nullptr && metadata->id != nullptr, "metadata row exists for registry descriptor")) return false;
     if (!expect(std::string_view{metadata->id} == descriptor->name, "metadata id matches registry descriptor")) return false;
     if (!expect(hft_backtest::findStrategyMetadata(descriptor->name) == metadata, "metadata lookup finds registry strategy")) return false;
   }
+  if (!expect(hft_backtest::strategyMetadataCount() == executableCount,
+              "metadata count mirrors executable order strategies")) return false;
   return expect(hft_backtest::findStrategyMetadata("removed_strategy") == nullptr, "unknown metadata is hidden");
 }
 

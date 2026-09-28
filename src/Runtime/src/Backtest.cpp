@@ -647,9 +647,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   engine.tickSizeE8 = instrument.tickSizeRaw;
   Price reconstructionTick{};
   reconstructionTick.raw = instrument.tickSizeRaw;
-  (void)cxet::composite::configureBboReconstruction(
+  (void)trading_core::configureBboReconstruction(
       engine.bboReconstruction, reconstructionTick);
-  (void)cxet::composite::configureBboReconstruction(
+  (void)trading_core::configureBboReconstruction(
       engine.venueBboReconstruction, reconstructionTick);
   engine.makerFillMinCrossTicks = effectiveRequest.makerFillMinCrossTicks;
   detail::initializeAccounting(engine, request);
@@ -691,9 +691,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       legEngine.tickSizeE8 = legInstruments[leg].tickSizeRaw;
       Price legReconstructionTick{};
       legReconstructionTick.raw = legInstruments[leg].tickSizeRaw;
-      (void)cxet::composite::configureBboReconstruction(
+      (void)trading_core::configureBboReconstruction(
           legEngine.bboReconstruction, legReconstructionTick);
-      (void)cxet::composite::configureBboReconstruction(
+      (void)trading_core::configureBboReconstruction(
           legEngine.venueBboReconstruction, legReconstructionTick);
       legEngine.makerFillMinCrossTicks = effectiveRequest.makerFillMinCrossTicks;
       detail::initializeAccounting(legEngine, request);
