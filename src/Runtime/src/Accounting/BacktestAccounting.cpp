@@ -57,7 +57,7 @@ trading_core::FillPositionAccountingResult updatePosition(
 }
 
 std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
-  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+  const cxet::composite::BookTicker& top = effectiveBookTicker(engine.venueSnapshot);
   return trading_core::markToMarketPnlE8(
       trading_core::FillPositionAccountingState{engine.netQtyRaw,
                                                  engine.entryPriceE8},
@@ -90,7 +90,7 @@ void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t rea
       engine.grossRealizedPnlE8, unrealized);
   const std::int64_t netTotal = trading_core::saturatingAddI64(
       engine.netRealizedPnlE8, unrealized);
-  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+  const cxet::composite::BookTicker& top = effectiveBookTicker(engine.venueSnapshot);
   engine.riskSnapshots.push_back(JsonRiskSnapshot{tsNs,
                                                   engine.grossRealizedPnlE8,
                                                   engine.netRealizedPnlE8,

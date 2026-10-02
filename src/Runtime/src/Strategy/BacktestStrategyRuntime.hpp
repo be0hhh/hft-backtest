@@ -29,8 +29,6 @@ enum class RunUntilBoundary : std::uint8_t {
 struct SingleLegCycleScratch {
   std::array<trading_core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<trading_core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
-  std::array<trading_core::StrategyDesiredOrderSlot,
-             trading_core::kStrategyRuntimeMaxDesiredOrders> desiredOrderBuf{};
   std::array<trading_core::StrategyCommandIntent,
              trading_core::kStrategyRuntimeMaxCommands +
                  2u * trading_core::kStrategyRuntimeMaxDesiredOrders>
@@ -44,8 +42,6 @@ struct SingleLegCycleScratch {
 struct MultiLegCycleScratch {
   std::array<trading_core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<trading_core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
-  std::array<trading_core::StrategyDesiredOrderSlot,
-             trading_core::kStrategyRuntimeMaxDesiredOrders> desiredOrderBuf{};
   std::array<trading_core::StrategyCommandIntent,
              trading_core::kStrategyRuntimeMaxCommands +
                  2u * trading_core::kStrategyRuntimeMaxDesiredOrders>

@@ -19,7 +19,6 @@
 #include "trading_core/Execution/PortfolioRisk.hpp"
 #include "trading_core/Strategy/GeneratedStrategyRegistry.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
-#include "cxet/Primitives/Composite/OrderBookTapeRuntimeV1.hpp"
 
 #include <array>
 #include <algorithm>
@@ -618,6 +617,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
               strategyDepth;
         }
         if (loadPlan.loadDepths) {
+          if (!target.strategyDepthBook.prepare()) return false;
           CountVal executionDepth{};
           executionDepth.raw = static_cast<std::uint32_t>(
               rawdata::kMaxOrderbookLevels);
@@ -629,6 +629,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
           }
           target.venueOrderBook.config.maxStoredLevelsPerSide =
               executionDepth;
+          if (!target.venueDepthBook.prepare()) return false;
         }
         return true;
       };
@@ -836,25 +837,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.performance.deliveryNs = elapsedNs(deliveryStart);
   result.trades = 0;
   result.bookTickers = 0;
-  result.priceLimits = 0;
   result.depths = 0;
-  result.liquidations = 0;
-  result.markPrices = 0;
-  result.indexPrices = 0;
-  result.funding = 0;
-  result.openInterest = 0;
   result.firstTsNs = std::numeric_limits<std::int64_t>::max();
   result.lastTsNs = 0;
   for (const detail::SessionData& loadedSession : sessions) {
     result.trades += loadedSession.trades.size();
     result.bookTickers += loadedSession.bookTickers.size();
-    result.priceLimits += loadedSession.priceLimits.size();
     result.depths += loadedSession.depths.size();
-    result.liquidations += loadedSession.liquidations.size();
-    result.markPrices += loadedSession.markPrices.size();
-    result.indexPrices += loadedSession.indexPrices.size();
-    result.funding += loadedSession.funding.size();
-    result.openInterest += loadedSession.openInterest.size();
     if (loadedSession.firstTsNs > 0 && loadedSession.firstTsNs < result.firstTsNs) result.firstTsNs = loadedSession.firstTsNs;
     if (loadedSession.lastTsNs > result.lastTsNs) result.lastTsNs = loadedSession.lastTsNs;
     mergeReplayClockEvidence(result.replayClock, loadedSession);
@@ -1120,6 +1109,15 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     multiScratch = multiScratchStorage.get();
     multiScratch->reset(legEngines.size() < trading_core::kStrategyRuntimeMaxLegs ? legEngines.size() : trading_core::kStrategyRuntimeMaxLegs);
   }
+  const auto depthReplayRejected = [&]() -> bool {
+    bool failed = engine.depthReplayFailed;
+    for (const auto& leg : legEngines) failed = failed || leg.depthReplayFailed;
+    if (!failed) return false;
+    result.status = Status::CorruptData;
+    result.error = "replay depth rejected by canonical CXET book";
+    (void)writeCurrentArtifacts();
+    return true;
+  };
   bool replayStopped = false;
   auto deliverNextApplicationTransaction =
       [&](const char* phase) -> bool {
@@ -1174,6 +1172,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
                                     instrument, true);
       }
     }
+    if (depthReplayRejected()) return false;
     const bool deliveredOk = cycleEvent->applicationOnly ||
         (hasExplicitSessions
             ? runCycleMulti(*descriptor, inputPolicy, state.data(), legEngines,
@@ -1266,6 +1265,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
         if (hasExplicitSessions) applyMarketEventToSnapshots(legEngines, sessions, next, legSymbols, legInstruments, false);
         else applyMarketEventToSnapshots(engine, session, next, selectedSymbol, instrument, false);
       }
+      if (depthReplayRejected()) return result;
       if (hasExplicitSessions) {
         for (detail::EngineState& legEngine : legEngines) (void)detail::appendRiskSnapshotIfDue(legEngine, riskEvent->tsNs);
       } else {

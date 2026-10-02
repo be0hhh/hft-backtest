@@ -168,67 +168,10 @@ bool parseContractBookTickerLine(std::string_view line, BookTickerRow& out) noex
   return true;
 }
 
-bool parseContractPriceLimitLine(std::string_view line, PriceLimitRow& out) noexcept {
-  hftrec::replay::PriceLimitRow row{};
-  if (!hftrec::isOk(hftrec::replay::parsePriceLimitLine(line, row))) return false;
-  out.tsNs = row.tsNs;
-  out.buyLimitE8 = row.buyLimitE8;
-  out.sellLimitE8 = row.sellLimitE8;
-  out.enabled = row.enabled;
-  out.ingestSeq = row.ingestSeq;
-  out.arrival = row.arrival;
-  return true;
-}
 
-bool parseContractLiquidationLine(std::string_view line, LiquidationRow& out) noexcept {
-  hftrec::replay::LiquidationRow row{};
-  if (!hftrec::isOk(hftrec::replay::parseLiquidationLine(line, row))) return false;
-  out.priceE8 = row.priceE8;
-  out.qtyE8 = row.qtyE8;
-  out.side = row.side;
-  out.tsNs = row.tsNs;
-  out.avgPriceE8 = row.avgPriceE8;
-  out.filledQtyE8 = row.filledQtyE8;
-  out.orderType = row.orderType;
-  out.timeInForce = row.timeInForce;
-  out.status = row.status;
-  out.sourceMode = row.sourceMode;
-  out.ingestSeq = row.ingestSeq;
-  out.arrival = row.arrival;
-  return true;
-}
 
-bool parseContractMarkPriceLine(std::string_view line, MarkPriceRow& out) noexcept {
-  hftrec::replay::MarkPriceRow row{};
-  if (!hftrec::isOk(hftrec::replay::parseMarkPriceLine(line, row))) return false;
-  out.tsNs = row.tsNs;
-  out.markPriceE8 = row.markPriceE8;
-  out.ingestSeq = row.ingestSeq;
-  out.arrival = row.arrival;
-  return true;
-}
 
-bool parseContractIndexPriceLine(std::string_view line, IndexPriceRow& out) noexcept {
-  hftrec::replay::IndexPriceRow row{};
-  if (!hftrec::isOk(hftrec::replay::parseIndexPriceLine(line, row))) return false;
-  out.tsNs = row.tsNs;
-  out.indexPriceE8 = row.indexPriceE8;
-  out.ingestSeq = row.ingestSeq;
-  out.arrival = row.arrival;
-  return true;
-}
 
-bool parseContractFundingLine(std::string_view line, FundingRow& out) noexcept {
-  hftrec::replay::FundingRow row{};
-  if (!hftrec::isOk(hftrec::replay::parseFundingLine(line, row))) return false;
-  out.tsNs = row.tsNs;
-  out.fundingRateE8 = row.fundingRateE8;
-  out.fundingTsNs = row.fundingTsNs;
-  out.nextFundingTsNs = row.nextFundingTsNs;
-  out.ingestSeq = row.ingestSeq;
-  out.arrival = row.arrival;
-  return true;
-}
 
 bool parseContractCandleLine(std::string_view line, CandleRow& out) noexcept {
   hftrec::replay::CandleRow row{};
@@ -279,27 +222,13 @@ bool rowKeyLess(TimelineRowKey lhs, TimelineRowKey rhs) noexcept {
 
 TimelineRowKey rowKey(const TradeRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
 TimelineRowKey rowKey(const BookTickerRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
-TimelineRowKey rowKey(const PriceLimitRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
-TimelineRowKey rowKey(const LiquidationRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
-TimelineRowKey rowKey(const MarkPriceRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
-TimelineRowKey rowKey(const IndexPriceRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
-TimelineRowKey rowKey(const FundingRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
-TimelineRowKey rowKey(const OpenInterestRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
 TimelineRowKey rowKey(const DepthRow& row) noexcept { return TimelineRowKey{row.tsNs, row.ingestSeq}; }
 TimelineRowKey rowKey(const CandleRow& row) noexcept { return TimelineRowKey{row.tsNs, 0}; }
 
 std::size_t estimatedRowsFor(std::size_t bytes, std::string_view channel) noexcept {
   if (bytes == 0u) return 0u;
-  std::size_t avgBytes = 96u;
-  if (channel == "bookticker" || channel == "mark_price" || channel == "index_price" ||
-      channel == "funding" || channel == "open_interest" || channel == "candles" ||
-      channel == "candles2" || channel == "candlesv2") {
-    avgBytes = 64u;
-  } else if (channel == "depth" || channel == "depth_tape") {
-    avgBytes = 192u;
-  } else if (channel == "liquidations") {
-    avgBytes = 160u;
-  }
+  const std::size_t avgBytes = channel == "depth" || channel == "depth_tape"
+      ? 192u : (channel == "bookticker" || channel == "candles" || channel == "candles2" ? 64u : 96u);
   return (bytes / avgBytes) + 16u;
 }
 
@@ -569,6 +498,8 @@ bool addArrivalRowCount(std::uint64_t value, std::uint64_t& total) noexcept {
 
 bool arrivalSummaryMatchesDeclaredRows(
     const hftrec::capture::SessionManifest& manifest) noexcept {
+  // Framing evidence covers the complete immutable recording, including
+  // historical channels which this product intentionally no longer replays.
   std::uint64_t declaredRows = 0u;
   if (!addArrivalRowCount(manifest.tradesCount, declaredRows) ||
       !addArrivalRowCount(manifest.liquidationsCount, declaredRows) ||
@@ -695,10 +626,6 @@ bool validateCurrentRecorderManifest(const hftrec::capture::SessionManifest& man
           manifest.bookTickerEnabled, manifest.bookTickerCount, manifest.bookTickerPath,
           manifest.bookTickerRowSchema, hftrec::capture::kBookTickerRowSchemaCurrent, &manifest.bookTickerRuntime,
           warnings, error)) return false;
-  if (!validateManifestChannel("price_limit", plan.loadPriceLimits, plan.requirePriceLimits,
-          manifest.priceLimitEnabled, manifest.priceLimitCount, manifest.priceLimitPath,
-          manifest.priceLimitRowSchema, hftrec::capture::kPriceLimitRowSchemaCurrent, &manifest.priceLimitRuntime,
-          warnings, error)) return false;
   if (!validateManifestChannel("depth", plan.loadDepths, plan.requireDepths,
           manifest.orderbookEnabled, manifest.depthCount, manifest.depthPath,
           manifest.depthRowSchema, hftrec::capture::kDepthRowSchemaCurrent, &manifest.depthRuntime,
@@ -707,30 +634,7 @@ bool validateCurrentRecorderManifest(const hftrec::capture::SessionManifest& man
     error = "captured-arrival depth sidecar path is missing";
     return false;
   }
-  if (!validateManifestChannel("liquidations", plan.loadLiquidations, plan.requireLiquidations,
-          manifest.liquidationsEnabled, manifest.liquidationsCount, manifest.liquidationsPath,
-          manifest.liquidationsRowSchema, hftrec::capture::kLiquidationsRowSchemaCurrent, &manifest.liquidationsRuntime,
-          warnings, error)) return false;
-  if (!validateManifestChannel("mark_price", plan.loadMarkPrices, plan.requireMarkPrices,
-          manifest.markPriceEnabled, manifest.markPriceCount, manifest.markPricePath,
-          manifest.markPriceRowSchema, hftrec::capture::kMarkPriceRowSchemaCurrent, &manifest.markPriceRuntime,
-          warnings, error)) return false;
-  if (!validateManifestChannel("index_price", plan.loadIndexPrices, plan.requireIndexPrices,
-          manifest.indexPriceEnabled, manifest.indexPriceCount, manifest.indexPricePath,
-          manifest.indexPriceRowSchema, hftrec::capture::kIndexPriceRowSchemaCurrent, &manifest.indexPriceRuntime,
-          warnings, error)) return false;
-  if (!validateManifestChannel("funding", plan.loadFunding, plan.requireFunding,
-          manifest.fundingEnabled, manifest.fundingCount, manifest.fundingPath,
-          manifest.fundingRowSchema, hftrec::capture::kFundingRowSchemaCurrent, &manifest.fundingRuntime,
-          warnings, error)) return false;
-  if (plan.requireOpenInterest) {
-    error = "current recorder manifest has no required open_interest captured-arrival contract";
-    return false;
-  }
-  if (plan.loadOpenInterest) {
-    appendSessionWarning(warnings, "optional open_interest captured-arrival channel is unavailable");
-  }
-  if (plan.loadCandles) {
+  if (plan.loadCandles && manifest.exchange == "finam") {
     const bool useDetailed = manifest.candles2Enabled;
     const bool enabled = useDetailed || manifest.candlesEnabled;
     const std::uint64_t count = useDetailed ? manifest.candles2Count : manifest.candlesCount;
@@ -875,22 +779,10 @@ bool validateCapturedReplayRows(const SessionData& out, std::string& error) {
   }
   return validateCapturedLiveRows("trades", out.trades, error) &&
       validateCapturedLiveRows("bookticker", out.bookTickers, error) &&
-      validateCapturedLiveRows("price_limit", out.priceLimits, error) &&
       validateCapturedLiveRows("depth", out.depths, error) &&
-      validateCapturedLiveRows("liquidations", out.liquidations, error) &&
-      validateCapturedLiveRows("mark_price", out.markPrices, error) &&
-      validateCapturedLiveRows("index_price", out.indexPrices, error) &&
-      validateCapturedLiveRows("funding", out.funding, error) &&
-      validateCapturedLiveRows("open_interest", out.openInterest, error) &&
       validateReplayClockRows("trades", out.trades, replayOffset, error) &&
       validateReplayClockRows("bookticker", out.bookTickers, replayOffset, error) &&
-      validateReplayClockRows("price_limit", out.priceLimits, replayOffset, error) &&
       validateReplayClockRows("depth", out.depths, replayOffset, error) &&
-      validateReplayClockRows("liquidations", out.liquidations, replayOffset, error) &&
-      validateReplayClockRows("mark_price", out.markPrices, replayOffset, error) &&
-      validateReplayClockRows("index_price", out.indexPrices, replayOffset, error) &&
-      validateReplayClockRows("funding", out.funding, replayOffset, error) &&
-      validateReplayClockRows("open_interest", out.openInterest, replayOffset, error) &&
       validateHistoricalSeeds(out, error);
 }
 
@@ -899,13 +791,7 @@ void rebuildReplayRange(SessionData& out) noexcept {
   out.lastTsNs = 0;
   for (const TradeRow& row : out.trades) updateRange(out, row.tsNs);
   for (const BookTickerRow& row : out.bookTickers) updateRange(out, row.tsNs);
-  for (const PriceLimitRow& row : out.priceLimits) updateRange(out, row.tsNs);
   for (const DepthRow& row : out.depths) updateRange(out, row.tsNs);
-  for (const LiquidationRow& row : out.liquidations) updateRange(out, row.tsNs);
-  for (const MarkPriceRow& row : out.markPrices) updateRange(out, row.tsNs);
-  for (const IndexPriceRow& row : out.indexPrices) updateRange(out, row.tsNs);
-  for (const FundingRow& row : out.funding) updateRange(out, row.tsNs);
-  for (const OpenInterestRow& row : out.openInterest) updateRange(out, row.tsNs);
 }
 
 }  // namespace
@@ -931,6 +817,15 @@ Status loadSession(const std::filesystem::path& sessionPath,
     error = "malformed or incompatible recorder manifest.json; current captured-arrival v3 contract is required";
     return Status::CorruptData;
   }
+  // Recorder owns immutable historical channel tags and manifest counts.
+  // Retired public feeds remain corpus evidence and are never replay inputs.
+  if (plan.requireCandles && recorderManifest.exchange != "finam") {
+    error = "candle history is supported only for FINAM archive sources";
+    return Status::Unsupported;
+  }
+  if (plan.loadCandles && recorderManifest.exchange != "finam") {
+    appendSessionWarning(out.warnings, "non-FINAM candle archive channel ignored");
+  }
   if (!validateCurrentRecorderManifest(recorderManifest, plan, out.warnings, error)) {
     return Status::CorruptData;
   }
@@ -947,15 +842,10 @@ Status loadSession(const std::filesystem::path& sessionPath,
   out.exchangeTimestampMissingCount = recorderManifest.arrivalClock.exchangeTimestampMissing;
   const std::string& tradesPath = recorderManifest.tradesPath;
   const std::string& bookTickerPath = recorderManifest.bookTickerPath;
-  const std::string& priceLimitPath = recorderManifest.priceLimitPath;
   const std::string& depthPath = recorderManifest.depthPath;
   const std::string& depthSidecarPath = recorderManifest.depthSidecarPath;
   const std::string& candlesPath = recorderManifest.candlesPath;
   const std::string& candles2Path = recorderManifest.candles2Path;
-  const std::string& liquidationsPath = recorderManifest.liquidationsPath;
-  const std::string& markPricePath = recorderManifest.markPricePath;
-  const std::string& indexPricePath = recorderManifest.indexPricePath;
-  const std::string& fundingPath = recorderManifest.fundingPath;
   loadTradeHistoryManifestFields(manifest, out);
   if (out.exchange.empty() || out.market.empty() || out.symbol.empty()) {
     error = "manifest identity is incomplete";
@@ -985,14 +875,6 @@ Status loadSession(const std::filesystem::path& sessionPath,
             recorderManifest.bookTickerCount, error))
       return Status::CorruptData;
   }
-  if (plan.loadPriceLimits) {
-    Status status = loadJsonl<PriceLimitRow>(declaredPath(sessionPath, priceLimitPath), "price_limit", plan.requirePriceLimits, out.priceLimits, parseContractPriceLimitLine, error);
-    if (!isOk(status)) return status;
-    if (!validateLoadedRowCount(
-            "price_limit", out.priceLimits.size(),
-            recorderManifest.priceLimitCount, error))
-      return Status::CorruptData;
-  }
   if (plan.loadDepths) {
     const std::filesystem::path tapePath = declaredPath(sessionPath, depthPath);
     const std::filesystem::path sidecarPath = declaredPath(sessionPath, depthSidecarPath);
@@ -1003,7 +885,7 @@ Status loadSession(const std::filesystem::path& sessionPath,
             "depth", out.depths.size(), recorderManifest.depthCount,
             error)) return Status::CorruptData;
   }
-  if (plan.loadCandles) {
+  if (plan.loadCandles && out.exchange == "finam") {
     const bool detailed = recorderManifest.candles2Enabled;
     const std::filesystem::path candlePath = declaredPath(
         sessionPath, detailed ? std::string_view{candles2Path} : std::string_view{candlesPath});
@@ -1021,37 +903,6 @@ Status loadSession(const std::filesystem::path& sessionPath,
             detailed ? "candles2" : "candles",
             out.candles.size(), declaredCount, error))
       return Status::CorruptData;
-  }
-  if (plan.loadLiquidations) {
-    Status status = loadJsonl<LiquidationRow>(declaredPath(sessionPath, liquidationsPath), "liquidations", plan.requireLiquidations, out.liquidations, parseContractLiquidationLine, error);
-    if (!isOk(status)) return status;
-    if (!validateLoadedRowCount(
-            "liquidations", out.liquidations.size(),
-            recorderManifest.liquidationsCount, error))
-      return Status::CorruptData;
-  }
-  if (plan.loadMarkPrices) {
-    Status status = loadJsonl<MarkPriceRow>(declaredPath(sessionPath, markPricePath), "mark_price", plan.requireMarkPrices, out.markPrices, parseContractMarkPriceLine, error);
-    if (!isOk(status)) return status;
-    if (!validateLoadedRowCount(
-            "mark_price", out.markPrices.size(),
-            recorderManifest.markPriceCount, error))
-      return Status::CorruptData;
-  }
-  if (plan.loadIndexPrices) {
-    Status status = loadJsonl<IndexPriceRow>(declaredPath(sessionPath, indexPricePath), "index_price", plan.requireIndexPrices, out.indexPrices, parseContractIndexPriceLine, error);
-    if (!isOk(status)) return status;
-    if (!validateLoadedRowCount(
-            "index_price", out.indexPrices.size(),
-            recorderManifest.indexPriceCount, error))
-      return Status::CorruptData;
-  }
-  if (plan.loadFunding) {
-    Status status = loadJsonl<FundingRow>(declaredPath(sessionPath, fundingPath), "funding", plan.requireFunding, out.funding, parseContractFundingLine, error);
-    if (!isOk(status)) return status;
-    if (!validateLoadedRowCount(
-            "funding", out.funding.size(), recorderManifest.fundingCount,
-            error)) return Status::CorruptData;
   }
 
   if (!validateCapturedReplayRows(out, error)) return Status::CorruptData;

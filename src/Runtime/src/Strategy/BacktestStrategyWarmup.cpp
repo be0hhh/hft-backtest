@@ -9,7 +9,7 @@ namespace hft_backtest {
 namespace {
 
 bool buildTradeWarmupRows(const detail::SessionData& session,
-                          std::vector<cxet::composite::TradeRuntimeV1>& out,
+                          std::vector<cxet::composite::Trade>& out,
                           trading_core::StrategyTradeHistorySeedStats& stats) {
   out.clear();
   out.reserve(session.tradeWarmup.size());
@@ -47,7 +47,7 @@ bool seedTradeWarmupFromSession(const trading_core::StrategyDescriptor& descript
     error = "recorder trade warmup is shorter than strategy requires";
     return false;
   }
-  std::vector<cxet::composite::TradeRuntimeV1> rows{};
+  std::vector<cxet::composite::Trade> rows{};
   trading_core::StrategyTradeHistorySeedStats stats{};
   if (!buildTradeWarmupRows(session, rows, stats)) {
     if (!request.required) return true;

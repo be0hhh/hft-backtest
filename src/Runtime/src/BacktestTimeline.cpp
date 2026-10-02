@@ -28,11 +28,6 @@ const hftrec::replay::EventArrival& arrivalFor(const SessionData& session,
   if (kind == kTimelineKindDepth) return session.depths[index].arrival;
   if (kind == kTimelineKindTrade) return session.trades[index].arrival;
   if (kind == kTimelineKindBookTicker) return session.bookTickers[index].arrival;
-  if (kind == kTimelineKindPriceLimit) return session.priceLimits[index].arrival;
-  if (kind == kTimelineKindLiquidation) return session.liquidations[index].arrival;
-  if (kind == kTimelineKindMarkPrice) return session.markPrices[index].arrival;
-  if (kind == kTimelineKindIndexPrice) return session.indexPrices[index].arrival;
-  if (kind == kTimelineKindFunding) return session.funding[index].arrival;
   return session.trades[index].arrival;
 }
 
@@ -42,11 +37,6 @@ std::int64_t exchangeTsFor(const SessionData& session,
   if (kind == kTimelineKindDepth) return session.depths[index].tsNs;
   if (kind == kTimelineKindTrade) return session.trades[index].tsNs;
   if (kind == kTimelineKindBookTicker) return session.bookTickers[index].tsNs;
-  if (kind == kTimelineKindPriceLimit) return session.priceLimits[index].tsNs;
-  if (kind == kTimelineKindLiquidation) return session.liquidations[index].tsNs;
-  if (kind == kTimelineKindMarkPrice) return session.markPrices[index].tsNs;
-  if (kind == kTimelineKindIndexPrice) return session.indexPrices[index].tsNs;
-  if (kind == kTimelineKindFunding) return session.funding[index].tsNs;
   return 0;
 }
 
@@ -56,11 +46,6 @@ std::int64_t ingestSeqFor(const SessionData& session,
   if (kind == kTimelineKindDepth) return session.depths[index].ingestSeq;
   if (kind == kTimelineKindTrade) return session.trades[index].ingestSeq;
   if (kind == kTimelineKindBookTicker) return session.bookTickers[index].ingestSeq;
-  if (kind == kTimelineKindPriceLimit) return session.priceLimits[index].ingestSeq;
-  if (kind == kTimelineKindLiquidation) return session.liquidations[index].ingestSeq;
-  if (kind == kTimelineKindMarkPrice) return session.markPrices[index].ingestSeq;
-  if (kind == kTimelineKindIndexPrice) return session.indexPrices[index].ingestSeq;
-  if (kind == kTimelineKindFunding) return session.funding[index].ingestSeq;
   return 0;
 }
 
@@ -122,14 +107,7 @@ std::size_t channelSize(const SessionData& session, std::uint8_t kind) noexcept 
   if (kind == kTimelineKindDepth) return session.depths.size();
   if (kind == kTimelineKindTrade) return session.trades.size();
   if (kind == kTimelineKindBookTicker) return session.bookTickers.size();
-  if (kind == kTimelineKindPriceLimit) return session.priceLimits.size();
-  if (kind == kTimelineKindLiquidation) return session.liquidations.size();
-  if (kind == kTimelineKindMarkPrice) return session.markPrices.size();
-  if (kind == kTimelineKindIndexPrice) return session.indexPrices.size();
-  if (kind == kTimelineKindFunding) return session.funding.size();
-  // Open-interest has no current captured-arrival corpus contract. Candles are
-  // archive seeds only and must never become strategy-visible live deliveries.
-  if (kind == kTimelineKindOpenInterest || kind == kTimelineKindCandle) return 0u;
+  // Candles are cold archive seeds, never live timeline deliveries.
   return 0u;
 }
 

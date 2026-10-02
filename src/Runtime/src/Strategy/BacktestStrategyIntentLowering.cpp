@@ -49,7 +49,6 @@ namespace {
     const trading_core::StrategyIo& io) noexcept {
   return !io.capacityExceeded && io.orderCount <= io.orderOut.size() &&
       io.cancelCount <= io.cancelOut.size() &&
-      io.desiredOrderCount <= io.desiredOrderOut.size() &&
       io.commandCount <= io.commandOut.size() &&
       io.transactionCount <= io.transactionOut.size();
 }
@@ -128,8 +127,7 @@ bool footprintSupported(
   return trading_core::strategyDescriptorContractValid(descriptor) &&
       footprint.maxOrders <= detail::kIntentCapacity &&
       footprint.maxCancels <= detail::kIntentCapacity &&
-      footprint.maxDesiredOrders <=
-          trading_core::kStrategyRuntimeMaxDesiredOrders &&
+      footprint.maxDesiredOrders == 0u &&
       trading_core::strategyRuntimeCommandCapacity(footprint) <=
           trading_core::kStrategyRuntimeMaxCommands +
               2u * trading_core::kStrategyRuntimeMaxDesiredOrders &&
@@ -137,32 +135,15 @@ bool footprintSupported(
           trading_core::kStrategyRuntimeMaxTransactions;
 }
 
-bool lowerDesiredOrders(trading_core::StrategyContext& context) noexcept {
-  if (!strategyIoCountsValid(context.io)) return false;
-  for (std::size_t index = 0u;
-       !context.io.capacityExceeded &&
-       index < context.io.desiredOrderCount;
-       ++index) {
-    const trading_core::StrategyDesiredOrderSlot& desired =
-        context.io.desiredOrderOut[index];
-    const trading_core::StrategyOrderStateView* view =
-        trading_core::strategy::orderState(context, desired.route);
-    const trading_core::StrategyOrderStateView emptyView{};
-    const trading_core::StrategyDesiredOrderPlan plan =
-        trading_core::planDesiredOrderSlot(view ? *view : emptyView, desired);
-    if (!plan.valid ||
-        plan.action == trading_core::StrategyDesiredOrderAction::None) {
-      continue;
-    }
-    if (plan.action == trading_core::StrategyDesiredOrderAction::Cancel) {
-      (void)context.io.pushOrderedCancel(plan.cancel);
-    } else if (plan.action ==
-               trading_core::StrategyDesiredOrderAction::Place) {
-      (void)context.io.pushOrderedOrder(plan.order);
-    }
-  }
-  return strategyIoCountsValid(context.io) &&
-      trading_core::strategyIoCommandSequencesValid(context.io);
+bool validateOutput(trading_core::StrategyContext& context) noexcept {
+  if (!strategyIoCountsValid(context.io) ||
+      !trading_core::strategyIoCommandSequencesValid(context.io)) return false;
+  // This simulator has no paired physical-send model. Reject the entire
+  // cycle before applying any leg rather than silently dropping Replace.
+  for (std::size_t index = 0u; index < context.io.commandCount; ++index)
+    if (context.io.commandOut[index].kind == trading_core::StrategyCommandIntentKind::Replace)
+      return false;
+  return true;
 }
 
 bool bindTransactionLegs(trading_core::StrategyContext& context) noexcept {
@@ -256,7 +237,13 @@ StrategyTransactionAdmission transactionAdmission(
     }
     const std::size_t leg =
         routeLegIndex(context, order.routeHandle);
-    if (newOrderEmissionBlocked ||
+    // A transaction cannot partially submit its supported legs while another
+    // leg depends on a retired mark/index feed. Existing local-fault admission
+    // rejects the complete transaction before any simulated order operation.
+    const bool unavailableTrigger =
+        order.orderType == canon::OrderType::Stop &&
+        order.triggerSource != canon::OrderTriggerSource::Last;
+    if (newOrderEmissionBlocked || unavailableTrigger ||
         !routeTradable(request, legCount, leg) || leg >= 64u ||
         (context.tradableLegMask & (std::uint64_t{1u} << leg)) == 0u) {
       admission.localFaultMask |=

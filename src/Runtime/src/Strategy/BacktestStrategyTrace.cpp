@@ -104,14 +104,6 @@ bool resolveStrategyIndicatorProfile(std::string_view id, StrategyIndicatorProfi
     out = StrategyIndicatorProfileInfo{"volatility_bps", "Volatility", "EMA", "Sample", "bps"};
     return true;
   }
-  if (id == "recursive_stat_arb") {
-    out = StrategyIndicatorProfileInfo{"recursive_stat_arb",
-                                       "Recursive stat-arb",
-                                       "Residual",
-                                       "Entry threshold",
-                                       "bps_e8"};
-    return true;
-  }
   return false;
 }
 
@@ -212,28 +204,13 @@ void appendStrategyIndicator(detail::EngineState& engine,
     row.featureRaw[4] = static_cast<std::int64_t>(trace.volatilitySpreadBps);
     row.featureRaw[5] = static_cast<std::int64_t>(trace.volatilityConfidencePct);
     row.featureRaw[6] = static_cast<std::int64_t>(trace.volatilityQuoteConfidencePct);
-  } else if (engine.strategyIndicatorProfile == "recursive_stat_arb") {
-    row.valueRaw = trading_core::saturatingSubI64(trace.recursiveResidualBpsE8,
-                                                     trace.recursiveMeanBpsE8);
-    row.auxRaw = trace.recursiveEntryThresholdBpsE8;
-    row.featureRaw[0] = trace.recursiveRlsBetaQ32;
-    row.featureRaw[1] = trace.recursiveRlsInterceptQ32;
-    row.featureRaw[2] = trace.recursiveMeanBpsE8;
-    row.featureRaw[3] = trace.recursiveSigmaBpsE8;
-    row.featureRaw[4] = trace.recursiveCusumUpBpsE8;
-    row.featureRaw[5] = trace.recursiveCusumDownBpsE8;
-    row.featureRaw[6] = static_cast<std::int64_t>(trace.recursiveFlowLeg0Bps);
-    row.featureRaw[7] = static_cast<std::int64_t>(trace.recursiveFlowLeg1Bps);
-    row.featureRaw[8] = static_cast<std::int64_t>(trace.recursivePairFlowBps);
-    row.featureRaw[9] = static_cast<std::int64_t>(trace.recursiveModelSamples);
   }
   row.eventCode = indicatorEventCode(trace);
   row.reasonRaw = trace.reasonRaw;
   row.decisionKind = trace.decisionKind;
   row.sideRaw = trace.sideRaw;
   if ((engine.strategyIndicatorProfile == "trend_score" || engine.strategyIndicatorProfile == "toxic_flow" ||
-       engine.strategyIndicatorProfile == "toxic_flow_pair" || engine.strategyIndicatorProfile == "volatility_bps" ||
-       engine.strategyIndicatorProfile == "recursive_stat_arb") &&
+       engine.strategyIndicatorProfile == "toxic_flow_pair" || engine.strategyIndicatorProfile == "volatility_bps") &&
       !engine.strategyIndicator.empty() &&
       strategyIndicatorSecond(engine.strategyIndicator.back().tsNs) == strategyIndicatorSecond(row.tsNs)) {
     engine.strategyIndicator.back() = row;
@@ -274,7 +251,6 @@ void recordInputCoverage(detail::EngineState& engine) noexcept {
   ++engine.inputCoverage.strategyCycles;
   if (engine.snapshot.hasTrade.raw == trading_core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithTrade;
   if (engine.snapshot.hasBookTicker.raw == trading_core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithBookTicker;
-  if (engine.snapshot.hasPriceLimit.raw == trading_core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithPriceLimit;
   if (engine.snapshot.hasDepth.raw == trading_core::kAlgoFlagTrue.raw) ++engine.inputCoverage.cyclesWithDepth;
   if (engine.snapshot.hasOrderBook.raw == trading_core::kAlgoFlagTrue.raw && engine.snapshot.orderBook) ++engine.inputCoverage.cyclesWithOrderBook;
 }

@@ -12,21 +12,14 @@
 #include "trading_core/Contracts/Intents/PositionState.hpp"
 #include "trading_core/Contracts/Strategy/StrategyContract.hpp"
 #include "trading_core/Contracts/Strategy/StrategyDecisionTrace.hpp"
-#include "trading_core/Execution/FillPositionAccounting.hpp"
+#include "trading_core/Needed/FillPositionAccounting.hpp"
 
 #include "cxet/Canon/PositionAndExchange.hpp"
 #include "cxet/Canon/Subtypes.hpp"
-#include "cxet/Primitives/Composite/BookTickerRuntimeV1.hpp"
-#include "cxet/Primitives/Composite/FundingRuntimeV1.hpp"
-#include "cxet/Primitives/Composite/IndexPriceRuntimeV1.hpp"
-#include "cxet/Primitives/Composite/LiquidationEvent.hpp"
-#include "cxet/Primitives/Composite/MarkPriceRuntimeV1.hpp"
-#include "cxet/Primitives/Composite/OpenInterestRuntimeV1.hpp"
-#include "cxet/Primitives/Composite/OrderBookSnapshot.hpp"
-#include "cxet/Primitives/Composite/OrderBookTapeRuntimeV1.hpp"
-#include "cxet/Primitives/Composite/PriceLimitRuntimeV1.hpp"
+#include "cxet/Primitives/Composite/BookTicker.hpp"
+#include "cxet/Runtime/Market/LocalOrderBook.hpp"
 #include "cxet/Primitives/Composite/TieredCandleHistory.hpp"
-#include "cxet/Primitives/Composite/TradeRuntimeV1.hpp"
+#include "cxet/Primitives/Composite/Trade.hpp"
 #include "cxet/Primitives/Composite/UserDataEvent.hpp"
 
 #include <array>
@@ -34,6 +27,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -41,6 +36,36 @@
 namespace hft_backtest::detail {
 
 class ExecutionDepthProvider;
+
+// Replay owns corpus conversion and scheduling; CXET alone reconstructs depth.
+// Full normalized levels are distinct from the bounded strategy measurements.
+class ReplayDepthBook final {
+ public:
+  struct IndexedMutation {
+    cxet::market::DepthMutation value{};
+    std::uint32_t ordinal{0u};
+  };
+  [[nodiscard]] bool prepare() noexcept;
+  void reset() noexcept;
+  [[nodiscard]] bool apply(std::span<const PriceLevelRow> levels,
+      std::int64_t exchangeTsNs, const hftrec::replay::EventArrival& arrival,
+      bool snapshot, cxet::market::DepthSequence capturedSequence = {},
+      std::uint64_t capturedPublicationSequence = 0u) noexcept;
+  [[nodiscard]] bool restore(const cxet::runtime::market::LocalOrderBookCheckpointView& checkpoint,
+      const hftrec::replay::EventArrival& arrival, bool sourcePosition) noexcept;
+  [[nodiscard]] cxet::api::market::PublicMarketOrderBookView view() const noexcept;
+  [[nodiscard]] const cxet::runtime::market::LocalOrderBook* book() const noexcept {
+    return books_.book(1u);
+  }
+  [[nodiscard]] const hftrec::replay::EventArrival& arrival() const noexcept { return arrival_; }
+  [[nodiscard]] bool sourcePosition() const noexcept { return sourcePosition_; }
+ private:
+  cxet::runtime::market::LocalOrderBookStore books_{};
+  std::unique_ptr<IndexedMutation[]> scratch_{};
+  hftrec::replay::EventArrival arrival_{};
+  bool sourcePosition_{true};
+};
+
 
 constexpr std::size_t kIntentCapacity = 64;
 constexpr std::size_t kMaxOrderStates = 256;
@@ -55,14 +80,7 @@ constexpr std::uint8_t kRiskSnapshotReasonTraderRiskStop = 6u;
 constexpr std::uint8_t kTimelineKindDepth = 0u;
 constexpr std::uint8_t kTimelineKindTrade = 1u;
 constexpr std::uint8_t kTimelineKindBookTicker = 2u;
-constexpr std::uint8_t kTimelineKindPriceLimit = 3u;
-constexpr std::uint8_t kTimelineKindLiquidation = 4u;
-constexpr std::uint8_t kTimelineKindMarkPrice = 5u;
-constexpr std::uint8_t kTimelineKindIndexPrice = 6u;
-constexpr std::uint8_t kTimelineKindFunding = 7u;
-constexpr std::uint8_t kTimelineKindOpenInterest = 8u;
-constexpr std::uint8_t kTimelineKindCandle = 9u;
-constexpr std::uint8_t kTimelineKindCount = 10u;
+constexpr std::uint8_t kTimelineKindCount = 3u;
 constexpr std::uint8_t kRecordActionNone = 0u;
 constexpr std::uint8_t kRecordActionOrder = 1u;
 constexpr std::uint8_t kRecordActionCancel = 3u;
@@ -391,9 +409,11 @@ struct EngineState {
   trading_core::StrategyMarketSnapshot snapshot{};
   trading_core::StrategyCandleSnapshot candle{};
   trading_core::StrategyMarketSnapshot venueSnapshot{};
-  trading_core::StrategyCandleSnapshot venueCandle{};
   trading_core::LocalOrderBookState orderBook{};
   trading_core::LocalOrderBookState venueOrderBook{};
+  ReplayDepthBook strategyDepthBook{};
+  ReplayDepthBook venueDepthBook{};
+  bool depthReplayFailed{false};
   trading_core::LocalOrderBookState topExecutionOverlayScratch{};
   std::vector<AggressiveFillPlan> topExecutionFillPlanScratch{};
   ExecutionDepthProvider* executionDepthProvider{nullptr};
@@ -498,7 +518,7 @@ inline void bumpContextRevision(EngineState& engine) noexcept {
   if (engine.contextRevision == 0u) engine.contextRevision = 1u;
 }
 
-inline const cxet::composite::BookTickerRuntimeV1& effectiveBookTicker(
+inline const cxet::composite::BookTicker& effectiveBookTicker(
     const trading_core::StrategyMarketSnapshot& snapshot) noexcept {
   return snapshot.hasReconstructedBbo.raw == trading_core::kAlgoFlagTrue.raw
              ? snapshot.reconstructedBookTicker
@@ -540,21 +560,8 @@ ExchangeId exchangeFromText(const std::string& value) noexcept;
 canon::MarketType marketFromText(const std::string& value) noexcept;
 Side sideFromRow(std::int64_t raw) noexcept;
 
-cxet::composite::TradeRuntimeV1 toRuntime(const TradeRow& row) noexcept;
-cxet::composite::BookTickerRuntimeV1 toRuntime(const BookTickerRow& row) noexcept;
-cxet::composite::PriceLimitRuntimeV1 toRuntime(const PriceLimitRow& row) noexcept;
-cxet::composite::LiquidationEvent toRuntime(const LiquidationRow& row,
-                                            ExchangeId exchange,
-                                            const Symbol& symbol) noexcept;
-cxet::composite::MarkPriceRuntimeV1 toRuntime(const MarkPriceRow& row) noexcept;
-cxet::composite::IndexPriceRuntimeV1 toRuntime(const IndexPriceRow& row) noexcept;
-cxet::composite::FundingRuntimeV1 toRuntime(const FundingRow& row) noexcept;
-cxet::composite::OpenInterestRuntimeV1 toRuntime(const OpenInterestRow& row) noexcept;
-trading_core::StrategyCandleSnapshot toRuntime(const CandleRow& row) noexcept;
-void toRuntime(const DepthRow& row,
-               cxet::composite::OrderBookTapeRuntimeV1& tape,
-               cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept;
-cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const DepthRow& row) noexcept;
+cxet::composite::Trade toRuntime(const TradeRow& row) noexcept;
+cxet::composite::BookTicker toRuntime(const BookTickerRow& row) noexcept;
 bool buildTieredCandleHistory(const std::vector<CandleRow>& rows,
                               cxet::composite::TieredCandleHistory& out) noexcept;
 
@@ -599,16 +606,8 @@ void tryFillOnTop(EngineState& engine,
                   std::int64_t venueTsNs,
                   bool venueBookTickerUpdate);
 void tryFillOnTrade(EngineState& engine,
-                    const cxet::composite::TradeRuntimeV1& trade,
+                    const cxet::composite::Trade& trade,
                     std::int64_t venueTsNs);
-void tryTriggerStopMarketsOnMark(
-    EngineState& engine,
-    const cxet::composite::MarkPriceRuntimeV1& markPrice,
-    std::int64_t venueTsNs);
-void tryTriggerStopMarketsOnIndex(
-    EngineState& engine,
-    const cxet::composite::IndexPriceRuntimeV1& indexPrice,
-    std::int64_t venueTsNs);
 void applyDueActions(EngineState& engine, std::int64_t tsNs);
 void applyDueActionsBefore(EngineState& engine, std::int64_t tsNs);
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs);

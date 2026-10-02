@@ -20,13 +20,6 @@ namespace {
     case detail::kTimelineKindDepth: out = Stream::Orderbook; return true;
     case detail::kTimelineKindTrade: out = Stream::Trades; return true;
     case detail::kTimelineKindBookTicker: out = Stream::BookTicker; return true;
-    case detail::kTimelineKindPriceLimit: out = Stream::PriceLimit; return true;
-    case detail::kTimelineKindLiquidation: out = Stream::Liquidations; return true;
-    case detail::kTimelineKindMarkPrice: out = Stream::MarkPrice; return true;
-    case detail::kTimelineKindIndexPrice: out = Stream::IndexPrice; return true;
-    case detail::kTimelineKindFunding: out = Stream::Funding; return true;
-    case detail::kTimelineKindOpenInterest: out = Stream::OpenInterest; return true;
-    case detail::kTimelineKindCandle: return false;
     default: return false;
   }
 }

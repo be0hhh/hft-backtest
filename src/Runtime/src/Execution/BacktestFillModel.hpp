@@ -36,11 +36,11 @@ void initializePassiveQueue(OpenOrder& order,
 [[nodiscard]] PassiveQueueTradeFill consumePassiveQueueForTrade(
     EngineState& engine,
     OpenOrder& order,
-    const cxet::composite::TradeRuntimeV1& trade) noexcept;
+    const cxet::composite::Trade& trade) noexcept;
 [[nodiscard]] PassiveBboTouchFill consumePassiveQueueForBboTouch(
     EngineState& engine,
     OpenOrder& order,
-    const cxet::composite::BookTickerRuntimeV1& top,
+    const cxet::composite::BookTicker& top,
     std::int64_t tsNs) noexcept;
 
 }  // namespace hft_backtest::detail

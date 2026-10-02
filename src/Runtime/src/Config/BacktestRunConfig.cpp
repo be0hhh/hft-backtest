@@ -62,24 +62,12 @@ void overlayRateLimitSchedule(BacktestRateLimitSchedule& base,
 bool sameLoadPlan(const detail::SessionLoadPlan& lhs, const detail::SessionLoadPlan& rhs) noexcept {
   return lhs.loadTrades == rhs.loadTrades &&
          lhs.loadBookTickers == rhs.loadBookTickers &&
-         lhs.loadPriceLimits == rhs.loadPriceLimits &&
          lhs.loadDepths == rhs.loadDepths &&
          lhs.loadCandles == rhs.loadCandles &&
-         lhs.loadLiquidations == rhs.loadLiquidations &&
-         lhs.loadMarkPrices == rhs.loadMarkPrices &&
-         lhs.loadIndexPrices == rhs.loadIndexPrices &&
-         lhs.loadFunding == rhs.loadFunding &&
-         lhs.loadOpenInterest == rhs.loadOpenInterest &&
          lhs.requireTrades == rhs.requireTrades &&
          lhs.requireBookTickers == rhs.requireBookTickers &&
-         lhs.requirePriceLimits == rhs.requirePriceLimits &&
          lhs.requireDepths == rhs.requireDepths &&
-         lhs.requireCandles == rhs.requireCandles &&
-         lhs.requireLiquidations == rhs.requireLiquidations &&
-         lhs.requireMarkPrices == rhs.requireMarkPrices &&
-         lhs.requireIndexPrices == rhs.requireIndexPrices &&
-         lhs.requireFunding == rhs.requireFunding &&
-         lhs.requireOpenInterest == rhs.requireOpenInterest;
+         lhs.requireCandles == rhs.requireCandles;
 }
 
 std::vector<std::filesystem::path> sessionPathsFor(const BacktestRunRequest& request,
@@ -160,7 +148,6 @@ bool buildSessionLoadPlan(const trading_core::StrategyDescriptor& descriptor,
   out = detail::SessionLoadPlan{};
   out.loadTrades = false;
   out.loadBookTickers = false;
-  out.loadPriceLimits = false;
   out.loadDepths = false;
   out.loadCandles = descriptor.seedHistory != nullptr || descriptor.loadCandleHistory;
   out.requireCandles = descriptor.seedHistory != nullptr || descriptor.requireCandleHistory;
@@ -170,35 +157,13 @@ bool buildSessionLoadPlan(const trading_core::StrategyDescriptor& descriptor,
     const cxet::api::market::PublicMarketDataStream stream = trading_core::strategy::descriptorStreamAt(descriptor, i);
     const bool required = trading_core::strategy::descriptorStreamRequired(descriptor, i);
     if (stream == cxet::api::market::PublicMarketDataStream::Trades) {
-      out.loadTrades = true;
-      out.requireTrades = out.requireTrades || required;
+      out.loadTrades=true;out.requireTrades=out.requireTrades || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::BookTicker) {
-      out.loadBookTickers = true;
-      out.requireBookTickers = out.requireBookTickers || required;
-    } else if (stream == cxet::api::market::PublicMarketDataStream::PriceLimit) {
-      out.loadPriceLimits = true;
-      out.requirePriceLimits = out.requirePriceLimits || required;
+      out.loadBookTickers=true;out.requireBookTickers=out.requireBookTickers || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::Orderbook) {
-      out.loadDepths = true;
-      out.requireDepths = out.requireDepths || required;
-    } else if (stream == cxet::api::market::PublicMarketDataStream::Liquidations) {
-      out.loadLiquidations = true;
-      out.requireLiquidations = out.requireLiquidations || required;
-    } else if (stream == cxet::api::market::PublicMarketDataStream::MarkPrice) {
-      out.loadMarkPrices = true;
-      out.requireMarkPrices = out.requireMarkPrices || required;
-    } else if (stream == cxet::api::market::PublicMarketDataStream::IndexPrice) {
-      out.loadIndexPrices = true;
-      out.requireIndexPrices = out.requireIndexPrices || required;
-    } else if (stream == cxet::api::market::PublicMarketDataStream::Funding) {
-      out.loadFunding = true;
-      out.requireFunding = out.requireFunding || required;
-    } else if (stream == cxet::api::market::PublicMarketDataStream::OpenInterest) {
-      out.loadOpenInterest = true;
-      out.requireOpenInterest = out.requireOpenInterest || required;
+      out.loadDepths=true;out.requireDepths=out.requireDepths || required;
     } else {
-      error = "strategy requires unsupported market data stream for backtest";
-      return false;
+      error="strategy requires unsupported market data stream for backtest";return false;
     }
   }
   return true;

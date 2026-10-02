@@ -135,7 +135,6 @@ BacktestInputCoverage addCoverage(BacktestInputCoverage lhs, const BacktestInput
   lhs.strategyCycles += rhs.strategyCycles;
   lhs.cyclesWithTrade += rhs.cyclesWithTrade;
   lhs.cyclesWithBookTicker += rhs.cyclesWithBookTicker;
-  lhs.cyclesWithPriceLimit += rhs.cyclesWithPriceLimit;
   lhs.cyclesWithDepth += rhs.cyclesWithDepth;
   lhs.cyclesWithOrderBook += rhs.cyclesWithOrderBook;
   lhs.seedTradeRows += rhs.seedTradeRows;

@@ -30,14 +30,14 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
 
 [[nodiscard]] bool makerTradeCrossesOrder(const EngineState& engine,
                                           const OpenOrder& order,
-                                          const cxet::composite::TradeRuntimeV1& trade) noexcept {
+                                          const cxet::composite::Trade& trade) noexcept {
   const std::int64_t minCross = makerFillMinCrossE8(engine);
   if (minCross == std::numeric_limits<std::int64_t>::max()) return false;
-  if (trade.side.raw == Side::Buy().raw && order.state.side.raw == Side::Sell().raw) {
+  if (trade.initiatorSide == cxet::composite::TradeInitiatorSide::Buyer && order.state.side.raw == Side::Sell().raw) {
     if (order.state.price.raw > std::numeric_limits<std::int64_t>::max() - minCross) return false;
     return trade.price.raw >= order.state.price.raw + minCross;
   }
-  if (trade.side.raw == Side::Sell().raw && order.state.side.raw == Side::Buy().raw) {
+  if (trade.initiatorSide == cxet::composite::TradeInitiatorSide::Seller && order.state.side.raw == Side::Buy().raw) {
     if (order.state.price.raw < std::numeric_limits<std::int64_t>::min() + minCross) return false;
     return trade.price.raw <= order.state.price.raw - minCross;
   }
@@ -45,7 +45,7 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
 }
 
 [[nodiscard]] bool makerBboTouchesOrder(const OpenOrder& order,
-                                        const cxet::composite::BookTickerRuntimeV1& top,
+                                        const cxet::composite::BookTicker& top,
                                         std::int64_t& oppositeQtyE8) noexcept {
   oppositeQtyE8 = 0;
   if (order.state.side.raw == Side::Sell().raw) {
@@ -285,7 +285,7 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
 
 PassiveQueueTradeFill consumePassiveQueueForTrade(EngineState& engine,
                                                   OpenOrder& order,
-                                                  const cxet::composite::TradeRuntimeV1& trade) noexcept {
+                                                  const cxet::composite::Trade& trade) noexcept {
   PassiveQueueTradeFill out{};
   if (!order.state.valid || !order.active || order.state.orderType != canon::OrderType::Limit) return out;
   if (!order.queueInitialized) {
@@ -308,7 +308,7 @@ PassiveQueueTradeFill consumePassiveQueueForTrade(EngineState& engine,
 
 PassiveBboTouchFill consumePassiveQueueForBboTouch(EngineState& engine,
                                                    OpenOrder& order,
-                                                   const cxet::composite::BookTickerRuntimeV1& top,
+                                                   const cxet::composite::BookTicker& top,
                                                    std::int64_t tsNs) noexcept {
   PassiveBboTouchFill out{};
   if (!order.state.valid || !order.active || order.state.orderType != canon::OrderType::Limit) return out;

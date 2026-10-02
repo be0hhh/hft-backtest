@@ -54,10 +54,6 @@ constexpr const char* kToxicFlowStrategyIndicatorRowSchema =
     "toxic_pressure_score,toxic_touch_score,toxic_follow_score,toxic_imbalance_score,"
     "toxic_depth_drop_score,toxic_bid_depth_drop_score,toxic_ask_depth_drop_score,"
     "toxic_buy_pressure_score,toxic_sell_pressure_score,toxic_confidence_pct]";
-constexpr const char* kRecursiveStatArbStrategyIndicatorRowSchema =
-    "[ts_ns,value_raw,aux_raw,event_code,reason_raw,decision_kind,side_raw,"
-    "rls_beta_q32,rls_intercept_q32,residual_mean_bps_e8,residual_sigma_bps_e8,"
-    "cusum_up_bps_e8,cusum_down_bps_e8,flow_leg0_bps,flow_leg1_bps,pair_flow_bps,model_samples]";
 
 constexpr std::int64_t kBpsE8Scale = 100000000ll;
 constexpr std::size_t kMaxDecisionDiagnostics = 8u;
@@ -67,7 +63,6 @@ std::size_t strategyIndicatorFeatureCount(std::string_view profile) noexcept {
   if (profile == "volatility_bps") return 7u;
   if (profile == "toxic_flow") return 10u;
   if (profile == "toxic_flow_pair") return 0u;
-  if (profile == "recursive_stat_arb") return 10u;
   return 0u;
 }
 
@@ -76,7 +71,6 @@ const char* strategyIndicatorRowSchema(std::string_view profile) noexcept {
   if (profile == "volatility_bps") return kVolatilityStrategyIndicatorRowSchema;
   if (profile == "toxic_flow") return kToxicFlowStrategyIndicatorRowSchema;
   if (profile == "toxic_flow_pair") return kStrategyIndicatorBaseRowSchema;
-  if (profile == "recursive_stat_arb") return kRecursiveStatArbStrategyIndicatorRowSchema;
   return kStrategyIndicatorBaseRowSchema;
 }
 
@@ -954,13 +948,7 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
   out << indent << q << "events" << q << ": " << result.events << ",\n";
   out << indent << q << "trades" << q << ": " << result.trades << ",\n";
   out << indent << q << "booktickers" << q << ": " << result.bookTickers << ",\n";
-  out << indent << q << "price_limits" << q << ": " << result.priceLimits << ",\n";
   out << indent << q << "depths" << q << ": " << result.depths << ",\n";
-  out << indent << q << "liquidations" << q << ": " << result.liquidations << ",\n";
-  out << indent << q << "mark_prices" << q << ": " << result.markPrices << ",\n";
-  out << indent << q << "index_prices" << q << ": " << result.indexPrices << ",\n";
-  out << indent << q << "funding" << q << ": " << result.funding << ",\n";
-  out << indent << q << "open_interest" << q << ": " << result.openInterest << ",\n";
   out << indent << q << "orders" << q << ": " << result.orders << ",\n";
   out << indent << q << "fills" << q << ": " << result.fills << ",\n";
   out << indent << q << "user_events" << q << ": " << result.userEvents << ",\n";
@@ -979,7 +967,6 @@ void writeSummaryObject(std::ostream& out, const BacktestRunResult& result, cons
       << q << "strategy_cycles" << q << ": " << result.inputCoverage.strategyCycles << ", "
       << q << "cycles_with_trade" << q << ": " << result.inputCoverage.cyclesWithTrade << ", "
       << q << "cycles_with_bookticker" << q << ": " << result.inputCoverage.cyclesWithBookTicker << ", "
-      << q << "cycles_with_price_limit" << q << ": " << result.inputCoverage.cyclesWithPriceLimit << ", "
       << q << "cycles_with_depth" << q << ": " << result.inputCoverage.cyclesWithDepth << ", "
       << q << "cycles_with_orderbook" << q << ": " << result.inputCoverage.cyclesWithOrderBook << ", "
       << q << "seed_trade_rows" << q << ": " << result.inputCoverage.seedTradeRows << ", "
@@ -1129,8 +1116,8 @@ bool writeManifest(const std::filesystem::path& path,
       ? result.rateLimitRejectedCommands
       : rejectedCommandCount(manifestRateLimits);
   out << "{\n";
-  out << "  " << q << "type" << q << ": " << q << "run.result.v3" << q << ",\n";
-  out << "  " << q << "schema_version" << q << ": 3,\n";
+  out << "  " << q << "type" << q << ": " << q << "run.result" << q << ",\n";
+  out << "  " << q << "schema_version" << q << ": 4,\n";
   out << "  " << q << "request_id" << q << ": " << quote(result.requestId) << ",\n";
   out << "  " << q << "run_id" << q << ": " << quote(result.runId) << ",\n";
   out << "  " << q << "status" << q << ": " << quote(resultStatusName(result.status)) << ",\n";

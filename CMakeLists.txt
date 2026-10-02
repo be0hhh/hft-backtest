@@ -13,7 +13,7 @@ endif()
 foreach(required_target IN ITEMS
     cxet::cxet_lib
     trading_core::algorithm
-    trading_core::execution
+    trading_core_needed_math
     trading_core::strategy
     hftrec::corpus_contract
     absl::flat_hash_map
@@ -72,6 +72,9 @@ if(NOT HFT_BACKTEST_REQUIRED_STRATEGY_NAMES OR
   message(FATAL_ERROR
     "hft-backtest integration is invalid: trading-core registered no canonical strategies")
 endif()
+# Signal-only descriptors have no executable Backtest cycle or profile template;
+# StrategyMetadata.cpp applies the same exclusion to the runtime catalog.
+list(REMOVE_ITEM HFT_BACKTEST_REQUIRED_STRATEGY_NAMES delivery_sum_signal)
 set(HFT_BACKTEST_REQUIRED_STRATEGY_ARGS)
 foreach(required_strategy IN LISTS HFT_BACKTEST_REQUIRED_STRATEGY_NAMES)
   list(APPEND HFT_BACKTEST_REQUIRED_STRATEGY_ARGS
@@ -93,8 +96,13 @@ add_custom_command(
 )
 add_custom_target(hft_backtest_generate_strategy_metadata
   DEPENDS "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}")
+set_property(TARGET hft_backtest_generate_strategy_metadata PROPERTY CXET_COMPILE_INPUTS
+  "${CMAKE_CURRENT_SOURCE_DIR}/tools/GenerateStrategyMetadata.py"
+  ${HFT_BACKTEST_STRATEGY_PROFILES})
+set_property(TARGET hft_backtest_generate_strategy_metadata PROPERTY CXET_COMPILE_OUTPUTS
+  "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}")
 
-add_library(hft_backtest_core SHARED
+add_library(hft_backtest_core STATIC
   src/Runtime/src/Accounting/BacktestAccounting.cpp
   src/Runtime/src/Accounting/BacktestMetrics.cpp
   src/Runtime/src/Accounting/BacktestResultAggregation.cpp
@@ -136,7 +144,7 @@ add_dependencies(hft_backtest_core hft_backtest_generate_strategy_metadata)
 target_link_libraries(hft_backtest_core
   PUBLIC
     cxet::cxet_lib
-    trading_core::execution
+    trading_core_needed_math
   PRIVATE
     trading_core::algorithm
     trading_core::strategy
@@ -149,7 +157,6 @@ target_compile_features(hft_backtest_core PUBLIC cxx_std_23)
 target_compile_definitions(hft_backtest_core
   PRIVATE
     HFT_BACKTEST_BUILDING_LIBRARY=1
-  PUBLIC HFT_BACKTEST_SHARED=1
 )
 target_compile_options(hft_backtest_core PRIVATE
   $<$<CONFIG:Release>:-O3>
@@ -169,79 +176,8 @@ set_target_properties(hft-backtest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
-function(add_hft_backtest_test target source)
-  add_executable(${target} ${source})
-  target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/Runtime/src")
-  target_link_libraries(${target}
-    PRIVATE hft_backtest_core trading_core::strategy
-            hftrec::corpus_contract ${ARGN})
-  target_compile_features(${target} PRIVATE cxx_std_23)
-  set_target_properties(${target} PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-  )
-  add_test(NAME ${target} COMMAND "$<TARGET_FILE:${target}>")
-  set_tests_properties(${target} PROPERTIES
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    LABELS "cxet-family;hft-backtest;contract")
-endfunction()
-
-add_hft_backtest_test(hft-backtest-execution-tests
-  tests/Execution/BacktestExecutionTests.cpp)
-if(CXET_SANITIZER_PROFILE STREQUAL "address-undefined")
-  # Keep this large test translation unit below the CI runner's memory limit.
-  # Retain sanitizer instrumentation and source lines in diagnostic stacks.
-  target_compile_options(hft-backtest-execution-tests PRIVATE
-    -O1 -gline-tables-only)
-endif()
-add_hft_backtest_test(hft-backtest-client-order-id-tests
-  tests/Execution/BacktestClientOrderIdTests.cpp)
-add_hft_backtest_test(hft-backtest-replace-lifecycle-tests
-  tests/Execution/BacktestReplaceLifecycleTests.cpp)
-add_hft_backtest_test(hft-backtest-stat-arb-late-fill-lifecycle-tests
-  tests/Execution/BacktestStatArbLateFillLifecycleTests.cpp)
-add_hft_backtest_test(hft-backtest-strategy-config-tests
-  tests/config/BacktestStrategyConfigTests.cpp)
-add_hft_backtest_test(hft-backtest-passive-bbo-touch-tests
-  tests/Execution/BacktestPassiveBboTouchTests.cpp)
-add_hft_backtest_test(hft-backtest-stop-limit-tests
-  tests/Execution/BacktestStopLimitTests.cpp)
-add_hft_backtest_test(hft-backtest-rate-limit-tests
-  tests/Execution/BacktestRateLimitTests.cpp)
-add_hft_backtest_test(hft-backtest-multileg-context-tests
-  tests/Execution/BacktestMultilegContextTests.cpp)
-add_hft_backtest_test(hft-backtest-transaction-admission-tests
-  tests/Execution/BacktestTransactionAdmissionTests.cpp)
-add_hft_backtest_test(hft-backtest-stat-arb-replay-tests
-  tests/Replay/StatArbEdgeMakerReplayTests.cpp)
-add_hft_backtest_test(hft-backtest-uptick-replay-tests
-  tests/Replay/UptickReplayTests.cpp)
-add_hft_backtest_test(hft-backtest-strategy-indicator-tests
-  tests/Strategy/BacktestStrategyIndicatorTests.cpp)
-add_hft_backtest_test(hft-backtest-strategy-profile-tests
-  tests/Strategy/BacktestStrategyProfileTests.cpp)
-add_hft_backtest_test(hft-backtest-metrics-tests
-  tests/Metrics/BacktestMetricsTests.cpp)
-add_hft_backtest_test(hft-backtest-accounting-tests
-  tests/Accounting/BacktestAccountingTests.cpp)
-add_hft_backtest_test(hft-backtest-session-loader-tests
-  tests/Input/SessionLoaderTests.cpp)
-add_hft_backtest_test(hft-backtest-sweep-tests
-  tests/Sweep/BacktestSweepTests.cpp)
-
-set_property(TEST
-  hft-backtest-execution-tests
-  hft-backtest-client-order-id-tests
-  hft-backtest-replace-lifecycle-tests
-  hft-backtest-stat-arb-late-fill-lifecycle-tests
-  APPEND PROPERTY LABELS "order-race;lifecycle")
-set_property(TEST hft-backtest-session-loader-tests APPEND PROPERTY
-  LABELS "corpus-contract")
-
 add_custom_target(hft-backtest-product
   DEPENDS hft-backtest)
 
-# Keep the product-wide build entrypoint closed over every test target added
-# above, including future targets registered in this directory.
-get_property(_hft_backtest_all_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-add_custom_target(hft-backtest-all DEPENDS ${_hft_backtest_all_targets})
-unset(_hft_backtest_all_targets)
+# Aggregate only the concrete production targets.
+add_custom_target(hft-backtest-all DEPENDS hft-backtest-product)

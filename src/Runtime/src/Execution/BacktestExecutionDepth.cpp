@@ -3,7 +3,6 @@
 #include "../BacktestReplayClock.hpp"
 #include "hftrec/CorpusContract/JsonLineParser.hpp"
 #include "hftrec/CorpusContract/SessionManifest.hpp"
-#include "cxet/Primitives/Composite/OrderBookTapeRuntimeV1.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -122,33 +121,6 @@ struct DepthScheduleKey {
   return true;
 }
 
-[[nodiscard]] Side orderBookSideFromDepthRow(std::int64_t side) noexcept {
-  return side == 0 ? Side::Buy() : Side::Sell();
-}
-
-void toRuntime(const CursorDepthRow& row,
-               cxet::composite::OrderBookTapeRuntimeV1& tape,
-               cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept {
-  cxet::composite::resetOrderBookTapeRuntimeHeader(tape);
-  cxet::composite::resetOrderBookTapeSidesRuntimeHeader(sides);
-  TimeNs ts{};
-  ts.raw = static_cast<std::uint64_t>(
-      row.exchangeTsNs > 0 ? row.exchangeTsNs : 0);
-  (void)cxet::composite::appendOrderBookTapeTimestamp(tape, ts);
-  for (const PriceLevelRow& level : row.levels) {
-    Price price{};
-    Amount qty{};
-    price.raw = level.priceE8;
-    qty.raw = level.qtyE8;
-    (void)cxet::composite::appendOrderBookTapePriceQtyWithSide(
-        tape,
-        sides,
-        price,
-        qty,
-        orderBookSideFromDepthRow(level.side));
-  }
-}
-
 }  // namespace
 
 struct ExecutionDepthProviderImpl {
@@ -163,8 +135,7 @@ struct ExecutionDepthProviderImpl {
   DepthScheduleKey lastSourceKey{};
   CursorDepthRow pending{};
   CursorDepthRow scratch{};
-  cxet::composite::OrderBookTapeRuntimeV1 tapeScratch{};
-  cxet::composite::OrderBookTapeSidesRuntimeV1 sideScratch{};
+  ReplayDepthBook depthBook{};
   bool lastSourceRowValid{false};
   bool pendingValid{false};
   bool eof{false};
@@ -183,12 +154,35 @@ struct ExecutionDepthCheckpoint {
   DepthScheduleKey lastSourceKey{};
   bool lastSourceRowValid{false};
   trading_core::LocalOrderBookState book{};
+  std::vector<cxet::composite::BookLevelPxQty> coreBids{};
+  std::vector<cxet::composite::BookLevelPxQty> coreAsks{};
+  std::uint64_t coreLastUpdateId{0u};
+  cxet::market::DepthSourceState coreState{cxet::market::DepthSourceState::Empty};
+  cxet::runtime::market::DepthBookProjection coreProjection{};
+  hftrec::replay::EventArrival coreArrival{};
+  bool coreSourcePosition{true};
+  bool coreFirstReplay{false};
 };
 
 }  // namespace
 
 class ExecutionDepthCheckpointCache {
  public:
+  // Bound existing cold cache growth by the admitted corpus row count.
+  bool prepare(std::uint64_t sourceRows) noexcept {
+    try {
+      std::lock_guard lock{mutex_};
+      if (prepared_) return admittedSourceRows_ == sourceRows;
+      const auto maximum = sourceRows / kDepthCheckpointRows;
+      if (maximum > checkpoints_.max_size()) return false;
+      maximumCheckpoints_ = static_cast<std::size_t>(maximum);
+      checkpoints_.reserve(maximumCheckpoints_);
+      admittedSourceRows_ = sourceRows;
+      prepared_ = true;
+      return true;
+    } catch (...) { return false; }
+  }
+
   bool restore(std::int64_t tsNs,
                ExecutionDepthProviderImpl& impl,
                trading_core::LocalOrderBookState& book) const noexcept {
@@ -200,6 +194,16 @@ class ExecutionDepthCheckpointCache {
         });
     if (it == checkpoints_.begin()) return false;
     const ExecutionDepthCheckpoint& checkpoint = *(it - 1);
+    if (!book.hasStorage() ||
+        book.capacityLevelsPerSide().raw != checkpoint.book.capacityLevelsPerSide().raw ||
+        checkpoint.book.bids.storedCount.raw > book.capacityLevelsPerSide().raw ||
+        checkpoint.book.asks.storedCount.raw > book.capacityLevelsPerSide().raw) return false;
+    const cxet::runtime::market::LocalOrderBookCheckpointView coreCheckpoint{
+        checkpoint.coreBids, checkpoint.coreAsks, checkpoint.coreLastUpdateId,
+        checkpoint.coreState, checkpoint.coreProjection, checkpoint.coreFirstReplay};
+    if (!impl.depthBook.restore(coreCheckpoint, checkpoint.coreArrival,
+            checkpoint.coreSourcePosition) ||
+        !book.copyFromBounded(checkpoint.book)) return false;
     impl.tapePos = checkpoint.tapePos;
     impl.sidecarPos = checkpoint.sidecarPos;
     impl.sourceRows = checkpoint.sourceRows;
@@ -207,7 +211,7 @@ class ExecutionDepthCheckpointCache {
     impl.lastSourceRowValid = checkpoint.lastSourceRowValid;
     impl.pendingValid = false;
     impl.eof = false;
-    return book.copyFromBounded(checkpoint.book);
+    return true;
   }
 
   void publish(const ExecutionDepthProviderImpl& impl,
@@ -216,16 +220,30 @@ class ExecutionDepthCheckpointCache {
     if (impl.sourceRows == 0u || (impl.sourceRows % kDepthCheckpointRows) != 0u) return;
     try {
       std::lock_guard lock{mutex_};
+      if (!prepared_ || checkpoints_.size() >= maximumCheckpoints_) return;
       if (!checkpoints_.empty() && checkpoints_.back().sourceRows >= impl.sourceRows) return;
       if (!checkpoints_.empty() && checkpoints_.back().tsNs > tsNs) return;
-      checkpoints_.push_back(ExecutionDepthCheckpoint{
-          tsNs,
-          impl.tapePos,
-          impl.sidecarPos,
-          impl.sourceRows,
-          impl.lastSourceKey,
-          impl.lastSourceRowValid,
-          book});
+      const auto* owner = impl.depthBook.book();
+      if (!owner) return;
+      ExecutionDepthCheckpoint checkpoint{};
+      checkpoint.tsNs = tsNs;
+      checkpoint.tapePos = impl.tapePos;
+      checkpoint.sidecarPos = impl.sidecarPos;
+      checkpoint.sourceRows = impl.sourceRows;
+      checkpoint.lastSourceKey = impl.lastSourceKey;
+      checkpoint.lastSourceRowValid = impl.lastSourceRowValid;
+      checkpoint.book = book;
+      cxet::runtime::market::LocalOrderBookCheckpointView coreCheckpoint{};
+      if (!owner->checkpoint(&coreCheckpoint)) return;
+      checkpoint.coreBids.assign(coreCheckpoint.bids.begin(), coreCheckpoint.bids.end());
+      checkpoint.coreAsks.assign(coreCheckpoint.asks.begin(), coreCheckpoint.asks.end());
+      checkpoint.coreLastUpdateId = coreCheckpoint.lastUpdateId;
+      checkpoint.coreState = coreCheckpoint.state;
+      checkpoint.coreProjection = coreCheckpoint.projection;
+      checkpoint.coreFirstReplay = coreCheckpoint.firstReplay;
+      checkpoint.coreArrival = impl.depthBook.arrival();
+      checkpoint.coreSourcePosition = impl.depthBook.sourcePosition();
+      checkpoints_.push_back(std::move(checkpoint));
     } catch (...) {
     }
   }
@@ -245,6 +263,9 @@ class ExecutionDepthCheckpointCache {
  private:
   mutable std::mutex mutex_{};
   std::vector<ExecutionDepthCheckpoint> checkpoints_{};
+  std::uint64_t admittedSourceRows_{0u};
+  std::size_t maximumCheckpoints_{0u};
+  bool prepared_{false};
   bool failed_{false};
   const char* failureReason_{""};
 };
@@ -401,6 +422,40 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
   next->lastSourceKey = {};
   next->lastSourceRowValid = false;
 
+  if ((cache_ && !cache_->prepare(manifest.depthCount)) ||
+      !next->depthBook.prepare()) {
+    failed_ = true;
+    failureReason_ = "allocation_failed";
+    return ExecutionDepthOpenStatus::Failed;
+  }
+  if (initialBook.initialized.raw == trading_core::kAlgoFlagTrue.raw) {
+    std::vector<cxet::composite::BookLevelPxQty> initialBids;
+    std::vector<cxet::composite::BookLevelPxQty> initialAsks;
+    initialBids.reserve(initialBook.bids.storedCount.raw);
+    initialAsks.reserve(initialBook.asks.storedCount.raw);
+    for (std::uint32_t i = 0u; i < initialBook.bids.storedCount.raw; ++i) {
+      const auto& level = initialBook.bids.levels[i];
+      initialBids.push_back({level.px, level.qty});
+    }
+    for (std::uint32_t i = 0u; i < initialBook.asks.storedCount.raw; ++i) {
+      const auto& level = initialBook.asks.levels[i];
+      initialAsks.push_back({level.px, level.qty});
+    }
+    cxet::runtime::market::DepthBookProjection projection{};
+    projection.exchangeTimestampNs = initialBook.ts.raw;
+    projection.sequenceFlags = cxet::market::DepthEventSourcePosition;
+    const auto state = initialBook.coverage ==
+        cxet::api::market::PublicMarketOrderBookCoverage::SnapshotAligned
+            ? cxet::market::DepthSourceState::Healthy
+            : cxet::market::DepthSourceState::Partial;
+    const cxet::runtime::market::LocalOrderBookCheckpointView initialCheckpoint{
+        initialBids, initialAsks, 1u, state, projection, false};
+    if (!next->depthBook.restore(initialCheckpoint, {}, true)) {
+      failed_ = true;
+      failureReason_ = "initial_depth_rejected";
+      return ExecutionDepthOpenStatus::Failed;
+    }
+  }
   impl_ = next.release();
   available_ = true;
   return ExecutionDepthOpenStatus::Ready;
@@ -499,18 +554,15 @@ bool applyDepthRow(trading_core::LocalOrderBookState& book,
                    const Symbol& symbol,
                    const trading_core::LocalOrderBookConfig& config,
                    const CursorDepthRow& row,
-                   cxet::composite::OrderBookTapeRuntimeV1& tapeScratch,
-                   cxet::composite::OrderBookTapeSidesRuntimeV1& sideScratch) noexcept {
-  if (!trading_core::orderBook(book).initialized()) {
-    book.symbol = symbol;
-    book.config = config;
-    if (book.config.maxStoredLevelsPerSide.raw == 0u) {
-      book.config.maxStoredLevelsPerSide =
-          book.capacityLevelsPerSide();
-    }
-  }
-  toRuntime(row, tapeScratch, sideScratch);
-  return trading_core::applyTapeDelta(book, tapeScratch, sideScratch);
+                   ReplayDepthBook& depthBook) noexcept {
+  if (!depthBook.apply({row.levels.data(), row.levels.size()}, row.exchangeTsNs,
+                       row.arrival, false)) return false;
+  book.config = config;
+  if (book.config.maxStoredLevelsPerSide.raw == 0u)
+    book.config.maxStoredLevelsPerSide = book.capacityLevelsPerSide();
+  const auto source = depthBook.view();
+  (void)trading_core::refreshAuthoritativeOrderBook(book, source, symbol);
+  return source.ready;
 }
 
 bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
@@ -536,8 +588,7 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
                          symbol_,
                          config_,
                          impl_->pending,
-                         impl_->tapeScratch,
-                         impl_->sideScratch)) {
+                         impl_->depthBook)) {
         available_ = false;
         failed_ = true;
         failureReason_ = "apply_failed";
@@ -584,8 +635,7 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
                        symbol_,
                        config_,
                        impl_->scratch,
-                       impl_->tapeScratch,
-                       impl_->sideScratch)) {
+                       impl_->depthBook)) {
       available_ = false;
       failed_ = true;
       failureReason_ = "apply_failed";

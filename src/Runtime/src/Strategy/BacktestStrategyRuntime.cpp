@@ -9,7 +9,6 @@
 #include "trading_core/Execution/Order/OrderPathWarmup.hpp"
 #include "trading_core/Strategy/StrategyInputFreshness.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
-#include "cxet/Primitives/Composite/OrderBookTapeRuntimeV1.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -25,7 +24,7 @@ using strategy_intent_lowering::bindTransactionLegs;
 using strategy_intent_lowering::configuredDefaultExecutionRoute;
 using strategy_intent_lowering::configuredPrimaryLegIndex;
 using strategy_intent_lowering::footprintSupported;
-using strategy_intent_lowering::lowerDesiredOrders;
+using strategy_intent_lowering::validateOutput;
 using strategy_intent_lowering::routeLegIndex;
 using strategy_intent_lowering::routeTradable;
 using strategy_intent_lowering::transactionAdmission;
@@ -160,7 +159,7 @@ void refreshCapturedBookTicker(
     const detail::BookTickerRow& row,
     const detail::TimelineEvent& event,
     std::uint64_t replayReceiveMonotonicNs,
-    const cxet::composite::BookTickerRuntimeV1& ticker) noexcept {
+    const cxet::composite::BookTicker& ticker) noexcept {
   TimeNs receiveMonotonic{};
   receiveMonotonic.raw = replayReceiveMonotonicNs;
   TimeNs receiveRealtime{};
@@ -185,7 +184,7 @@ void refreshCapturedBookTicker(
   }
 
   if (!row.bidPresent && !row.askPresent) return false;
-  cxet::composite::BookTickerSideUpdateRuntimeV1 update{};
+  cxet::composite::BookTickerSideUpdate update{};
   update.ts = ticker.ts;
   bool applied = false;
   if (row.bidPresent) {
@@ -745,7 +744,6 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
                                  const StrategyInstrumentSpec& instrument,
                                  bool strategyVisible) {
   trading_core::StrategyMarketSnapshot& snapshot = strategyVisible ? engine.snapshot : engine.venueSnapshot;
-  trading_core::StrategyCandleSnapshot& candle = strategyVisible ? engine.candle : engine.venueCandle;
   trading_core::LocalOrderBookState& orderBook = strategyVisible ? engine.orderBook : engine.venueOrderBook;
   trading_core::BboReconstructionState& bbo = strategyVisible ? engine.bboReconstruction : engine.venueBboReconstruction;
   detail::ReconstructionSourceIdentity* identity = nullptr;
@@ -813,28 +811,22 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   bool changed = false;
   if (event.kind == detail::kTimelineKindDepth) {
     const detail::DepthRow& depth = session.depths[event.index];
-    if (depth.resetBookBeforeApply) {
-      const trading_core::LocalOrderBookConfig config = orderBook.config;
-      const Symbol symbol = orderBook.symbol;
-      orderBook.reset();
-      orderBook.config = config;
-      orderBook.symbol = symbol;
+    auto& depthBook = strategyVisible ? engine.strategyDepthBook : engine.venueDepthBook;
+    if (!depthBook.apply(depth.levels, depth.tsNs, depth.arrival,
+            depth.resetBookBeforeApply, depth.capturedSequence,
+            depth.capturedPublicationSequence)) {
+      engine.depthReplayFailed = true;
+      trading_core::clearOrderBookSnapshot(snapshot);
+      return;
     }
-    cxet::composite::OrderBookTapeRuntimeV1 tape{};
-    cxet::composite::OrderBookTapeSidesRuntimeV1 sides{};
-    detail::toRuntime(depth, tape, sides);
-    trading_core::copyDepthTimestamp(
-        snapshot, cxet::composite::orderBookTapeTimestamp(tape));
-    if (orderBook.initialized.raw != trading_core::kAlgoFlagTrue.raw) {
-      orderBook.symbol = selectedSymbol;
-      if (orderBook.config.maxStoredLevelsPerSide.raw == 0u) {
-        orderBook.config.maxStoredLevelsPerSide =
-            orderBook.capacityLevelsPerSide();
-      }
-      orderBook.config.tickSizeRaw = instrument.tickSizeRaw;
+    TimeNs depthTimestamp{};
+    depthTimestamp.raw = static_cast<std::uint64_t>(depth.tsNs > 0 ? depth.tsNs : 0);
+    trading_core::copyDepthTimestamp(snapshot, depthTimestamp);
+    orderBook.config.tickSizeRaw = instrument.tickSizeRaw;
+    if (orderBook.hasStorage()) {
+      (void)trading_core::refreshAuthoritativeOrderBook(
+          orderBook, depthBook.view(), selectedSymbol);
     }
-    (void)trading_core::applyTapeDelta(
-        orderBook, tape, sides);
     overlayBacktestReconstructedBbo(
         snapshot, orderBook,
         trading_core::bboReconstructionView(bbo));
@@ -876,39 +868,6 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
       }
       changed = true;
     }
-  } else if (event.kind == detail::kTimelineKindPriceLimit) {
-    const auto priceLimit = detail::toRuntime(session.priceLimits[event.index]);
-    trading_core::copyPriceLimitSnapshot(snapshot, priceLimit);
-    changed = true;
-  } else if (event.kind == detail::kTimelineKindLiquidation) {
-    const auto liquidation = detail::toRuntime(session.liquidations[event.index], engine.exchange, engine.symbol);
-    trading_core::copyLiquidationSnapshot(snapshot, liquidation);
-    changed = true;
-  } else if (event.kind == detail::kTimelineKindMarkPrice) {
-    const auto markPrice = detail::toRuntime(session.markPrices[event.index]);
-    trading_core::copyMarkPriceSnapshot(snapshot, markPrice);
-    if (!strategyVisible) {
-      detail::tryTriggerStopMarketsOnMark(engine, markPrice, executionTsNs);
-    }
-    changed = true;
-  } else if (event.kind == detail::kTimelineKindIndexPrice) {
-    const auto indexPrice = detail::toRuntime(session.indexPrices[event.index]);
-    trading_core::copyIndexPriceSnapshot(snapshot, indexPrice);
-    if (!strategyVisible) {
-      detail::tryTriggerStopMarketsOnIndex(engine, indexPrice, executionTsNs);
-    }
-    changed = true;
-  } else if (event.kind == detail::kTimelineKindFunding) {
-    const auto funding = detail::toRuntime(session.funding[event.index]);
-    trading_core::copyFundingSnapshot(snapshot, funding);
-    changed = true;
-  } else if (event.kind == detail::kTimelineKindOpenInterest) {
-    const auto openInterest = detail::toRuntime(session.openInterest[event.index]);
-    trading_core::copyOpenInterestSnapshot(snapshot, openInterest);
-    changed = true;
-  } else if (event.kind == detail::kTimelineKindCandle) {
-    candle = detail::toRuntime(session.candles[event.index]);
-    changed = true;
   }
   if (changed) {
     if (strategyVisible) {
@@ -1032,8 +991,6 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
       scratch.orderBuf.data(), footprint.maxOrders);
   ctx.io.cancelOut = Span<trading_core::CancelIntent>(
       scratch.cancelBuf.data(), footprint.maxCancels);
-  ctx.io.desiredOrderOut = Span<trading_core::StrategyDesiredOrderSlot>(
-      scratch.desiredOrderBuf.data(), footprint.maxDesiredOrders);
   ctx.io.commandOut = Span<trading_core::StrategyCommandIntent>(
       scratch.commandBuf.data(),
       trading_core::strategyRuntimeCommandCapacity(footprint));
@@ -1075,7 +1032,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
     ctx.io.clear();
     return false;
   }
-  if (!lowerDesiredOrders(ctx)) {
+  if (!validateOutput(ctx)) {
     if (ctx.io.capacityExceeded && canCapacityRollback) {
       descriptor.rollbackCapacityCycle(state, before);
     } else if (canOrderFailureRollback) {
@@ -1282,8 +1239,6 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
       scratch.orderBuf.data(), footprint.maxOrders);
   ctx.io.cancelOut = Span<trading_core::CancelIntent>(
       scratch.cancelBuf.data(), footprint.maxCancels);
-  ctx.io.desiredOrderOut = Span<trading_core::StrategyDesiredOrderSlot>(
-      scratch.desiredOrderBuf.data(), footprint.maxDesiredOrders);
   ctx.io.commandOut = Span<trading_core::StrategyCommandIntent>(
       scratch.commandBuf.data(),
       trading_core::strategyRuntimeCommandCapacity(footprint));
@@ -1325,7 +1280,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
     ctx.io.clear();
     return false;
   }
-  if (!lowerDesiredOrders(ctx)) {
+  if (!validateOutput(ctx)) {
     if (ctx.io.capacityExceeded && canCapacityRollback) {
       descriptor.rollbackCapacityCycle(state, before);
     } else if (canOrderFailureRollback) {

@@ -32,7 +32,7 @@ namespace hft_backtest::strategy_intent_lowering {
 [[nodiscard]] bool footprintSupported(
     const trading_core::StrategyDescriptor& descriptor) noexcept;
 
-[[nodiscard]] bool lowerDesiredOrders(
+[[nodiscard]] bool validateOutput(
     trading_core::StrategyContext& context) noexcept;
 
 [[nodiscard]] bool bindTransactionLegs(

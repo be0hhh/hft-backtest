@@ -1,19 +1,10 @@
 #include "BacktestEngine.hpp"
 
+#include <algorithm>
+#include <new>
+
 namespace hft_backtest::detail {
 namespace {
-
-Side orderBookSideFromRow(std::int64_t raw) noexcept {
-  return raw == 0 ? Side::Buy() : Side::Sell();
-}
-
-void appendSnapshotLevel(cxet::composite::OrderBookSnapshot& out, const PriceLevelRow& level) noexcept {
-  Price price{};
-  Amount qty{};
-  price.raw = level.priceE8;
-  qty.raw = level.qtyE8;
-  (void)cxet::composite::appendOrderBookLevel(out, price, qty, orderBookSideFromRow(level.side));
-}
 
 bool appendCandle(cxet::composite::CandleLite* out, CountVal& count, const CandleRow& row) noexcept {
   if (!out || count.raw >= cxet::composite::kTieredCandleHistoryCapacity) return true;
@@ -30,6 +21,142 @@ std::int64_t midpointE8(std::int64_t high, std::int64_t low) noexcept {
 }
 
 }  // namespace
+
+bool ReplayDepthBook::prepare() noexcept {
+  if (books_.ready()) return true;
+  const std::array<std::uint32_t, 1u> capacities{
+      cxet::market::kMaximumDepthLevelsPerSide};
+  cxet::runtime::market::LocalOrderBookMemoryPlan plan{};
+  if (!cxet::runtime::market::planLocalOrderBookMemory(capacities,
+          std::numeric_limits<std::size_t>::max(), &plan) ||
+      !books_.initialize(capacities, plan.requiredBytes)) return false;
+  scratch_.reset(new (std::nothrow) IndexedMutation[
+      cxet::market::kMaximumDepthSnapshotMutations]);
+  if (!scratch_) { books_.reset(); return false; }
+  return true;
+}
+
+void ReplayDepthBook::reset() noexcept {
+  if (auto* owner = books_.book(1u)) owner->reset();
+  arrival_ = {};
+  sourcePosition_ = true;
+}
+
+bool ReplayDepthBook::apply(std::span<const PriceLevelRow> levels,
+    std::int64_t exchangeTsNs, const hftrec::replay::EventArrival& arrival,
+    bool snapshot, cxet::market::DepthSequence capturedSequence,
+    std::uint64_t capturedPublicationSequence) noexcept {
+  auto* owner = books_.book(1u);
+  if (!owner || !scratch_ ||
+      levels.size() > cxet::market::kMaximumDepthSnapshotMutations) return false;
+  const bool identityChanged = arrival_.producerEpoch != 0u &&
+      (arrival_.producerEpoch != arrival.producerEpoch ||
+       arrival_.sourceId != arrival.sourceId ||
+       arrival_.sourceGeneration != arrival.sourceGeneration ||
+       arrival_.sessionEpoch != arrival.sessionEpoch);
+  if (identityChanged) owner->reset();
+  std::size_t count = 0u;
+  for (std::size_t index = 0u; index < levels.size(); ++index) {
+    const auto& input = levels[index];
+    cxet::market::DepthMutation value{};
+    value.priceRaw = input.priceE8;
+    value.quantityRaw = input.qtyE8;
+    value.side = input.side == 0 ? cxet::market::DepthSide::Bid
+                               : cxet::market::DepthSide::Ask;
+    value.action = input.qtyE8 == 0 ? cxet::market::DepthAction::Erase
+                                  : cxet::market::DepthAction::Upsert;
+    if ((input.side != 0 && input.side != 1) ||
+        !cxet::market::validDepthMutation(value) ||
+        (snapshot && value.action != cxet::market::DepthAction::Upsert)) {
+      owner->markGap(); return false;
+    }
+    scratch_[count++] = {value, static_cast<std::uint32_t>(index)};
+  }
+  // Legacy text rows retain wire order. Collapse repeated side/price entries
+  // using the last actual input mutation before Core's canonical application.
+  std::sort(scratch_.get(), scratch_.get() + count,
+      [](const IndexedMutation& left, const IndexedMutation& right) noexcept {
+        if (left.value.side != right.value.side)
+          return left.value.side == cxet::market::DepthSide::Bid;
+        if (left.value.priceRaw != right.value.priceRaw)
+          return left.value.side == cxet::market::DepthSide::Bid
+              ? left.value.priceRaw > right.value.priceRaw
+              : left.value.priceRaw < right.value.priceRaw;
+        return left.ordinal > right.ordinal;
+      });
+  auto mutations = books_.transactionScratch();
+  std::size_t unique = 0u;
+  for (std::size_t index = 0u; index < count; ++index) {
+    if (index != 0u && scratch_[index].value.side == scratch_[index - 1u].value.side &&
+        scratch_[index].value.priceRaw == scratch_[index - 1u].value.priceRaw) continue;
+    if (unique == mutations.size()) { owner->markGap(); return false; }
+    mutations[unique++] = scratch_[index].value;
+  }
+  const bool localPosition = capturedSequence.lastUpdateId == 0u;
+  cxet::market::DepthSequence sequence = capturedSequence;
+  if (localPosition) {
+    if (owner->lastUpdateId() == std::numeric_limits<std::uint64_t>::max()) {
+      owner->markGap(); return false;
+    }
+    const std::uint64_t next = owner->lastUpdateId() + 1u;
+    sequence = {next, next, snapshot ? 0u : owner->lastUpdateId()};
+  }
+  using cxet::runtime::market::LocalOrderBookStatus;
+  LocalOrderBookStatus result{};
+  if (snapshot) {
+    result = owner->stageSnapshot(sequence, mutations.first(unique));
+    if (result == LocalOrderBookStatus::RebaseStaged) result = owner->commitRebase();
+  } else if (unique == 0u) {
+    owner->markGap(); return false;
+  } else {
+    result = owner->state() == cxet::market::DepthSourceState::Healthy
+        ? owner->applyDelta(sequence, mutations.first(unique))
+        : owner->applyPartialDelta(sequence, mutations.first(unique));
+  }
+  if (result != LocalOrderBookStatus::Applied &&
+      result != LocalOrderBookStatus::Partial &&
+      result != LocalOrderBookStatus::RebaseCommitted) {
+    owner->markGap(); return false;
+  }
+  sourcePosition_ = localPosition;
+  arrival_ = arrival;
+  owner->commitProjection({arrival.sourceGeneration, arrival.sessionEpoch,
+      capturedPublicationSequence != 0u ? capturedPublicationSequence : sequence.lastUpdateId,
+      arrival.receiveMonotonicNs,
+      static_cast<std::uint64_t>(exchangeTsNs > 0 ? exchangeTsNs : 0),
+      localPosition ? cxet::market::DepthEventSourcePosition : 0u,
+      cxet::market::DepthFailure::None});
+  return true;
+}
+
+bool ReplayDepthBook::restore(
+    const cxet::runtime::market::LocalOrderBookCheckpointView& checkpoint,
+    const hftrec::replay::EventArrival& arrival, bool sourcePosition) noexcept {
+  auto* owner = books_.book(1u);
+  if (!owner || !owner->restoreCheckpoint(checkpoint)) return false;
+  arrival_ = arrival;
+  sourcePosition_ = sourcePosition;
+  return true;
+}
+
+cxet::api::market::PublicMarketOrderBookView ReplayDepthBook::view() const noexcept {
+  cxet::api::market::PublicMarketOrderBookView result{};
+  const auto* owner = books_.book(1u);
+  if (!owner) return result;
+  const auto bids = owner->bids();
+  const auto asks = owner->asks();
+  result.bids = bids.data(); result.asks = asks.data();
+  result.bidCount = static_cast<std::uint32_t>(bids.size());
+  result.askCount = static_cast<std::uint32_t>(asks.size());
+  result.lastEventTs.raw = owner->projection().exchangeTimestampNs;
+  result.lastEventId.raw = owner->projection().publicationSequence;
+  result.ready = owner->state() == cxet::market::DepthSourceState::Healthy ||
+                 owner->state() == cxet::market::DepthSourceState::Partial;
+  result.coverage = owner->state() == cxet::market::DepthSourceState::Healthy
+      ? cxet::api::market::PublicMarketOrderBookCoverage::SnapshotAligned
+      : cxet::api::market::PublicMarketOrderBookCoverage::DeltaOnly;
+  return result;
+}
 
 std::string quote(std::string_view value) {
   std::string out;
@@ -78,126 +205,24 @@ Side sideFromRow(std::int64_t raw) noexcept {
   return raw == 1 ? Side::Buy() : Side::Sell();
 }
 
-cxet::composite::TradeRuntimeV1 toRuntime(const TradeRow& row) noexcept {
-  cxet::composite::TradeRuntimeV1 out{};
+cxet::composite::Trade toRuntime(const TradeRow& row) noexcept {
+  cxet::composite::Trade out{};
   out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
   out.price.raw = row.priceE8;
   out.qty.raw = row.qtyE8;
-  out.side = sideFromRow(row.side);
+  out.initiatorSide = row.side == 1 ? cxet::composite::TradeInitiatorSide::Buyer
+      : (row.side == 0 ? cxet::composite::TradeInitiatorSide::Seller
+                       : cxet::composite::TradeInitiatorSide::Unknown);
   return out;
 }
 
-cxet::composite::BookTickerRuntimeV1 toRuntime(const BookTickerRow& row) noexcept {
-  cxet::composite::BookTickerRuntimeV1 out{};
+cxet::composite::BookTicker toRuntime(const BookTickerRow& row) noexcept {
+  cxet::composite::BookTicker out{};
   out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
   out.bid.px.raw = row.bidPriceE8;
   out.bid.qty.raw = row.bidQtyE8;
   out.ask.px.raw = row.askPriceE8;
   out.ask.qty.raw = row.askQtyE8;
-  return out;
-}
-
-cxet::composite::PriceLimitRuntimeV1 toRuntime(const PriceLimitRow& row) noexcept {
-  cxet::composite::PriceLimitRuntimeV1 out{};
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  out.buyLimit.raw = row.buyLimitE8;
-  out.sellLimit.raw = row.sellLimitE8;
-  out.enabled = row.enabled;
-  return out;
-}
-
-cxet::composite::LiquidationEvent toRuntime(const LiquidationRow& row,
-                                            ExchangeId exchange,
-                                            const Symbol& symbol) noexcept {
-  cxet::composite::LiquidationEvent out{};
-  out.exchangeId = exchange;
-  out.symbol = symbol;
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  out.side = sideFromRow(row.side);
-  out.price.raw = row.priceE8;
-  out.amount.raw = row.qtyE8;
-  out.avgPrice.raw = row.avgPriceE8 > 0 ? row.avgPriceE8 : row.priceE8;
-  out.lastFilledAmount.raw = row.filledQtyE8 > 0 ? row.filledQtyE8 : row.qtyE8;
-  out.filledAmount.raw = out.lastFilledAmount.raw;
-  out.orderType = static_cast<canon::OrderType>(row.orderType);
-  out.timeInForce = static_cast<canon::TimeInForce>(row.timeInForce);
-  out.orderStatus = static_cast<canon::OrderStatus>(row.status);
-  out.sourceMode = static_cast<cxet::composite::LiquidationSourceMode>(row.sourceMode);
-  return out;
-}
-
-cxet::composite::MarkPriceRuntimeV1 toRuntime(const MarkPriceRow& row) noexcept {
-  cxet::composite::MarkPriceRuntimeV1 out{};
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  out.markPrice.raw = row.markPriceE8;
-  return out;
-}
-
-cxet::composite::IndexPriceRuntimeV1 toRuntime(const IndexPriceRow& row) noexcept {
-  cxet::composite::IndexPriceRuntimeV1 out{};
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  out.indexPrice.raw = row.indexPriceE8;
-  return out;
-}
-
-cxet::composite::FundingRuntimeV1 toRuntime(const FundingRow& row) noexcept {
-  cxet::composite::FundingRuntimeV1 out{};
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  out.fundingRate.raw = row.fundingRateE8;
-  out.fundingTs.raw = static_cast<std::uint64_t>(row.fundingTsNs > 0 ? row.fundingTsNs : 0);
-  out.nextFundingTs.raw = static_cast<std::uint64_t>(row.nextFundingTsNs > 0 ? row.nextFundingTsNs : 0);
-  return out;
-}
-
-cxet::composite::OpenInterestRuntimeV1 toRuntime(const OpenInterestRow& row) noexcept {
-  cxet::composite::OpenInterestRuntimeV1 out{};
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  out.openInterest.raw = row.openInterestE8;
-  out.openInterestValue.raw = row.openInterestValueE8;
-  return out;
-}
-
-trading_core::StrategyCandleSnapshot toRuntime(const CandleRow& row) noexcept {
-  trading_core::StrategyCandleSnapshot out{};
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  out.tier.raw = static_cast<std::uint64_t>(row.tier > 0 ? row.tier : 0);
-  out.high.raw = row.highE8;
-  out.low.raw = row.lowE8;
-  const std::int64_t fallbackClose = midpointE8(row.highE8, row.lowE8);
-  out.open.raw = row.hasOhlc ? row.openE8 : fallbackClose;
-  out.close.raw = row.hasOhlc ? row.closeE8 : fallbackClose;
-  out.volume.raw = row.volumeE8;
-  out.quoteAmount.raw = row.quoteAmountE8;
-  out.hasOhlc = row.hasOhlc ? trading_core::kAlgoFlagTrue : trading_core::kAlgoFlagFalse;
-  out.valid = row.tsNs > 0 && out.close.raw > 0 && out.high.raw >= out.low.raw
-      ? trading_core::kAlgoFlagTrue
-      : trading_core::kAlgoFlagFalse;
-  return out;
-}
-
-void toRuntime(const DepthRow& row,
-               cxet::composite::OrderBookTapeRuntimeV1& tape,
-               cxet::composite::OrderBookTapeSidesRuntimeV1& sides) noexcept {
-  cxet::composite::resetOrderBookTapeRuntimeHeader(tape);
-  cxet::composite::resetOrderBookTapeSidesRuntimeHeader(sides);
-  TimeNs ts{};
-  ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  (void)cxet::composite::appendOrderBookTapeTimestamp(tape, ts);
-  for (const PriceLevelRow& level : row.levels) {
-    Price price{};
-    Amount qty{};
-    price.raw = level.priceE8;
-    qty.raw = level.qtyE8;
-    (void)cxet::composite::appendOrderBookTapePriceQtyWithSide(tape, sides, price, qty, orderBookSideFromRow(level.side));
-  }
-}
-
-cxet::composite::OrderBookSnapshot toRuntimeSnapshot(const DepthRow& row) noexcept {
-  cxet::composite::OrderBookSnapshot out{};
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  for (const PriceLevelRow& level : row.levels) {
-    appendSnapshotLevel(out, level);
-  }
   return out;
 }
 

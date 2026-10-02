@@ -97,18 +97,8 @@ void includeChannel(ChannelPlan& output,
                  plan.loadTrades, plan.requireTrades);
   includeChannel(output, corpus::BinaryMarketChannel::BookTicker,
                  plan.loadBookTickers, plan.requireBookTickers);
-  includeChannel(output, corpus::BinaryMarketChannel::PriceLimit,
-                 plan.loadPriceLimits, plan.requirePriceLimits);
   includeChannel(output, corpus::BinaryMarketChannel::Depth,
                  plan.loadDepths, plan.requireDepths);
-  includeChannel(output, corpus::BinaryMarketChannel::Liquidation,
-                 plan.loadLiquidations, plan.requireLiquidations);
-  includeChannel(output, corpus::BinaryMarketChannel::MarkPrice,
-                 plan.loadMarkPrices, plan.requireMarkPrices);
-  includeChannel(output, corpus::BinaryMarketChannel::IndexPrice,
-                 plan.loadIndexPrices, plan.requireIndexPrices);
-  includeChannel(output, corpus::BinaryMarketChannel::Funding,
-                 plan.loadFunding, plan.requireFunding);
   return output;
 }
 
@@ -486,6 +476,9 @@ struct DepthRebaseCursor final {
   row.ingestSeq = ingestSequence;
   row.arrival = makeArrival(selection.manifest, firstRecord.header);
   row.resetBookBeforeApply = snapshot;
+  row.capturedPublicationSequence = firstRecord.header.eventSequence;
+  row.capturedSequence = {first->sequence.firstUpdateId,
+      first->sequence.lastUpdateId, first->sequence.previousUpdateId};
   row.applicationAtomicRebase = rebaseInFlight;
   row.levels.reserve(first->totalLevelCount);
 
@@ -589,18 +582,8 @@ struct DepthRebaseCursor final {
     return false;
   };
   return require(plan.requireTrades, output.trades.empty(), "trades") &&
-      require(plan.requireBookTickers, output.bookTickers.empty(),
-              "bookticker") &&
-      require(plan.requirePriceLimits, output.priceLimits.empty(),
-              "price_limit") &&
-      require(plan.requireDepths, output.depths.empty(), "depth") &&
-      require(plan.requireLiquidations, output.liquidations.empty(),
-              "liquidations") &&
-      require(plan.requireMarkPrices, output.markPrices.empty(),
-              "mark_price") &&
-      require(plan.requireIndexPrices, output.indexPrices.empty(),
-              "index_price") &&
-      require(plan.requireFunding, output.funding.empty(), "funding");
+      require(plan.requireBookTickers, output.bookTickers.empty(), "bookticker") &&
+      require(plan.requireDepths, output.depths.empty(), "depth");
 }
 
 void appendEvidenceWarnings(SessionData& output) {
@@ -641,10 +624,6 @@ Status loadBinaryMarketCorpus(
   }
   if (plan.requireCandles) {
     error = "strategy requires candle history, which is not part of the live binary market corpus";
-    return Status::Unsupported;
-  }
-  if (plan.requireOpenInterest) {
-    error = "strategy requires open_interest, which is not in the binary market corpus contract";
     return Status::Unsupported;
   }
 
@@ -731,10 +710,6 @@ Status loadBinaryMarketCorpus(
       appendWarning(output,
           "optional candle history is unavailable in live binary corpus");
     }
-    if (plan.loadOpenInterest) {
-      appendWarning(output,
-          "optional open_interest channel is unavailable in binary corpus");
-    }
     for (std::size_t index = 0u;
          index < corpus::kBinaryMarketChannelCount; ++index) {
       const std::uint16_t bit = static_cast<std::uint16_t>(1u << index);
@@ -788,6 +763,20 @@ Status loadBinaryMarketCorpus(
 
     std::array<std::size_t, corpus::kBinaryMarketChannelCount> counts{};
     for (const auto& record : selection.records) {
+      switch (record.header.channel) {
+        case corpus::BinaryMarketChannel::BookTicker:
+        case corpus::BinaryMarketChannel::Trade:
+        case corpus::BinaryMarketChannel::Depth:
+        case corpus::BinaryMarketChannel::PriceLimit:
+        case corpus::BinaryMarketChannel::Liquidation:
+        case corpus::BinaryMarketChannel::MarkPrice:
+        case corpus::BinaryMarketChannel::IndexPrice:
+        case corpus::BinaryMarketChannel::Funding:
+          break;
+        default:
+          error = "unknown binary corpus channel tag";
+          return Status::CorruptData;
+      }
       ++counts[corpus::binaryMarketChannelIndex(record.header.channel)];
     }
     output.trades.reserve(
@@ -796,24 +785,9 @@ Status loadBinaryMarketCorpus(
     output.bookTickers.reserve(
         counts[corpus::binaryMarketChannelIndex(
             corpus::BinaryMarketChannel::BookTicker)]);
-    output.priceLimits.reserve(
-        counts[corpus::binaryMarketChannelIndex(
-            corpus::BinaryMarketChannel::PriceLimit)]);
     output.depths.reserve(
         counts[corpus::binaryMarketChannelIndex(
             corpus::BinaryMarketChannel::Depth)]);
-    output.liquidations.reserve(
-        counts[corpus::binaryMarketChannelIndex(
-            corpus::BinaryMarketChannel::Liquidation)]);
-    output.markPrices.reserve(
-        counts[corpus::binaryMarketChannelIndex(
-            corpus::BinaryMarketChannel::MarkPrice)]);
-    output.indexPrices.reserve(
-        counts[corpus::binaryMarketChannelIndex(
-            corpus::BinaryMarketChannel::IndexPrice)]);
-    output.funding.reserve(
-        counts[corpus::binaryMarketChannelIndex(
-            corpus::BinaryMarketChannel::Funding)]);
 
     std::int64_t ingestSequence = 0;
     std::uint64_t retainedBboSequence = 0u;
@@ -828,6 +802,20 @@ Status loadBinaryMarketCorpus(
       if (!channelFlagsValid(record.header)) {
         error = "binary corpus record flags do not match its channel";
         return Status::CorruptData;
+      }
+      // Selection asks only for BBO/trades/depth. Defensively recognize
+      // historical tags without reviving their old production replay chain.
+      if (record.header.channel != corpus::BinaryMarketChannel::BookTicker &&
+          record.header.channel != corpus::BinaryMarketChannel::Trade &&
+          record.header.channel != corpus::BinaryMarketChannel::Depth) {
+        if (depthRebase.active) {
+          error = "retired channel interrupts binary corpus depth rebase transaction";
+          return Status::CorruptData;
+        }
+        appendWarning(output, std::string{"retired public channel ignored: "} +
+            channelName(record.header.channel));
+        ++recordIndex;
+        continue;
       }
       if ((record.header.flags &
            corpus::BinaryMarketRecordTraderReplayCompatible) == 0u) {
@@ -963,103 +951,17 @@ Status loadBinaryMarketCorpus(
           output.trades.push_back(row);
           break;
         }
-        case corpus::BinaryMarketChannel::PriceLimit: {
-          const auto* payload =
-              checkedPayload<corpus::BinaryMarketPriceLimitPayload>(record);
-          if (!payload || payload->enabled > 1u ||
-              payload->reserved != decltype(payload->reserved){}) {
-            error = "invalid binary corpus price_limit payload";
-            return Status::CorruptData;
-          }
-          PriceLimitRow row{};
-          if (!rescaleToE8(payload->buyLimitRaw,
-                           selection.source.priceScale, row.buyLimitE8) ||
-              !rescaleToE8(payload->sellLimitRaw,
-                           selection.source.priceScale, row.sellLimitE8) ||
-              (payload->enabled != 0u &&
-               (row.buyLimitE8 <= 0 || row.sellLimitE8 <= 0))) {
-            error = "binary corpus price_limit cannot be represented exactly in E8";
-            return Status::CorruptData;
-          }
-          row.tsNs = record.header.exchangeTimestampNs;
-          row.enabled = payload->enabled;
-          row.ingestSeq = ingestSequence;
-          row.arrival = arrival;
-          output.priceLimits.push_back(row);
-          break;
-        }
-        case corpus::BinaryMarketChannel::Liquidation: {
-          const auto* payload =
-              checkedPayload<corpus::BinaryMarketLiquidationPayload>(record);
-          if (!payload || (payload->side != 1u && payload->side != 2u) ||
-              payload->reserved != decltype(payload->reserved){}) {
-            error = "invalid binary corpus liquidation payload";
-            return Status::CorruptData;
-          }
-          LiquidationRow row{};
-          if (!rescaleToE8(payload->priceRaw, selection.source.priceScale,
-                           row.priceE8) ||
-              !rescaleToE8(payload->qtyRaw, selection.source.quantityScale,
-                           row.qtyE8) ||
-              !rescaleToE8(payload->averagePriceRaw,
-                           selection.source.priceScale, row.avgPriceE8) ||
-              !rescaleToE8(payload->filledQtyRaw,
-                           selection.source.quantityScale,
-                           row.filledQtyE8) ||
-              row.priceE8 <= 0 || row.qtyE8 <= 0) {
-            error = "binary corpus liquidation cannot be represented exactly in E8";
-            return Status::CorruptData;
-          }
-          row.side = payload->side == 1u ? 1 : 0;
-          row.tsNs = record.header.exchangeTimestampNs;
-          row.orderType = payload->orderType;
-          row.timeInForce = payload->timeInForce;
-          row.status = payload->status;
-          row.sourceMode = payload->sourceMode;
-          row.ingestSeq = ingestSequence;
-          row.arrival = arrival;
-          output.liquidations.push_back(row);
-          break;
-        }
+        // Recorder owns these immutable numeric tags; their public channels
+        // are retired and never decoded or presented to strategies.
+        case corpus::BinaryMarketChannel::PriceLimit:
+        case corpus::BinaryMarketChannel::Liquidation:
         case corpus::BinaryMarketChannel::MarkPrice:
-        case corpus::BinaryMarketChannel::IndexPrice: {
-          const auto* payload =
-              checkedPayload<corpus::BinaryMarketScalarPricePayload>(record);
-          std::int64_t priceE8 = 0;
-          if (!payload ||
-              !rescaleToE8(payload->priceRaw, selection.source.priceScale,
-                           priceE8) ||
-              priceE8 <= 0) {
-            error = "binary corpus scalar price cannot be represented exactly in E8";
-            return Status::CorruptData;
-          }
-          if (record.header.channel ==
-              corpus::BinaryMarketChannel::MarkPrice) {
-            output.markPrices.push_back({record.header.exchangeTimestampNs,
-                                         priceE8, ingestSequence, arrival});
-          } else {
-            output.indexPrices.push_back({record.header.exchangeTimestampNs,
-                                          priceE8, ingestSequence, arrival});
-          }
+        case corpus::BinaryMarketChannel::IndexPrice:
+        case corpus::BinaryMarketChannel::Funding:
           break;
-        }
-        case corpus::BinaryMarketChannel::Funding: {
-          const auto* payload =
-              checkedPayload<corpus::BinaryMarketFundingPayload>(record);
-          if (!payload || payload->fundingTimestampNs < 0 ||
-              payload->nextFundingTimestampNs < 0) {
-            error = "invalid binary corpus funding payload";
-            return Status::CorruptData;
-          }
-          output.funding.push_back({
-              record.header.exchangeTimestampNs,
-              payload->fundingRateRaw,
-              payload->fundingTimestampNs,
-              payload->nextFundingTimestampNs,
-              ingestSequence,
-              arrival});
-          break;
-        }
+        default:
+          error = "unknown binary corpus channel tag";
+          return Status::CorruptData;
         case corpus::BinaryMarketChannel::Depth:
           break;
       }

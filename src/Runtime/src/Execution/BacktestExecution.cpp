@@ -399,12 +399,12 @@ void terminalizeUnavailableLiquidity(EngineState& engine, OpenOrder& order, std:
 }
 
 std::int64_t triggeredStopLimitBboPrice(const OpenOrder& order,
-                                        const cxet::composite::BookTickerRuntimeV1& top) noexcept {
+                                        const cxet::composite::BookTicker& top) noexcept {
   return order.state.side.raw == Side::Buy().raw ? top.ask.px.raw : top.bid.px.raw;
 }
 
 std::int64_t triggeredStopLimitBboQty(const OpenOrder& order,
-                                      const cxet::composite::BookTickerRuntimeV1& top) noexcept {
+                                      const cxet::composite::BookTicker& top) noexcept {
   return order.state.side.raw == Side::Buy().raw ? top.ask.qty.raw : top.bid.qty.raw;
 }
 
@@ -417,7 +417,7 @@ bool triggeredStopLimitBboCapOk(const OpenOrder& order, std::int64_t topPrice) n
 
 void fillTriggeredStopLimitFromBbo(EngineState& engine,
                                    OpenOrder& order,
-                                   const cxet::composite::BookTickerRuntimeV1& top,
+                                   const cxet::composite::BookTicker& top,
                                    std::int64_t tsNs,
                                    FillExecutionMetadata metadata) {
   const std::int64_t topPrice = triggeredStopLimitBboPrice(order, top);
@@ -443,7 +443,7 @@ bool isPostOnlyPolicy(trading_core::LimitTimeInForcePolicy policy) noexcept {
 
 bool postOnlyCrossesTop(const EngineState& engine, const OpenOrder& order) noexcept {
   if (!order.postOnly || order.state.orderType != canon::OrderType::Limit) return false;
-  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+  const cxet::composite::BookTicker& top = effectiveBookTicker(engine.venueSnapshot);
   const std::int64_t bid = top.bid.px.raw;
   const std::int64_t ask = top.ask.px.raw;
   if (bid <= 0 || ask <= 0) return false;
@@ -461,9 +461,8 @@ bool stopMarketCrossed(const OpenOrder& order, std::int64_t sourcePrice) noexcep
 }
 
 bool knownStopMarketTriggerSource(canon::OrderTriggerSource source) noexcept {
-  return source == canon::OrderTriggerSource::Last ||
-         source == canon::OrderTriggerSource::Mark ||
-         source == canon::OrderTriggerSource::Index;
+  // Retired public mark/index feeds cannot authorize a simulated stop.
+  return source == canon::OrderTriggerSource::Last;
 }
 
 bool badStopMarketIntent(const trading_core::OrderIntent& intent) noexcept {
@@ -481,22 +480,12 @@ bool stopMarketSourcePrice(const EngineState& engine,
   outPrice = 0;
   const canon::OrderTriggerSource source = order.state.triggerSource;
   if (source == canon::OrderTriggerSource::Last) {
-    const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+    const cxet::composite::BookTicker& top = effectiveBookTicker(engine.venueSnapshot);
     if (order.state.side.raw == Side::Buy().raw) {
       outPrice = top.ask.px.raw;
     } else if (order.state.side.raw == Side::Sell().raw) {
       outPrice = top.bid.px.raw;
     }
-    return outPrice > 0;
-  }
-  if (source == canon::OrderTriggerSource::Mark) {
-    if (engine.venueSnapshot.hasMarkPrice.raw != trading_core::kAlgoFlagTrue.raw) return false;
-    outPrice = engine.venueSnapshot.lastMarkPrice.markPrice.raw;
-    return outPrice > 0;
-  }
-  if (source == canon::OrderTriggerSource::Index) {
-    if (engine.venueSnapshot.hasIndexPrice.raw != trading_core::kAlgoFlagTrue.raw) return false;
-    outPrice = engine.venueSnapshot.lastIndexPrice.indexPrice.raw;
     return outPrice > 0;
   }
   return false;
@@ -558,13 +547,13 @@ bool hasTopExecutionCandidate(const EngineState& engine, std::int64_t bid, std::
 
 constexpr std::int64_t kMarketDepthMaxAgeNs = 500000000ll;
 
-bool bboOverlayCandidate(const cxet::composite::BookTickerRuntimeV1& top) noexcept {
+bool bboOverlayCandidate(const cxet::composite::BookTicker& top) noexcept {
   return top.bid.px.raw > 0 && top.ask.px.raw > 0 && top.bid.px.raw < top.ask.px.raw;
 }
 
 trading_core::AlgoFlag effectiveBidQtyKnown(
     const trading_core::StrategyMarketSnapshot& snapshot,
-    const cxet::composite::BookTickerRuntimeV1& top) noexcept {
+    const cxet::composite::BookTicker& top) noexcept {
   return snapshot.hasReconstructedBbo.raw == trading_core::kAlgoFlagTrue.raw
       ? snapshot.reconstructedBidQtyKnown
       : (top.bid.qty.raw > 0 ? trading_core::kAlgoFlagTrue : trading_core::kAlgoFlagFalse);
@@ -572,7 +561,7 @@ trading_core::AlgoFlag effectiveBidQtyKnown(
 
 trading_core::AlgoFlag effectiveAskQtyKnown(
     const trading_core::StrategyMarketSnapshot& snapshot,
-    const cxet::composite::BookTickerRuntimeV1& top) noexcept {
+    const cxet::composite::BookTicker& top) noexcept {
   return snapshot.hasReconstructedBbo.raw == trading_core::kAlgoFlagTrue.raw
       ? snapshot.reconstructedAskQtyKnown
       : (top.ask.qty.raw > 0 ? trading_core::kAlgoFlagTrue : trading_core::kAlgoFlagFalse);
@@ -580,7 +569,7 @@ trading_core::AlgoFlag effectiveAskQtyKnown(
 
 const trading_core::LocalOrderBookState& overlayedTakerExecutionBook(
     const trading_core::StrategyMarketSnapshot& snapshot,
-    const cxet::composite::BookTickerRuntimeV1& top,
+    const cxet::composite::BookTicker& top,
     const trading_core::LocalOrderBookState& rawBook,
     trading_core::LocalOrderBookState& scratch) noexcept {
   if (!bboOverlayCandidate(top)) return rawBook;
@@ -591,7 +580,7 @@ const trading_core::LocalOrderBookState& overlayedTakerExecutionBook(
 }
 
 bool marketDepthFreshEnough(const trading_core::LocalOrderBookState& book,
-                            const cxet::composite::BookTickerRuntimeV1& top) noexcept {
+                            const cxet::composite::BookTicker& top) noexcept {
   if (book.ts.raw == 0u || top.ts.raw == 0u) return true;
   if (top.ts.raw <= book.ts.raw) return true;
   return top.ts.raw - book.ts.raw <= static_cast<std::uint64_t>(kMarketDepthMaxAgeNs);
@@ -618,7 +607,7 @@ AggressiveFillPlan& topExecutionFillPlanScratch(EngineState& engine) {
 bool marketDepthPlanUsable(const OpenOrder& order,
                            const AggressiveFillPlan& plan,
                            const trading_core::LocalOrderBookState& book,
-                           const cxet::composite::BookTickerRuntimeV1& top) noexcept {
+                           const cxet::composite::BookTicker& top) noexcept {
   if (!marketExecutionOrder(order)) return true;
   if (!marketDepthFreshEnough(book, top)) return false;
   if (plan.count == 0u || plan.visibleDepthCapped || plan.remainingQtyE8 != 0) return false;
@@ -1109,28 +1098,11 @@ void triggerStopMarketsOnLastBbo(EngineState& engine,
   }
 }
 
-void triggerStopMarketsBySource(EngineState& engine,
-                                canon::OrderTriggerSource source,
-                                std::int64_t sourcePrice,
-                                std::int64_t tsNs) {
-  if (sourcePrice <= 0) return;
-  bool triggered = false;
-  for (OpenOrder& order : engine.open) {
-    if (!order.state.valid || !order.active || order.stopTriggered) continue;
-    if (order.state.orderType != canon::OrderType::Stop || order.state.triggerSource != source) continue;
-    if (!stopMarketCrossed(order, sourcePrice)) continue;
-    markStopMarketTriggered(order, sourcePrice, tsNs);
-    updateTriggeredStopMarketRecord(engine, order, sourcePrice, tsNs);
-    triggered = true;
-  }
-  if (triggered) tryFillOnTop(engine, tsNs, false);
-}
-
 void tryFillOnTop(EngineState& engine,
                   std::int64_t tsNs,
                   bool venueBookTickerUpdate) {
   if (engine.liquidated || engine.riskStopped) return;
-  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+  const cxet::composite::BookTicker& top = effectiveBookTicker(engine.venueSnapshot);
   const std::int64_t bid = top.bid.px.raw;
   const std::int64_t ask = top.ask.px.raw;
   triggerStopMarketsOnLastBbo(engine, bid, ask, tsNs);
@@ -1227,7 +1199,7 @@ void tryFillOnTop(EngineState& engine,
 }
 
 void tryFillOnTrade(EngineState& engine,
-                    const cxet::composite::TradeRuntimeV1& trade,
+                    const cxet::composite::Trade& trade,
                     std::int64_t venueTsNs) {
   if (engine.liquidated || engine.riskStopped) return;
   for (OpenOrder& order : engine.open) {
@@ -1244,25 +1216,6 @@ void tryFillOnTrade(EngineState& engine,
   }
 }
 
-void tryTriggerStopMarketsOnMark(
-    EngineState& engine,
-    const cxet::composite::MarkPriceRuntimeV1& markPrice,
-    std::int64_t venueTsNs) {
-  triggerStopMarketsBySource(engine,
-                             canon::OrderTriggerSource::Mark,
-                             markPrice.markPrice.raw,
-                             venueTsNs);
-}
-
-void tryTriggerStopMarketsOnIndex(
-    EngineState& engine,
-    const cxet::composite::IndexPriceRuntimeV1& indexPrice,
-    std::int64_t venueTsNs) {
-  triggerStopMarketsBySource(engine,
-                             canon::OrderTriggerSource::Index,
-                             indexPrice.indexPrice.raw,
-                             venueTsNs);
-}
 
 void applyDueActions(EngineState& engine, std::int64_t tsNs) {
   if (engine.liquidated || engine.riskStopped) return;
@@ -1319,7 +1272,7 @@ void applyDueActionsBefore(EngineState& engine, std::int64_t tsNs) {
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs) {
   if (engine.netQtyRaw == 0) return true;
   if (engine.netQtyRaw == std::numeric_limits<std::int64_t>::min()) return false;
-  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+  const cxet::composite::BookTicker& top = effectiveBookTicker(engine.venueSnapshot);
   if (top.bid.px.raw <= 0 || top.ask.px.raw <= 0) return false;
 
   trading_core::OrderIntent intent{};
@@ -1341,7 +1294,7 @@ bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t or
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, BacktestLatencyRuntime& latency) {
   if (engine.netQtyRaw == 0) return true;
   if (engine.netQtyRaw == std::numeric_limits<std::int64_t>::min()) return false;
-  const cxet::composite::BookTickerRuntimeV1& top = effectiveBookTicker(engine.venueSnapshot);
+  const cxet::composite::BookTicker& top = effectiveBookTicker(engine.venueSnapshot);
   if (top.bid.px.raw <= 0 || top.ask.px.raw <= 0) return false;
 
   trading_core::OrderIntent intent{};

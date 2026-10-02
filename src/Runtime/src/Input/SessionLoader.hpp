@@ -9,10 +9,11 @@
 
 #include "hft_backtest/Status.hpp"
 #include "hftrec/CorpusContract/EventRows.hpp"
+#include "cxet/Market/Depth.hpp"
 
 namespace hft_backtest::detail {
 
-constexpr std::size_t kSessionTimelineKindCount = 10u;
+constexpr std::size_t kSessionTimelineKindCount = 3u;
 
 struct PriceLevelRow {
   std::int64_t priceE8{0};
@@ -44,67 +45,16 @@ struct BookTickerRow {
   bool freshnessOnly{false};
 };
 
-struct PriceLimitRow {
-  std::int64_t tsNs{0};
-  std::int64_t buyLimitE8{0};
-  std::int64_t sellLimitE8{0};
-  std::uint8_t enabled{0};
-  std::int64_t ingestSeq{0};
-  hftrec::replay::EventArrival arrival{};
-};
-
-struct LiquidationRow {
-  std::int64_t priceE8{0};
-  std::int64_t qtyE8{0};
-  std::int64_t side{0};
-  std::int64_t tsNs{0};
-  std::int64_t avgPriceE8{0};
-  std::int64_t filledQtyE8{0};
-  std::int64_t orderType{0};
-  std::int64_t timeInForce{0};
-  std::int64_t status{0};
-  std::int64_t sourceMode{0};
-  std::int64_t ingestSeq{0};
-  hftrec::replay::EventArrival arrival{};
-};
-
-struct MarkPriceRow {
-  std::int64_t tsNs{0};
-  std::int64_t markPriceE8{0};
-  std::int64_t ingestSeq{0};
-  hftrec::replay::EventArrival arrival{};
-};
-
-struct IndexPriceRow {
-  std::int64_t tsNs{0};
-  std::int64_t indexPriceE8{0};
-  std::int64_t ingestSeq{0};
-  hftrec::replay::EventArrival arrival{};
-};
-
-struct FundingRow {
-  std::int64_t tsNs{0};
-  std::int64_t fundingRateE8{0};
-  std::int64_t fundingTsNs{0};
-  std::int64_t nextFundingTsNs{0};
-  std::int64_t ingestSeq{0};
-  hftrec::replay::EventArrival arrival{};
-};
-
-struct OpenInterestRow {
-  std::int64_t tsNs{0};
-  std::int64_t openInterestE8{0};
-  std::int64_t openInterestValueE8{0};
-  std::int64_t ingestSeq{0};
-  hftrec::replay::EventArrival arrival{};
-};
-
 struct DepthRow {
   std::int64_t tsNs{0};
   std::int64_t ingestSeq{0};
   hftrec::replay::EventArrival arrival{};
   std::vector<PriceLevelRow> levels{};
   bool resetBookBeforeApply{false};
+  // Preserve the immutable binary corpus sequence, without replacing it with
+  // the local ordering coordinate used by legacy text corpora.
+  cxet::market::DepthSequence capturedSequence{};
+  std::uint64_t capturedPublicationSequence{0u};
   // Snapshot plus replay deltas were committed by the parser as one local
   // recovery transaction. The venue-side replay must apply that recovery at
   // its captured application arrival, not reorder its parts by their distinct
@@ -136,24 +86,12 @@ struct InstrumentMetadata {
 struct SessionLoadPlan {
   bool loadTrades{true};
   bool loadBookTickers{true};
-  bool loadPriceLimits{true};
   bool loadDepths{false};
   bool loadCandles{false};
-  bool loadLiquidations{false};
-  bool loadMarkPrices{false};
-  bool loadIndexPrices{false};
-  bool loadFunding{false};
-  bool loadOpenInterest{false};
   bool requireTrades{false};
   bool requireBookTickers{false};
-  bool requirePriceLimits{false};
   bool requireDepths{false};
   bool requireCandles{false};
-  bool requireLiquidations{false};
-  bool requireMarkPrices{false};
-  bool requireIndexPrices{false};
-  bool requireFunding{false};
-  bool requireOpenInterest{false};
 };
 
 struct SessionData {
@@ -164,14 +102,8 @@ struct SessionData {
   std::vector<TradeRow> trades{};
   std::vector<TradeRow> tradeWarmup{};
   std::vector<BookTickerRow> bookTickers{};
-  std::vector<PriceLimitRow> priceLimits{};
   std::vector<DepthRow> depths{};
   std::vector<CandleRow> candles{};
-  std::vector<LiquidationRow> liquidations{};
-  std::vector<MarkPriceRow> markPrices{};
-  std::vector<IndexPriceRow> indexPrices{};
-  std::vector<FundingRow> funding{};
-  std::vector<OpenInterestRow> openInterest{};
   InstrumentMetadata instrument{};
   std::int64_t tradeHistoryWarmupSec{0};
   std::int64_t tradeHistoryRequestedStartNs{0};
