@@ -28,7 +28,7 @@ trading-core and hft-recorder session corpora.
 
 ## Build/test restraint
 
-- Do not run builds/tests unless the current user message explicitly asks for the exact verification command.
+- Do not run builds/tests unless explicit active-task authorization covers the exact verification command.
 - If verification is needed, state the exact command for the user to run manually.
 
 ## Subagents and planning
