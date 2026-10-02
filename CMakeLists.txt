@@ -107,27 +107,52 @@ add_library(hft_backtest_core STATIC
   src/Runtime/src/Accounting/BacktestMetrics.cpp
   src/Runtime/src/Accounting/BacktestResultAggregation.cpp
   src/Runtime/src/Config/BacktestRunConfig.cpp
-  src/Runtime/src/Config/BacktestStrategyConfig.cpp
+  src/Runtime/src/Config/Strategy/BacktestStrategyConfig.cpp
+  src/Runtime/src/Config/Strategy/BacktestStrategyRateLimits.cpp
+  src/Runtime/src/Config/Strategy/BacktestStrategyValidation.cpp
   src/Runtime/src/Config/StrategyMetadata.cpp
   "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}"
-  src/Runtime/src/BacktestCommon.cpp
-  src/Runtime/src/BacktestEngineSetup.cpp
-  src/Runtime/src/BacktestPrepared.cpp
-  src/Runtime/src/BacktestReplayClock.cpp
-  src/Runtime/src/BacktestTimeline.cpp
+  src/Runtime/src/Run/BacktestCommon.cpp
+  src/Runtime/src/Engine/BacktestEngineSetup.cpp
+  src/Runtime/src/Preparation/BacktestPrepared.cpp
+  src/Runtime/src/Replay/BacktestReplayClock.cpp
+  src/Runtime/src/Replay/BacktestTimeline.cpp
   src/Runtime/src/Execution/BacktestExecution.cpp
-  src/Runtime/src/Execution/BacktestExecutionDepth.cpp
-  src/Runtime/src/Execution/BacktestFillModel.cpp
-  src/Runtime/src/Execution/BacktestLatency.cpp
-  src/Runtime/src/Input/BinaryCorpusLoader.cpp
-  src/Runtime/src/Input/SessionLoader.cpp
+  src/Runtime/src/Execution/Model/BacktestExecutionDepth.cpp
+  src/Runtime/src/Execution/Model/BacktestFillModel.cpp
+  src/Runtime/src/Execution/Model/BacktestLatency.cpp
+  src/Runtime/src/Input/Binary/BinaryCorpusLoader.cpp
+  src/Runtime/src/Input/Binary/BinaryCorpusDepth.cpp
+  src/Runtime/src/Input/Session/SessionLoader.cpp
+  src/Runtime/src/Input/Session/SessionChannels.cpp
+  src/Runtime/src/Input/Session/SessionManifestValidation.cpp
   src/Runtime/src/Results/BacktestResultWriter.cpp
-  src/Runtime/src/Backtest.cpp
-  src/Runtime/src/Strategy/BacktestStrategyIntentLowering.cpp
-  src/Runtime/src/Strategy/BacktestStrategyInputFreshness.cpp
+  src/Runtime/src/Run/Backtest.cpp
+    src/Runtime/src/Strategy/Inputs/BacktestStrategySnapshots.cpp
+    src/Runtime/src/Strategy/Cycle/BacktestStrategySingleCycle.cpp
+    src/Runtime/src/Strategy/Cycle/BacktestStrategyPortfolioCycle.cpp
+    src/Runtime/src/Strategy/Execution/BacktestStrategySettlement.cpp
+    src/Runtime/src/Strategy/BacktestStrategyAccount.cpp
+    src/Runtime/src/Strategy/Cycle/BacktestStrategyCycleSupport.cpp
+    src/Runtime/src/Execution/Lifecycle/BacktestExecutionDelivery.cpp
+    src/Runtime/src/Execution/Lifecycle/BacktestExecutionActivation.cpp
+    src/Runtime/src/Execution/Lifecycle/BacktestExecutionPending.cpp
+    src/Runtime/src/Execution/Lifecycle/BacktestExecutionFinalization.cpp
+    src/Runtime/src/Results/BacktestResultDiagnostics.cpp
+    src/Runtime/src/Results/BacktestResultOrderLifetimes.cpp
+    src/Runtime/src/Results/BacktestResultStreams.cpp
+    src/Runtime/src/Results/BacktestResultManifest.cpp
+    src/Runtime/src/Run/BacktestPreparation.cpp
+    src/Runtime/src/Run/BacktestReplay.cpp
+    src/Runtime/src/Run/BacktestFinalization.cpp
+    src/Runtime/src/Run/BacktestArtifacts.cpp
+    src/Runtime/src/Run/BacktestReplayRisk.cpp
+    src/Runtime/src/Replay/BacktestReplaySupport.cpp
+  src/Runtime/src/Strategy/Execution/BacktestStrategyIntentLowering.cpp
+  src/Runtime/src/Strategy/Inputs/BacktestStrategyInputFreshness.cpp
   src/Runtime/src/Strategy/BacktestStrategyRuntime.cpp
-  src/Runtime/src/Strategy/BacktestStrategyTrace.cpp
-  src/Runtime/src/Strategy/BacktestStrategyWarmup.cpp
+  src/Runtime/src/Strategy/Diagnostics/BacktestStrategyTrace.cpp
+  src/Runtime/src/Strategy/Inputs/BacktestStrategyWarmup.cpp
   src/Runtime/src/Sweep/BacktestSweep.cpp
   src/Runtime/src/Sweep/BacktestSweepSearch.cpp
   src/Runtime/src/Sweep/BacktestSweepWriter.cpp

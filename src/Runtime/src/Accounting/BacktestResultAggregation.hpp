@@ -2,8 +2,8 @@
 
 #include "hft_backtest/Backtest.hpp"
 
-#include "../BacktestEngine.hpp"
-#include "../Input/SessionLoader.hpp"
+#include "../Engine/BacktestEngine.hpp"
+#include "../Input/Session/SessionLoader.hpp"
 
 #include <cstdint>
 #include <vector>

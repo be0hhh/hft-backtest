@@ -1,6 +1,6 @@
 #include "BacktestSweepInternal.hpp"
 
-#include "../BacktestEngine.hpp"
+#include "../Engine/BacktestEngine.hpp"
 
 #include <cstdint>
 #include <filesystem>

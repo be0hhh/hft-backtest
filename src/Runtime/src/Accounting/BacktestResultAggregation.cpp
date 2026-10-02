@@ -2,7 +2,7 @@
 #include "BacktestResultAggregation.hpp"
 
 #include "BacktestMetrics.hpp"
-#include "../Execution/BacktestExecutionDepth.hpp"
+#include "../Execution/Model/BacktestExecutionDepth.hpp"
 
 #include <algorithm>
 #include <cstddef>

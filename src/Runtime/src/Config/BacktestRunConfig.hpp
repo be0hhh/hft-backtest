@@ -2,9 +2,9 @@
 
 #include "hft_backtest/Backtest.hpp"
 
-#include "../Execution/BacktestLatency.hpp"
-#include "../BacktestPrepared.hpp"
-#include "../Input/SessionLoader.hpp"
+#include "../Execution/Model/BacktestLatency.hpp"
+#include "../Preparation/BacktestPrepared.hpp"
+#include "../Input/Session/SessionLoader.hpp"
 
 #include "trading_core/Strategy/Descriptor/StrategyDescriptor.hpp"
 

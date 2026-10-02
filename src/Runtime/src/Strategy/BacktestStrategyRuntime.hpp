@@ -2,10 +2,10 @@
 
 #include "hft_backtest/Backtest.hpp"
 
-#include "../Config/BacktestStrategyConfig.hpp"
-#include "../BacktestEngine.hpp"
-#include "../Input/SessionLoader.hpp"
-#include "BacktestStrategyInputFreshness.hpp"
+#include "../Config/Strategy/BacktestStrategyConfig.hpp"
+#include "../Engine/BacktestEngine.hpp"
+#include "../Input/Session/SessionLoader.hpp"
+#include "Inputs/BacktestStrategyInputFreshness.hpp"
 
 #include "trading_core/Contracts/Control/ControlState.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
