@@ -34,23 +34,11 @@ void writeDepthSummary(std::ofstream& out, const BacktestDepthExecutionSummary& 
       << q << "mode" << q << ':' << quote(depthModeName(depth.mode)) << ','
       << q << "rows_read" << q << ':' << depth.rowsRead << ','
       << q << "bbo_fallback_fills" << q << ':' << depth.bboFallbackFills << ','
-      << q << "first_bbo_fallback_ts_ns" << q << ':' << depth.firstBboFallbackTsNs << ','
-      << q << "read_ns" << q << ':' << depth.readNs
+      << q << "first_bbo_fallback_ts_ns" << q << ':' << depth.firstBboFallbackTsNs
       << '}';
 }
 
-void writeRunPerformance(std::ofstream& out, const BacktestStageTimings& performance) {
-  const char q = '"';
-  out << '{'
-      << q << "load_ns" << q << ':' << performance.loadNs << ','
-      << q << "timeline_ns" << q << ':' << performance.timelineNs << ','
-      << q << "delivery_ns" << q << ':' << performance.deliveryNs << ','
-      << q << "replay_ns" << q << ':' << performance.replayNs << ','
-      << q << "finalize_ns" << q << ':' << performance.finalizeNs << ','
-      << q << "artifact_write_ns" << q << ':' << performance.artifactWriteNs << ','
-      << q << "total_ns" << q << ':' << performance.totalNs
-      << '}';
-}
+
 
 std::filesystem::path baseSessionPath(const BacktestSweepRequest& request) {
   if (!request.baseRun.corpusPath.empty()) return request.baseRun.corpusPath;
@@ -105,7 +93,6 @@ void writeSweepManifestLegs(std::ofstream& out,
       std::uint64_t fallbackPoints = 0u;
       std::uint64_t rowsRead = 0u;
       std::uint64_t fallbackFills = 0u;
-      std::uint64_t readNs = 0u;
       std::int64_t firstFallbackTsNs = 0;
       for (const BacktestSweepPointResult& aggregatePoint : points) {
         if (i >= aggregatePoint.run.legs.size()) continue;
@@ -113,7 +100,6 @@ void writeSweepManifestLegs(std::ofstream& out,
         if (depth.mode == BacktestDepthExecutionMode::BboFallback) ++fallbackPoints;
         rowsRead += depth.rowsRead;
         fallbackFills += depth.bboFallbackFills;
-        readNs += depth.readNs;
         if (depth.firstBboFallbackTsNs != 0 &&
             (firstFallbackTsNs == 0 || depth.firstBboFallbackTsNs < firstFallbackTsNs)) {
           firstFallbackTsNs = depth.firstBboFallbackTsNs;
@@ -130,8 +116,7 @@ void writeSweepManifestLegs(std::ofstream& out,
           << q << "fallback_points" << q << ": " << fallbackPoints << ", "
           << q << "rows_read_sum" << q << ": " << rowsRead << ", "
           << q << "bbo_fallback_fills_sum" << q << ": " << fallbackFills << ", "
-          << q << "first_bbo_fallback_ts_ns" << q << ": " << firstFallbackTsNs << ", "
-          << q << "read_ns_sum" << q << ": " << readNs << '}'
+          << q << "first_bbo_fallback_ts_ns" << q << ": " << firstFallbackTsNs << '}'
           << '}';
     }
     out << "],\n";
@@ -202,9 +187,7 @@ Status writeSweepRows(const BacktestSweepRequest& request,
     out << q << "fills" << q << ':' << point.run.fills << ',';
     out << q << "risk_stopped" << q << ':' << (point.run.riskStopped ? "true" : "false") << ',';
     out << q << "liquidated" << q << ':' << (point.run.liquidated ? "true" : "false") << ',';
-    out << q << "performance" << q << ':';
-    writeRunPerformance(out, point.run.performance);
-    out << ',' << q << "depth_execution" << q << ':';
+    out << q << "depth_execution" << q << ':';
     writeDepthSummary(out, point.run.depthExecution);
     out << ',';
     writeSweepLegs(out, point.run, false);
@@ -239,9 +222,7 @@ Status writeSweepCurves(const BacktestSweepRequest& request,
     out << q << "fills" << q << ':' << point.run.fills << ',';
     out << q << "risk_stopped" << q << ':' << (point.run.riskStopped ? "true" : "false") << ',';
     out << q << "liquidated" << q << ':' << (point.run.liquidated ? "true" : "false") << ',';
-    out << q << "performance" << q << ':';
-    writeRunPerformance(out, point.run.performance);
-    out << ',' << q << "depth_execution" << q << ':';
+    out << q << "depth_execution" << q << ':';
     writeDepthSummary(out, point.run.depthExecution);
     out << ',';
     out << q << "curve_e8" << q << ":[";
@@ -279,13 +260,6 @@ Status writeSweepManifest(const BacktestSweepRequest& request,
   for (const BacktestSweepPointResult& point : points) {
     if (point.run.depthExecution.mode == BacktestDepthExecutionMode::BboFallback) ++fallbackPoints;
   }
-  out << "  " << q << "performance" << q << ": {"
-      << q << "worker_count" << q << ": " << result.workerCount << ", "
-      << q << "prepare_ns" << q << ": " << result.prepareNs << ", "
-      << q << "points_wall_ns" << q << ": " << result.pointsWallNs << ", "
-      << q << "points_cpu_sum_ns" << q << ": " << result.pointsCpuSumNs << ", "
-      << q << "artifact_write_ns" << q << ": " << result.artifactWriteNs << ", "
-      << q << "total_ns" << q << ": " << result.totalNs << "},\n";
   out << "  " << q << "depth_execution" << q << ": {"
       << q << "fallback_points" << q << ": " << fallbackPoints << "},\n";
   out << "  " << q << "rows" << q << ": {" << q << "path" << q << ": " << q << "sweep_results.jsonl" << q << ", "

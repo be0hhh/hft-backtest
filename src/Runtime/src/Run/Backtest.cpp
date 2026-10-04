@@ -24,7 +24,6 @@
 
 #include <array>
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -42,7 +41,6 @@ using run_detail::BacktestReplayContext;
 using run_detail::BacktestRunContext;
 using run_detail::DeliveryEventRef;
 using run_detail::deliveryEventAt;
-using run_detail::elapsedNs;
 using run_detail::finalizeBacktestRun;
 using run_detail::includeTimelineClock;
 using run_detail::loadBacktestRunSessions;
@@ -68,8 +66,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
                               BacktestProgressCallback progressCallback,
                               void* userData) noexcept {
   BacktestRunResult result{};
-  const auto totalStart = std::chrono::steady_clock::now();
-  BacktestArtifactContext artifacts{result, request, totalStart};
+  BacktestArtifactContext artifacts{result, request};
 
   result.runId = request.runId.empty() ? makeRunId() : request.runId;
   result.requestId = request.requestId.empty() ? result.runId : request.requestId;
@@ -189,7 +186,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   detail::PreparedBacktestInput* preparedInput = binaryCorpus
       ? nullptr
       : detail::activePreparedBacktestInput();
-  const auto loadStart = std::chrono::steady_clock::now();
   const bool usePreparedSessions = preparedInput != nullptr &&
                                    preparedMatches(*preparedInput, request, hasExplicitSessions, loadPlan);
   std::vector<detail::SessionData> loadedSessions{};
@@ -197,7 +193,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   loadBacktestRunSessions(request, binaryCorpus, hasExplicitSessions, usePreparedSessions,
       preparedInput, loadPlan, loadedSessions, sessionsView, result, error);
   if (sessionsView != nullptr) appendSessionWarnings(result, *sessionsView);
-  result.performance.loadNs = elapsedNs(loadStart);
   if (!isOk(result.status)) {
     result.error = error;
     (void)writeEmptyArtifacts(artifacts);
@@ -433,18 +428,14 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   control.shardId = shard.shardId;
 
   std::vector<detail::TimelineEvent> loadedTimeline;
-  const auto timelineStart = std::chrono::steady_clock::now();
   const std::vector<detail::TimelineEvent>* timelineView = nullptr;
   prepareBacktestRunTimeline(usePreparedSessions, preparedInput, request, hasExplicitSessions,
       loadPlan, sessions, session, loadedTimeline, timelineView);
   const std::vector<detail::TimelineEvent>& timeline = *timelineView;
-  result.performance.timelineNs = elapsedNs(timelineStart);
-  const auto deliveryStart = std::chrono::steady_clock::now();
   std::vector<DeliveryEventRef> deliveryRefs{};
   prepareBacktestDeliveryReferences(deliveryRefs, timeline);
   const std::size_t deliveryEventCount = deliveryRefs.size();
 
-  result.performance.deliveryNs = elapsedNs(deliveryStart);
   result.trades = 0;
   result.bookTickers = 0;
   result.depths = 0;
@@ -584,7 +575,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
 
 
 
-  const auto replayStart = std::chrono::steady_clock::now();
   if (!reportReplayProgress(runContext, 0, timeline.size())) {
     result.status = Status::Cancelled;
     result.error = "cancelled";
@@ -635,7 +625,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   };
 
   if (!replayBacktestRun(replayContext)) return result;
-  result.performance.replayNs = elapsedNs(replayStart);
   finalizeBacktestRun(runContext);
   return result;
 }

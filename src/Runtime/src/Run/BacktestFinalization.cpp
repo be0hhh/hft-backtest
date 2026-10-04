@@ -22,7 +22,6 @@
 
 #include <array>
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -55,7 +54,6 @@ void finalizeBacktestRun(BacktestRunContext& context) {
   auto& timeline = context.timeline;
   auto& traderRiskCloseProblem = context.traderRiskCloseProblem;
   auto& legLiquidationProblem = context.legLiquidationProblem;
-  const auto finalizeStart = std::chrono::steady_clock::now();
   const std::int64_t finalTsNs = nextReplayTimestamp(currentReplayTsNs(context));
   if (hasExplicitSessions) {
     if (!legEngines.empty()) {
@@ -100,8 +98,6 @@ void finalizeBacktestRun(BacktestRunContext& context) {
       hasExplicitSessions ? &legEngines : nullptr);
   result.rateLimitRejectedCommands = rateLimitRejectedCommands(
       finalArtifactEngine, hasExplicitSessions ? &legEngines : nullptr);
-  result.performance.finalizeNs = elapsedNs(finalizeStart);
-  markTotalTime(context.artifacts);
   if (legLiquidationProblem) {
     result.status = Status::Ok;
     result.warnings.push_back(result.error.empty() ? std::string{"leg liquidated"} : result.error);

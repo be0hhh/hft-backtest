@@ -22,7 +22,6 @@
 
 #include <array>
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -37,11 +36,7 @@
 
 namespace hft_backtest::run_detail {
 
-void markTotalTime(BacktestArtifactContext& context) noexcept {
-  auto& result = context.result;
-  auto& totalStart = context.totalStart;
-  result.performance.totalNs = elapsedNs(totalStart);
-}
+
 
 void refreshArtifactCounters(BacktestArtifactContext& context, const detail::EngineState& engine) noexcept {
   auto& result = context.result;
@@ -56,7 +51,6 @@ Status writeArtifacts(BacktestArtifactContext& context, const detail::EngineStat
   auto& request = context.request;
 
   refreshArtifactCounters(context, engine);
-  markTotalTime(context);
   if (!request.writeArtifacts) return Status::Ok;
   return detail::writeResult(result, engine);
 }
@@ -81,8 +75,6 @@ Status writeCurrentArtifacts(BacktestRunContext& context) noexcept {
   auto& sessions = context.sessions;
   auto& engine = context.engine;
   auto& legEngines = context.legEngines;
-
-  markTotalTime(context.artifacts);
   if (hasExplicitSessions) {
     const std::int64_t tsNs = currentReplayTsNs(context);
     try {

@@ -66,7 +66,6 @@ BacktestDepthExecutionSummary depthSummary(const detail::EngineState& engine) no
   out.firstBboFallbackTsNs = engine.firstDepthFallbackTsNs;
   if (engine.executionDepthProvider != nullptr) {
     out.rowsRead = engine.executionDepthProvider->rowsRead();
-    out.readNs = engine.executionDepthProvider->readNs();
   }
   return out;
 }
@@ -75,7 +74,6 @@ void addDepthSummary(BacktestDepthExecutionSummary& out,
                      const BacktestDepthExecutionSummary& in) noexcept {
   out.rowsRead += in.rowsRead;
   out.bboFallbackFills += in.bboFallbackFills;
-  out.readNs += in.readNs;
   if (in.firstBboFallbackTsNs > 0 &&
       (out.firstBboFallbackTsNs == 0 || in.firstBboFallbackTsNs < out.firstBboFallbackTsNs)) {
     out.firstBboFallbackTsNs = in.firstBboFallbackTsNs;

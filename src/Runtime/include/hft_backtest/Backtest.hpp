@@ -12,7 +12,7 @@
 
 namespace hft_backtest {
 
-inline constexpr std::uint32_t kBacktestApiVersion = 3u;
+inline constexpr std::uint32_t kBacktestApiVersion = 4u;
 
 extern "C" HFT_BACKTEST_API std::uint32_t hft_backtest_api_version() noexcept;
 
@@ -32,18 +32,9 @@ struct BacktestDepthExecutionSummary {
   std::uint64_t rowsRead{0};
   std::uint64_t bboFallbackFills{0};
   std::int64_t firstBboFallbackTsNs{0};
-  std::uint64_t readNs{0};
 };
 
-struct BacktestStageTimings {
-  std::uint64_t loadNs{0};
-  std::uint64_t timelineNs{0};
-  std::uint64_t deliveryNs{0};
-  std::uint64_t replayNs{0};
-  std::uint64_t finalizeNs{0};
-  std::uint64_t artifactWriteNs{0};
-  std::uint64_t totalNs{0};
-};
+
 
 struct BacktestSessionRequest {
   std::filesystem::path path{};
@@ -252,7 +243,6 @@ struct BacktestRunResult {
   std::vector<std::int64_t> totalPnlCurveE8{};
   std::vector<BacktestLegSummary> legs{};
   BacktestDepthExecutionSummary depthExecution{};
-  BacktestStageTimings performance{};
   BacktestInputCoverage inputCoverage{};
   BacktestLiveProbeSummary liveProbe{};
   BacktestReplayClockEvidence replayClock{};

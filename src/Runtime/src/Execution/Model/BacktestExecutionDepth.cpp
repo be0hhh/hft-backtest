@@ -4,7 +4,6 @@
 #include "hftrec/CorpusContract/JsonLineParser.hpp"
 #include "hftrec/CorpusContract/SessionManifest.hpp"
 
-#include <chrono>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -308,7 +307,6 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
   symbol_ = symbol;
   config_ = config;
   rowsRead_ = 0;
-  readNs_ = 0;
   available_ = false;
   failed_ = false;
   failureReason_ = "";
@@ -574,12 +572,6 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
   if (impl_->eof ||
       (impl_->pendingValid && impl_->pending.scheduleTsNs > tsNs))
     return ready();
-  const auto readStart = std::chrono::steady_clock::now();
-  auto finishRead = [&]() noexcept {
-    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now() - readStart).count();
-    if (elapsed > 0) readNs_ += static_cast<std::uint64_t>(elapsed);
-  };
   while (!impl_->eof) {
     if (impl_->pendingValid) {
       if (impl_->pending.scheduleTsNs > tsNs) break;
@@ -593,7 +585,6 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
         failed_ = true;
         failureReason_ = "apply_failed";
         if (cache_) cache_->markFailed(failureReason_);
-        finishRead();
         return false;
       }
       impl_->pending.clear();
@@ -614,7 +605,6 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
       failed_ = true;
       failureReason_ = "parse_failed";
       if (cache_) cache_->markFailed(failureReason_);
-      finishRead();
       return false;
     }
     if (impl_->scratch.scheduleTsNs > tsNs) {
@@ -625,7 +615,6 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
         failed_ = true;
         failureReason_ = "allocation_failed";
         if (cache_) cache_->markFailed(failureReason_);
-        finishRead();
         return false;
       }
       impl_->pendingValid = true;
@@ -640,7 +629,6 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
       failed_ = true;
       failureReason_ = "apply_failed";
       if (cache_) cache_->markFailed(failureReason_);
-      finishRead();
       return false;
     }
     ++rowsRead_;
@@ -648,7 +636,6 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
     if (cache_)
       cache_->publish(*impl_, impl_->scratch.scheduleTsNs, book_);
   }
-  finishRead();
   return ready();
 }
 

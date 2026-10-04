@@ -38,7 +38,6 @@ class ExecutionDepthProvider {
   [[nodiscard]] const trading_core::LocalOrderBookState& book() const noexcept { return book_; }
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::uint64_t rowsRead() const noexcept { return rowsRead_; }
-  [[nodiscard]] std::uint64_t readNs() const noexcept { return readNs_; }
   [[nodiscard]] bool failed() const noexcept { return failed_; }
   [[nodiscard]] const char* failureReason() const noexcept { return failureReason_; }
 
@@ -48,7 +47,6 @@ class ExecutionDepthProvider {
   Symbol symbol_{};
   trading_core::LocalOrderBookConfig config_{};
   std::uint64_t rowsRead_{0};
-  std::uint64_t readNs_{0};
   bool available_{false};
   bool failed_{false};
   const char* failureReason_{""};

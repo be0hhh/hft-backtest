@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -40,7 +39,6 @@ using result_writer::writeStrategySpread;
 Status writeResult(BacktestRunResult& result,
                    const EngineState& engine,
                    const std::vector<EngineState>* legEngines) noexcept {
-  const auto writeStart = std::chrono::steady_clock::now();
   std::error_code ec;
   std::filesystem::create_directories(result.resultPath, ec);
   if (ec) return Status::IoError;
@@ -60,12 +58,6 @@ Status writeResult(BacktestRunResult& result,
   if (!writeStrategySpread(result.resultPath / "strategy_spread.jsonl", engine)) return Status::IoError;
   if (!writeExecutionQuality(result.resultPath / "execution_quality.jsonl", engine)) return Status::IoError;
   if (!writeRateLimitUsage(result.resultPath / "rate_limit_usage.jsonl", engine)) return Status::IoError;
-  const auto writeElapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::steady_clock::now() - writeStart).count();
-  if (writeElapsed > 0) {
-    result.performance.artifactWriteNs += static_cast<std::uint64_t>(writeElapsed);
-    result.performance.totalNs += static_cast<std::uint64_t>(writeElapsed);
-  }
   if (!writeManifest(result.resultPath / "manifest.json", result, engine, legEngines, orderLifetimes.size())) return Status::IoError;
   return Status::Ok;
 }

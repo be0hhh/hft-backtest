@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -72,8 +71,7 @@ void writeDepthExecutionObject(std::ostream& out,
       << q << "mode" << q << ": " << quote(depthExecutionModeName(depth.mode)) << ", "
       << q << "rows_read" << q << ": " << depth.rowsRead << ", "
       << q << "bbo_fallback_fills" << q << ": " << depth.bboFallbackFills << ", "
-      << q << "first_bbo_fallback_ts_ns" << q << ": " << depth.firstBboFallbackTsNs << ", "
-      << q << "read_ns" << q << ": " << depth.readNs
+      << q << "first_bbo_fallback_ts_ns" << q << ": " << depth.firstBboFallbackTsNs
       << '}';
 }
 
@@ -263,15 +261,6 @@ bool writeManifest(const std::filesystem::path& path,
   out << "  " << q << "depth_execution" << q << ": ";
   writeDepthExecutionObject(out, result.depthExecution);
   out << ",\n";
-  out << "  " << q << "performance" << q << ": {"
-      << q << "load_ns" << q << ": " << result.performance.loadNs << ", "
-      << q << "timeline_ns" << q << ": " << result.performance.timelineNs << ", "
-      << q << "delivery_ns" << q << ": " << result.performance.deliveryNs << ", "
-      << q << "replay_ns" << q << ": " << result.performance.replayNs << ", "
-      << q << "finalize_ns" << q << ": " << result.performance.finalizeNs << ", "
-      << q << "artifact_write_ns" << q << ": " << result.performance.artifactWriteNs << ", "
-      << q << "total_ns" << q << ": " << result.performance.totalNs
-      << "},\n";
   if (result.liveProbe.configured) {
     out << "  " << q << "live_probe" << q << ": {"
         << q << "configured" << q << ": true"

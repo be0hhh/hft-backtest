@@ -17,11 +17,7 @@
 namespace hft_backtest {
 namespace {
 
-std::uint64_t elapsedNs(std::chrono::steady_clock::time_point start) noexcept {
-  const auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::steady_clock::now() - start).count();
-  return value > 0 ? static_cast<std::uint64_t>(value) : 0u;
-}
+
 
 struct SweepCancelContext {
   std::atomic_bool* cancelled{nullptr};
@@ -118,7 +114,6 @@ BacktestSweepResult runBacktestSweep(const BacktestSweepRequest& request,
                                      BacktestProgressCallback progressCallback,
                                      void* userData) noexcept {
   BacktestSweepResult result{};
-  const auto totalStart = std::chrono::steady_clock::now();
   result.sweepId = request.sweepId.empty() ? makeSweepId() : request.sweepId;
   result.resultPath = detail::sweepResultPathFor(request, result.sweepId);
   result.rowsPath = result.resultPath / "sweep_results.jsonl";
@@ -145,7 +140,6 @@ BacktestSweepResult runBacktestSweep(const BacktestSweepRequest& request,
     result.error = "sweep search plan is empty";
     return result;
   }
-  const auto prepareStart = std::chrono::steady_clock::now();
   detail::PreparedBacktestInput preparedInput{};
   if (!reportSweepProgress(0u, plan.size(), progressCallback, userData)) {
     result.status = Status::Cancelled;
@@ -171,14 +165,12 @@ BacktestSweepResult runBacktestSweep(const BacktestSweepRequest& request,
     }
     pointConfigPaths[index] = configPath;
   }
-  result.prepareNs = elapsedNs(prepareStart);
 
   std::vector<detail::BacktestSweepPointResult> pointResults(plan.size());
   std::vector<std::uint8_t> completed(plan.size(), 0u);
   std::atomic_bool cancelled{false};
   std::atomic<std::size_t> nextIndex{1u};
   std::atomic<std::uint64_t> completedCount{0u};
-  std::atomic<std::uint64_t> pointCpuSumNs{0u};
   std::mutex progressMutex{};
   SweepCancelContext cancelContext{&cancelled};
 
@@ -212,7 +204,6 @@ BacktestSweepResult runBacktestSweep(const BacktestSweepRequest& request,
     }
     detail::PreparedBacktestScope preparedScope(&preparedInput);
     BacktestRunResult runResult = runBacktest(run, sweepRunCancelProgress, &cancelContext);
-    pointCpuSumNs.fetch_add(runResult.performance.totalNs, std::memory_order_relaxed);
     pointResults[index].point = point;
     pointResults[index].run = std::move(runResult);
     completed[index] = 1u;
@@ -223,9 +214,7 @@ BacktestSweepResult runBacktestSweep(const BacktestSweepRequest& request,
     }
   };
 
-  const auto pointsStart = std::chrono::steady_clock::now();
   executePoint(0u);
-  result.prepareNs += pointResults[0].run.performance.loadNs + pointResults[0].run.performance.timelineNs;
 
   const unsigned hardware = std::thread::hardware_concurrency();
   const std::size_t cpuWorkers = std::max<std::size_t>(1u, hardware == 0u ? 1u : hardware / 2u);
@@ -245,8 +234,6 @@ BacktestSweepResult runBacktestSweep(const BacktestSweepRequest& request,
     }
   }
   for (std::thread& worker : workers) worker.join();
-  result.pointsWallNs = elapsedNs(pointsStart);
-  result.pointsCpuSumNs = pointCpuSumNs.load(std::memory_order_relaxed);
 
   std::vector<detail::BacktestSweepPointResult> points{};
   points.reserve(static_cast<std::size_t>(completedCount.load(std::memory_order_relaxed)));
@@ -261,11 +248,8 @@ BacktestSweepResult runBacktestSweep(const BacktestSweepRequest& request,
 
   if (result.status == Status::Unknown) result.status = Status::Ok;
   result.zonesFound = 0u;
-  const auto artifactStart = std::chrono::steady_clock::now();
   const Status rowsStatus = detail::writeSweepRows(request, result, points);
   const Status curvesStatus = detail::writeSweepCurves(request, result, points);
-  result.artifactWriteNs = elapsedNs(artifactStart);
-  result.totalNs = elapsedNs(totalStart);
   const Status manifestStatus = detail::writeSweepManifest(request, result, points);
   if (!isOk(rowsStatus) || !isOk(curvesStatus) || !isOk(manifestStatus)) {
     result.status = Status::IoError;

@@ -6,7 +6,6 @@
 #include "trading_core/Execution/PortfolioRisk.hpp"
 
 #include <array>
-#include <chrono>
 #include <memory>
 #include <vector>
 
@@ -19,7 +18,6 @@ struct DeliveryEventRef {
 struct BacktestArtifactContext {
   BacktestRunResult& result;
   const BacktestRunRequest& request;
-  const std::chrono::steady_clock::time_point& totalStart;
 };
 
 // These contexts borrow the original staged owners in runBacktest.
@@ -68,7 +66,6 @@ struct BacktestReplayContext {
   const std::size_t& replayProgressStep;
 };
 
-void markTotalTime(BacktestArtifactContext& context) noexcept;
 void refreshArtifactCounters(BacktestArtifactContext& context, const detail::EngineState& engine) noexcept;
 Status writeArtifacts(BacktestArtifactContext& context, const detail::EngineState& engine) noexcept;
 Status writeEmptyArtifacts(BacktestArtifactContext& context) noexcept;

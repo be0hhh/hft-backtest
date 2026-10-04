@@ -24,7 +24,6 @@
 
 #include <array>
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -73,11 +72,7 @@ void seedLoadedLegSummaries(BacktestRunResult& result,
                             const BacktestRunRequest& request,
                             const std::vector<detail::SessionData>& sessions) noexcept;
 
-inline std::uint64_t elapsedNs(std::chrono::steady_clock::time_point start) noexcept {
-  const auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::steady_clock::now() - start).count();
-  return value > 0 ? static_cast<std::uint64_t>(value) : 0u;
-}
+
 
 inline void prefetchRead(const void* ptr) noexcept {
 #if defined(__GNUC__) || defined(__clang__)
