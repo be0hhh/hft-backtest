@@ -71,7 +71,7 @@ bool seedTradeWarmupFromSession(const trading_core::StrategyDescriptor& descript
 
 #include "../Internal/BacktestStrategyRuntimeHelpers.hpp"
 #include "../Execution/BacktestStrategyIntentLowering.hpp"
-#include "trading_core/Execution/Order/OrderPathWarmup.hpp"
+#include "trading_core/Strategy/Orders/WarmupIntents.hpp"
 
 namespace hft_backtest::strategy_runtime_detail {
 using strategy_intent_lowering::applyToLegs;

@@ -1,4 +1,5 @@
 #include "Internal/BacktestStrategyConfigHelpers.hpp"
+#include "../../Engine/BacktestQuota.hpp"
 
 namespace hft_backtest::strategy_config {
 
@@ -102,33 +103,31 @@ namespace hft_backtest::strategy_config {
 
 [[nodiscard]] bool parseRateLimitWindowMode(
     const std::string& value,
-    trading_core::RateLimitWindowMode& out) {
+    trading_core::execution::QuotaWindow& out) {
   const std::string normalized = lower(value);
   if (normalized == "fixed") {
-    out = trading_core::RateLimitWindowMode::Fixed;
+    out = trading_core::execution::QuotaWindow::Fixed;
     return true;
   }
-  if (normalized == "sliding" ||
-      normalized == "sliding_from_first_use" ||
-      normalized == "sliding-from-first-use") {
-    out = trading_core::RateLimitWindowMode::SlidingFromFirstUse;
+  if (normalized == "sliding") {
+    out = trading_core::execution::QuotaWindow::Sliding;
     return true;
   }
   return false;
 }
 
-[[nodiscard]] trading_core::RateLimitBucketConfig* upsertRateLimitBucket(
+[[nodiscard]] BacktestQuotaBucketConfig* upsertRateLimitBucket(
     BacktestStrategyVenueConfig& venue,
     trading_core::RateLimitBucketKind kind,
     std::uint8_t configSlot) {
-  for (trading_core::RateLimitBucketConfig& bucket : venue.rateLimitBuckets) {
+  for (BacktestQuotaBucketConfig& bucket : venue.rateLimitBuckets) {
     if (bucket.kind == kind && bucket.configSlot == configSlot) return &bucket;
   }
-  if (venue.rateLimitBuckets.size() >= trading_core::kMaxRateLimitBuckets) {
+  if (venue.rateLimitBuckets.size() >= trading_core::kMaxStrategyRateLimitViews) {
     return nullptr;
   }
-  venue.rateLimitBuckets.push_back(trading_core::RateLimitBucketConfig{});
-  trading_core::RateLimitBucketConfig& out = venue.rateLimitBuckets.back();
+  venue.rateLimitBuckets.push_back(BacktestQuotaBucketConfig{});
+  BacktestQuotaBucketConfig& out = venue.rateLimitBuckets.back();
   out.kind = kind;
   out.configSlot = configSlot;
   out.enabled = true;
@@ -217,7 +216,7 @@ namespace hft_backtest::strategy_config {
       if (numeric) {
         unsigned parsedSlot = 0u;
         if (!parseUint(slotText, parsedSlot) ||
-            parsedSlot >= trading_core::kMaxRateLimitBuckets) {
+            parsedSlot >= trading_core::kMaxStrategyRateLimitViews) {
           error = "invalid venue rate-limit bucket slot: " + venue.name;
           return true;
         }
@@ -231,7 +230,7 @@ namespace hft_backtest::strategy_config {
       error = "invalid venue rate-limit bucket kind: " + venue.name;
       return true;
     }
-    trading_core::RateLimitBucketConfig* bucket =
+    BacktestQuotaBucketConfig* bucket =
         upsertRateLimitBucket(venue, kind, configSlot);
     if (!bucket) {
       error = "too many venue rate-limit buckets: " + venue.name;
@@ -310,64 +309,19 @@ namespace hft_backtest::strategy_config {
 [[nodiscard]] bool resolveVenueRateLimitPolicy(
     BacktestStrategyVenueConfig& venue,
     std::string& error) noexcept {
-  trading_core::RateLimitPreset preset =
-      trading_core::defaultExchangeRateLimitPreset(venue.exchange, venue.market);
-  const bool hasPolicyInput = !preset.empty() ||
-      !venue.rateLimitBuckets.empty() || !venue.rateLimitActions.empty();
+  const bool hasPolicyInput = !venue.rateLimitBuckets.empty() || !venue.rateLimitActions.empty();
   if (!venue.hasRateLimitsEnabled && !hasPolicyInput) {
     venue.rateLimitsEnabled = false;
     return true;
   }
   if (venue.hasRateLimitsEnabled && !venue.rateLimitsEnabled) return true;
-
-  for (const trading_core::RateLimitBucketConfig& bucket :
-       venue.rateLimitBuckets) {
-    if (!trading_core::upsertRateLimitBucket(preset, bucket)) {
-      error = "invalid venue rate-limit bucket policy: " + venue.name;
-      return false;
-    }
-  }
-  for (const trading_core::RateLimitActionConfig& action :
-       venue.rateLimitActions) {
-    if (!trading_core::upsertRateLimitAction(preset, action)) {
-      error = "invalid venue rate-limit action policy: " + venue.name;
-      return false;
-    }
-  }
-  if (!trading_core::addDefaultRateLimitActions(preset) ||
-      preset.bucketCount == 0u || preset.actionCount == 0u) {
-    error =
-        "rate_limits_enabled requires a valid preset or explicit buckets/actions: " +
-        venue.name;
+  BacktestRateLimitSchedule schedule{};
+  schedule.buckets = venue.rateLimitBuckets;
+  schedule.actions = venue.rateLimitActions;
+  detail::BacktestQuota authority;
+  if (!authority.configure(schedule, error)) {
+    error += ": " + venue.name;
     return false;
-  }
-  for (std::uint8_t i = 0u; i < preset.bucketCount; ++i) {
-    const trading_core::RateLimitBucketConfig& bucket = preset.buckets[i];
-    if (!bucket.enabled ||
-        bucket.kind == trading_core::RateLimitBucketKind::Unknown ||
-        bucket.limit <= 0 || bucket.intervalNs == 0u) {
-      error = "invalid venue rate-limit bucket policy: " + venue.name;
-      return false;
-    }
-  }
-  for (std::uint8_t i = 0u; i < preset.actionCount; ++i) {
-    const trading_core::RateLimitActionConfig& action = preset.actions[i];
-    if (!action.enabled ||
-        action.action == trading_core::RateLimitActionKind::Unknown ||
-        action.costCount == 0u || action.costCount > action.costs.size()) {
-      error = "invalid venue rate-limit action policy: " + venue.name;
-      return false;
-    }
-    for (std::uint8_t costIndex = 0u; costIndex < action.costCount;
-         ++costIndex) {
-      const trading_core::RateLimitCost& cost = action.costs[costIndex];
-      if (cost.bucket == trading_core::RateLimitBucketKind::Unknown ||
-          cost.cost <= 0 ||
-          !trading_core::rateLimitPresetHasBucket(preset, cost.bucket)) {
-        error = "rate-limit action references missing bucket: " + venue.name;
-        return false;
-      }
-    }
   }
   venue.rateLimitsEnabled = true;
   return true;

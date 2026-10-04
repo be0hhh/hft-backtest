@@ -3,7 +3,7 @@
 #include "../../Engine/BacktestEngine.hpp"
 #include "../../Preparation/BacktestPrepared.hpp"
 #include "../../Strategy/BacktestStrategyRuntime.hpp"
-#include "trading_core/Execution/PortfolioRisk.hpp"
+#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
 
 #include <array>
 #include <memory>

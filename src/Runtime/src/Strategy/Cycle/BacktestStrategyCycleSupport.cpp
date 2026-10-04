@@ -6,7 +6,7 @@
 #include "../Diagnostics/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
-#include "trading_core/Execution/Order/OrderPathWarmup.hpp"
+#include "trading_core/Strategy/Orders/WarmupIntents.hpp"
 #include "trading_core/Strategy/StrategyInputFreshness.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 

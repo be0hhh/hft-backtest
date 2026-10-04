@@ -89,7 +89,7 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
 cxet::composite::UserDataEvent makeRejectedOrderEvent(EngineState& engine,
                                                       const OpenOrder& order,
                                                       std::int64_t tsNs,
-                                                      canon::OrderProblem problem = canon::OrderProblem::None) noexcept {
+                                                      canon::OrderProblem problem) noexcept {
   cxet::composite::UserDataEvent event{};
   event.eventId.raw = ++engine.userEventSequence;
   event.exchangeId = engine.exchange;
@@ -217,9 +217,9 @@ void recordRateLimitReject(EngineState& engine, std::uint8_t commandKind, std::i
   if (tsNs > engine.lastRateLimitRejectTsNs) engine.lastRateLimitRejectTsNs = tsNs;
 }
 
-std::int64_t rateLimitCooldownTsNs(const trading_core::RateLimitDecision& decision,
+std::int64_t rateLimitCooldownTsNs(const trading_core::execution::PermitDecision& decision,
                                    std::int64_t tsNs) noexcept {
-  const std::uint64_t raw = decision.resetMono.raw;
+  const std::uint64_t raw = decision.retryAt;
   std::int64_t out = tsNs < std::numeric_limits<std::int64_t>::max()
       ? tsNs + 1
       : std::numeric_limits<std::int64_t>::max();
@@ -231,7 +231,7 @@ std::int64_t rateLimitCooldownTsNs(const trading_core::RateLimitDecision& decisi
 }
 
 bool beginRateLimitCooldown(EngineState& engine,
-                            const trading_core::RateLimitDecision& decision,
+                            const trading_core::execution::PermitDecision& decision,
                             std::int64_t tsNs) noexcept {
   const std::int64_t cooldownTs = rateLimitCooldownTsNs(decision, tsNs);
   const bool notify = engine.rateLimitProblemUntilTsNs <= tsNs;
@@ -274,9 +274,9 @@ using execution_detail::sameRateLimitUsagePoint;
 using execution_detail::timeNsFromI64Local;
 
 void appendRateLimitUsageSnapshot(EngineState& engine, std::int64_t tsNs) {
-  if (!engine.rateLimits.configured()) return;
+  if (!engine.quotas.configured()) return;
   const trading_core::StrategyRateLimitBook book =
-      engine.rateLimits.snapshotBook(trading_core::kDefaultExecutionRouteHandle,
+      engine.quotas.observationBook(trading_core::kDefaultExecutionRouteHandle,
                                      engine.exchange,
                                      engine.market,
                                      1u,

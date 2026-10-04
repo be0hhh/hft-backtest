@@ -106,9 +106,9 @@ bool submitCancelIntent(EngineState& engine,
     engine.orders[recordIndex].status = kRecordStatusMissing;
     return false;
   }
-  const trading_core::RateLimitDecision rateLimitDecision =
-      engine.rateLimits.consumeDecision(trading_core::RateLimitActionKind::CancelOrder, timeNsFromI64Local(tsNs));
-  if (!rateLimitDecision.allowed) {
+  const trading_core::execution::PermitDecision rateLimitDecision =
+      engine.quotas.admit(trading_core::RateLimitActionKind::CancelOrder, timeNsFromI64Local(tsNs));
+  if (!rateLimitDecision.ok()) {
     recordRateLimitReject(engine, 3u, tsNs);
     const bool notify = beginRateLimitCooldown(engine, rateLimitDecision, tsNs);
     appendRateLimitUsageSnapshot(engine, tsNs);
@@ -218,9 +218,15 @@ bool submitCancelIntent(EngineState& engine,
     engine.orders[recordIndex].status = kRecordStatusRejected;
     return false;
   }
-  const trading_core::RateLimitDecision rateLimitDecision =
-      engine.rateLimits.consumeDecision(trading_core::rateLimitActionForOrderIntent(intent), timeNsFromI64Local(tsNs));
-  if (!rateLimitDecision.allowed) {
+  const trading_core::execution::PermitDecision rateLimitDecision =
+      engine.quotas.admit((reduceOnly
+          ? (intent.orderType == canon::OrderType::Limit
+              ? trading_core::RateLimitActionKind::ReduceOnlyLimitOrder
+              : trading_core::RateLimitActionKind::ReduceOnlyMarketOrder)
+          : (intent.orderType == canon::OrderType::Limit
+              ? trading_core::RateLimitActionKind::LimitOrder
+              : trading_core::RateLimitActionKind::MarketOrder)), timeNsFromI64Local(tsNs));
+  if (!rateLimitDecision.ok()) {
     recordRateLimitReject(engine, 1u, tsNs);
     const bool notify = beginRateLimitCooldown(engine, rateLimitDecision, tsNs);
     appendRateLimitUsageSnapshot(engine, tsNs);

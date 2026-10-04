@@ -3,7 +3,7 @@
 
 #include <algorithm>
 
-#include "trading_core/Algorithm/Math/PriceQuantity/NotionalQty.hpp"
+#include "trading_core/Needed/NotionalQty.hpp"
 
 namespace hft_backtest::detail {
 namespace {

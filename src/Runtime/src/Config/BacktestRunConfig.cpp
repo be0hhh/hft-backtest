@@ -2,8 +2,7 @@
 #include "BacktestRunConfig.hpp"
 
 #include "trading_core/Algorithm/Fees/FeePresets.hpp"
-#include "trading_core/Algorithm/Math/PriceQuantity/NotionalQty.hpp"
-#include "trading_core/Algorithm/RateLimit/RateLimitPresets.hpp"
+#include "trading_core/Needed/NotionalQty.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
 #include <chrono>
@@ -13,30 +12,14 @@
 namespace hft_backtest {
 namespace {
 
-BacktestRateLimitSchedule scheduleFromPreset(ExchangeId exchange,
-                                             canon::MarketType market,
-                                             const std::string& exchangeText,
-                                             const std::string& marketText) {
-  BacktestRateLimitSchedule out{};
-  out.exchange = exchangeText;
-  out.market = marketText;
-  trading_core::RateLimitPreset preset = trading_core::defaultExchangeRateLimitPreset(exchange, market);
-  (void)trading_core::addDefaultRateLimitActions(preset);
-  out.buckets.reserve(preset.bucketCount);
-  out.actions.reserve(preset.actionCount);
-  for (std::uint8_t i = 0u; i < preset.bucketCount; ++i) out.buckets.push_back(preset.buckets[i]);
-  for (std::uint8_t i = 0u; i < preset.actionCount; ++i) out.actions.push_back(preset.actions[i]);
-  return out;
-}
-
 void overlayRateLimitSchedule(BacktestRateLimitSchedule& base,
                               const BacktestRateLimitSchedule& overlay) {
-  for (const trading_core::RateLimitBucketConfig& bucket : overlay.buckets) {
+  base.enabled = overlay.enabled;
+  for (const BacktestQuotaBucketConfig& bucket : overlay.buckets) {
     bool replaced = false;
-    for (trading_core::RateLimitBucketConfig& existing : base.buckets) {
+    for (BacktestQuotaBucketConfig& existing : base.buckets) {
       if (existing.kind != bucket.kind ||
-          existing.intervalNs != bucket.intervalNs ||
-          existing.windowMode != bucket.windowMode) {
+          existing.configSlot != bucket.configSlot) {
         continue;
       }
       existing = bucket;
@@ -208,11 +191,14 @@ BacktestRateLimitSchedule resolveRateLimitSchedule(const BacktestRunRequest& req
   const canon::MarketType market = detail::marketFromText(marketText);
   if (!request.rateLimitsEnabled) {
     BacktestRateLimitSchedule disabled{};
+    disabled.enabled = false;
     disabled.exchange = exchangeText;
     disabled.market = marketText;
     return disabled;
   }
-  BacktestRateLimitSchedule out = scheduleFromPreset(exchange, market, exchangeText, marketText);
+  BacktestRateLimitSchedule out{};
+  out.exchange = exchangeText;
+  out.market = marketText;
   for (const BacktestRateLimitSchedule& schedule : request.rateLimitSchedules) {
     if (detail::exchangeFromText(schedule.exchange).raw != exchange.raw) continue;
     if (detail::marketFromText(schedule.market).raw != market.raw) continue;

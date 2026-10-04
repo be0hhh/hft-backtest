@@ -8,11 +8,12 @@
 #include "hft_backtest/Api.hpp"
 #include "hft_backtest/Status.hpp"
 #include "hft_backtest/StrategyMetadata.hpp"
-#include "trading_core/Algorithm/RateLimit/RateLimit.hpp"
+#include "trading_core/Contracts/State/AccountState/RateLimitView.hpp"
+#include "trading_core/Execution/Permits.hpp"
 
 namespace hft_backtest {
 
-inline constexpr std::uint32_t kBacktestApiVersion = 4u;
+inline constexpr std::uint32_t kBacktestApiVersion = 5u;
 
 extern "C" HFT_BACKTEST_API std::uint32_t hft_backtest_api_version() noexcept;
 
@@ -67,11 +68,24 @@ struct BacktestLatencySchedule {
   BacktestLatencyProfile userData{};
 };
 
+// Replay configuration metadata. Admission is owned by the canonical
+// execution PermitLedger; these labels are also used for strategy observation.
+struct BacktestQuotaBucketConfig {
+  trading_core::RateLimitBucketKind kind{trading_core::RateLimitBucketKind::Unknown};
+  trading_core::RateLimitScopeKind scope{trading_core::RateLimitScopeKind::Account};
+  trading_core::execution::QuotaWindow windowMode{trading_core::execution::QuotaWindow::Fixed};
+  std::uint64_t intervalNs{0};
+  std::int64_t limit{0};
+  std::uint8_t configSlot{0};
+  bool enabled{true};
+};
+
 struct BacktestRateLimitSchedule {
   std::string exchange{};
   std::string market{};
-  std::vector<trading_core::RateLimitBucketConfig> buckets{};
+  std::vector<BacktestQuotaBucketConfig> buckets{};
   std::vector<trading_core::RateLimitActionConfig> actions{};
+  bool enabled{true};
 };
 
 enum class BacktestTradeMode : std::uint8_t {

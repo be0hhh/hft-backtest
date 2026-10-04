@@ -13,6 +13,7 @@ endif()
 foreach(required_target IN ITEMS
     cxet::cxet_lib
     trading_core::algorithm
+    trading_core::execution
     trading_core_needed_math
     trading_core::strategy
     hftrec::corpus_contract
@@ -114,6 +115,7 @@ add_library(hft_backtest_core STATIC
   "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}"
   src/Runtime/src/Run/BacktestCommon.cpp
   src/Runtime/src/Engine/BacktestEngineSetup.cpp
+  src/Runtime/src/Engine/BacktestQuota.cpp
   src/Runtime/src/Preparation/BacktestPrepared.cpp
   src/Runtime/src/Replay/BacktestReplayClock.cpp
   src/Runtime/src/Replay/BacktestTimeline.cpp
@@ -170,8 +172,9 @@ target_link_libraries(hft_backtest_core
   PUBLIC
     cxet::cxet_lib
     trading_core_needed_math
-  PRIVATE
     trading_core::algorithm
+    trading_core::execution
+  PRIVATE
     trading_core::strategy
     hftrec::corpus_contract
     Threads::Threads

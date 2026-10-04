@@ -6,7 +6,7 @@
 #include "../Diagnostics/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
-#include "trading_core/Execution/Order/OrderPathWarmup.hpp"
+#include "trading_core/Strategy/Orders/WarmupIntents.hpp"
 #include "trading_core/Strategy/StrategyInputFreshness.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
@@ -116,7 +116,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
     engine.hasPendingProblem = false;
   }
   if (engine.rateLimitSnapshotRequested || ctx.hasUserEvent || ctx.hasProblemEvent) {
-    ctx.rateLimits = engine.rateLimits.snapshotBook(trading_core::kDefaultExecutionRouteHandle,
+    ctx.rateLimits = engine.quotas.observationBook(trading_core::kDefaultExecutionRouteHandle,
                                                     engine.exchange,
                                                     engine.market,
                                                     1u,

@@ -1,7 +1,6 @@
 #include "Internal/BacktestStrategyConfigHelpers.hpp"
 #include "BacktestStrategyConfig.hpp"
 
-#include "trading_core/Algorithm/RateLimit/RateLimitPresets.hpp"
 
 #include "cxet/Api/Resolve/LocalSymbolValidation.hpp"
 #include "cxet/Canon/CanonLookup.hpp"

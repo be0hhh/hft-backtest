@@ -1,6 +1,7 @@
 #pragma once
 
 #include "hft_backtest/Backtest.hpp"
+#include "BacktestQuota.hpp"
 
 #include "../Execution/Model/BacktestLatency.hpp"
 #include "../Input/Session/SessionLoader.hpp"
@@ -449,7 +450,7 @@ struct EngineState {
   std::vector<cxet::composite::UserDataEvent> userEvents{};
   std::vector<std::int64_t> userEventDeliveryTsNs{};
   BacktestLatencyRuntime latency{};
-  trading_core::RateLimitState rateLimits{};
+  BacktestQuota quotas{};
   std::uint64_t rateLimitRejectedOrders{0};
   std::uint64_t rateLimitRejectedCancels{0};
   std::int64_t firstRateLimitRejectTsNs{0};

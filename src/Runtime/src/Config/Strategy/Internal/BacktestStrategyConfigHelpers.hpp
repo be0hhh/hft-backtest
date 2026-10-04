@@ -2,7 +2,6 @@
 
 #include "../BacktestStrategyConfig.hpp"
 
-#include "trading_core/Algorithm/RateLimit/RateLimitPresets.hpp"
 
 #include "cxet/Api/Resolve/LocalSymbolValidation.hpp"
 #include "cxet/Canon/CanonLookup.hpp"
@@ -69,9 +68,9 @@ namespace hft_backtest::strategy_config {
 
 [[nodiscard]] bool parseRateLimitWindowMode(
     const std::string& value,
-    trading_core::RateLimitWindowMode& out);
+    trading_core::execution::QuotaWindow& out);
 
-[[nodiscard]] trading_core::RateLimitBucketConfig* upsertRateLimitBucket(
+[[nodiscard]] BacktestQuotaBucketConfig* upsertRateLimitBucket(
     BacktestStrategyVenueConfig& venue,
     trading_core::RateLimitBucketKind kind,
     std::uint8_t configSlot);

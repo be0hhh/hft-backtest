@@ -27,10 +27,10 @@ concurrency:
 
 defaults:
   run:
-    shell: /home/gha-runner/github-actions/bin/gha-heavy-shell {0}
+    shell: /opt/cxet-ci/bin/gha-heavy-shell {0}
 
 env:
-  CCACHE_DIR: /home/gha-runner/github-actions/cache/ccache
+  CCACHE_DIR: /tmp/ccache
   CCACHE_MAXSIZE: 15G
   CMAKE_BUILD_PARALLEL_LEVEL: 4
   CTEST_PARALLEL_LEVEL: 4
@@ -50,6 +50,7 @@ jobs:
       cxetcpp_sha: ${{ steps.snapshot.outputs.cxetcpp_sha }}
     steps:
       - name: Require family token
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
         run: |
@@ -57,18 +58,9 @@ jobs:
             echo '::error::CI_FAMILY_READ_TOKEN is required for exact family CI.'
             exit 1
           }
-      - name: Checkout exact family controller
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: be0hhh/CXETCPP
-          ref: ${{ github.event.client_payload.snapshot.cxetcpp || 'main' }}
-          token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          persist-credentials: false
-          clean: false
-          sparse-checkout: |
-            .github/actions
-            tools/Ci
-          path: controller
+      - name: Admit protected installed family controller
+        shell: bash
+        run: /opt/cxet-ci/bin/gha-controller bootstrap
       - name: Resolve immutable revisions for manual runs
         id: manual
         if: github.event_name == 'workflow_dispatch'
@@ -92,10 +84,10 @@ jobs:
           payload = json.loads(os.environ['DISPATCH_PAYLOAD'])
           dispatched = os.environ['GITHUB_EVENT_NAME'] == 'repository_dispatch'
           if dispatched:
-              if not isinstance(payload, dict) or payload.get('schema_version') != 5:
+              if not isinstance(payload, dict) or type(payload.get('schema_version')) is not int or payload.get('schema_version') != 5:
                   raise SystemExit('family-build requires schema_version=5')
               snapshot, mode = payload.get('snapshot'), payload.get('mode')
-              for field in ('trigger_sha',):
+              for field in ('trigger_sha', 'controller_sha'):
                   if not isinstance(payload.get(field), str) or not re.fullmatch(r'[0-9a-f]{40}', payload[field]):
                       raise SystemExit(f'invalid family-build {field}')
               for field in ('trigger_repo', 'dispatch_id', 'snapshot_id'):
@@ -115,9 +107,9 @@ jobs:
           expected = repository_snapshot_id(graph, os.environ['GITHUB_REPOSITORY'], snapshot)
           if dispatched and payload['snapshot_id'] != expected:
               raise SystemExit('family-build snapshot_id mismatch')
-          actual = subprocess.check_output(['git', '-C', 'controller', 'rev-parse', 'HEAD'], text=True).strip()
-          if actual != snapshot['cxetcpp']:
-              raise SystemExit('controller checkout differs from snapshot.cxetcpp')
+          # Legacy field denotes source snapshot identity only, never helper authority.
+          if dispatched and payload['controller_sha'] != snapshot['cxetcpp']:
+              raise SystemExit('source controller_sha differs from snapshot.cxetcpp')
           compact = json.dumps(snapshot, sort_keys=True, separators=(',', ':'))
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write(f'mode={mode}\nsnapshot_id={expected}\nsnapshot_json={compact}\ncxetcpp_sha={snapshot["cxetcpp"]}\n')
@@ -153,11 +145,11 @@ jobs:
       FAMILY_SNAPSHOT_JSON: ${{ needs.snapshot.outputs.snapshot_json }}
       CXET_FAMILY_PROFILE: ${{ fromJSON(needs.snapshot.outputs.snapshot_json)._profile }}
       FAMILY_REPOSITORY_SNAPSHOT_ID: ${{ needs.snapshot.outputs.snapshot_id }}
-      GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
       GHA_PRIORITY: 10
       CXET_BUILD_DIR: ${{ github.workspace }}/source/CXETCPP/build/modes/ci-hft-backtest-portable
     steps:
       - name: Require family token
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
         run: |
@@ -165,18 +157,9 @@ jobs:
             echo '::error::CI_FAMILY_READ_TOKEN is required for exact family CI.'
             exit 1
           }
-      - name: Checkout exact workflow helpers
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: be0hhh/CXETCPP
-          ref: ${{ needs.snapshot.outputs.cxetcpp_sha }}
-          token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          persist-credentials: false
-          clean: false
-          sparse-checkout: |
-            .github/actions
-            tools/Ci
-          path: controller
+      - name: Admit protected installed family controller
+        shell: bash
+        run: /opt/cxet-ci/bin/gha-controller bootstrap
       - name: Checkout and validate exact source inputs independently
         uses: ./controller/.github/actions/checkout-family-source
         with:
@@ -189,22 +172,32 @@ jobs:
         uses: ./controller/.github/actions/setup-toolchain
         with:
           source-root: source/CXETCPP
-          local-cache-root: /home/gha-runner/github-actions/cache/toolchains/wsl-ci-cxetcpp
       - name: Build owner production dependency closure and stage exact product
         working-directory: source/CXETCPP
         run: |
           set -euo pipefail
           bash server/check-openssl-baseline.sh --role build
-          python3 tools/Ci/FamilyCiWorkspace.py source --root "$PWD" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
+          python3 "$GITHUB_WORKSPACE/controller/tools/Ci/FamilyCiWorkspace.py" source --root "$PWD" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
           ./apps/hft-backtest/compile.sh --force portable p -j4
-          python3 tools/Ci/FamilyCiWorkspace.py record --root "$PWD" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$CXET_BUILD_DIR"
-          python3 tools/Ci/FamilyCiWorkspace.py verify --root "$PWD" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$CXET_BUILD_DIR"
-          if [[ "$GITHUB_EVENT_NAME" == repository_dispatch ]]; then
-            python3 tools/Ci/FamilyCiController.py stage-artifact --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --snapshot-id "$FAMILY_REPOSITORY_SNAPSHOT_ID" --artifact-path "$CXET_BUILD_DIR"
-          else
-            echo "Manual build: family staging and status publication are not performed." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          python3 "$GITHUB_WORKSPACE/controller/tools/Ci/FamilyCiWorkspace.py" record --root "$PWD" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$CXET_BUILD_DIR"
+          python3 "$GITHUB_WORKSPACE/controller/tools/Ci/FamilyCiWorkspace.py" verify --root "$PWD" --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON" --build-dir "$CXET_BUILD_DIR"
+      - name: Admit candidate outputs for host consumers
+        id: output_admission
+        if: always()
+        shell: bash
+        run: /opt/cxet-ci/bin/gha-controller admit-outputs
+      - name: Stage exact production artifact
+        if: github.event_name == 'repository_dispatch' && steps.output_admission.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
+        run: >-
+          python3 controller/tools/Ci/FamilyCiController.py stage-artifact
+          --repository "$GITHUB_REPOSITORY" --snapshot-json "$FAMILY_SNAPSHOT_JSON"
+          --snapshot-id "$FAMILY_REPOSITORY_SNAPSHOT_ID" --artifact-path "$CXET_BUILD_DIR"
       - name: Summarize declared local checks
+        if: steps.output_admission.outcome == 'success'
+        shell: bash
         run: |
           echo 'Local tests: undeclared for this owner.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Compilation and artifact staging establish buildable; ready and family closure are separate publications.' >> "$GITHUB_STEP_SUMMARY"
@@ -221,12 +214,12 @@ jobs:
         shell: bash
     timeout-minutes: 20
     env:
-      GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
       SNAPSHOT_JSON: ${{ needs.snapshot.outputs.snapshot_json }}
       SNAPSHOT_ID: ${{ needs.snapshot.outputs.snapshot_id }}
       CI_MODE: ${{ needs.snapshot.outputs.mode }}
     steps:
       - name: Require family token
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
         run: |
@@ -234,18 +227,9 @@ jobs:
             echo '::error::CI_FAMILY_READ_TOKEN is required for exact family CI.'
             exit 1
           }
-      - name: Checkout exact workflow helpers
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: be0hhh/CXETCPP
-          ref: ${{ needs.snapshot.outputs.cxetcpp_sha }}
-          token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          persist-credentials: false
-          clean: false
-          sparse-checkout: |
-            .github/actions
-            tools/Ci
-          path: controller
+      - name: Admit protected installed family controller
+        shell: bash
+        run: /opt/cxet-ci/bin/gha-controller bootstrap
       - name: Checkout and validate exact source inputs independently
         uses: ./controller/.github/actions/checkout-family-source
         with:
@@ -255,6 +239,8 @@ jobs:
           source-root: source/CXETCPP
           snapshot-json: ${{ needs.snapshot.outputs.snapshot_json }}
       - name: publish-buildable
+        env:
+          GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
         run: >-
           python3 controller/tools/Ci/FamilyCiController.py publish-buildable
           --repository "$GITHUB_REPOSITORY" --snapshot-json "$SNAPSHOT_JSON"
@@ -272,12 +258,12 @@ jobs:
         shell: bash
     timeout-minutes: 20
     env:
-      GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
       SNAPSHOT_JSON: ${{ needs.snapshot.outputs.snapshot_json }}
       SNAPSHOT_ID: ${{ needs.snapshot.outputs.snapshot_id }}
       CI_MODE: ${{ needs.snapshot.outputs.mode }}
     steps:
       - name: Require family token
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
         run: |
@@ -285,18 +271,9 @@ jobs:
             echo '::error::CI_FAMILY_READ_TOKEN is required for exact family CI.'
             exit 1
           }
-      - name: Checkout exact workflow helpers
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: be0hhh/CXETCPP
-          ref: ${{ needs.snapshot.outputs.cxetcpp_sha }}
-          token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          persist-credentials: false
-          clean: false
-          sparse-checkout: |
-            .github/actions
-            tools/Ci
-          path: controller
+      - name: Admit protected installed family controller
+        shell: bash
+        run: /opt/cxet-ci/bin/gha-controller bootstrap
       - name: Checkout and validate exact source inputs independently
         uses: ./controller/.github/actions/checkout-family-source
         with:
@@ -306,6 +283,8 @@ jobs:
           source-root: source/CXETCPP
           snapshot-json: ${{ needs.snapshot.outputs.snapshot_json }}
       - name: publish-ready
+        env:
+          GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
         run: >-
           python3 controller/tools/Ci/FamilyCiController.py publish
           --repository "$GITHUB_REPOSITORY" --snapshot-json "$SNAPSHOT_JSON"
@@ -323,12 +302,12 @@ jobs:
         shell: bash
     timeout-minutes: 20
     env:
-      GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
       SNAPSHOT_JSON: ${{ needs.snapshot.outputs.snapshot_json }}
       SNAPSHOT_ID: ${{ needs.snapshot.outputs.snapshot_id }}
       CI_MODE: ${{ needs.snapshot.outputs.mode }}
     steps:
       - name: Require family token
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
         run: |
@@ -336,18 +315,9 @@ jobs:
             echo '::error::CI_FAMILY_READ_TOKEN is required for exact family CI.'
             exit 1
           }
-      - name: Checkout exact workflow helpers
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: be0hhh/CXETCPP
-          ref: ${{ needs.snapshot.outputs.cxetcpp_sha }}
-          token: ${{ secrets.CI_FAMILY_READ_TOKEN }}
-          persist-credentials: false
-          clean: false
-          sparse-checkout: |
-            .github/actions
-            tools/Ci
-          path: controller
+      - name: Admit protected installed family controller
+        shell: bash
+        run: /opt/cxet-ci/bin/gha-controller bootstrap
       - name: Checkout and validate exact source inputs independently
         uses: ./controller/.github/actions/checkout-family-source
         with:
@@ -357,6 +327,8 @@ jobs:
           source-root: source/CXETCPP
           snapshot-json: ${{ needs.snapshot.outputs.snapshot_json }}
       - name: publish-build-failed
+        env:
+          GH_TOKEN: ${{ secrets.CI_FAMILY_READ_TOKEN }}
         run: >-
           python3 controller/tools/Ci/FamilyCiController.py publish-failed
           --repository "$GITHUB_REPOSITORY" --snapshot-json "$SNAPSHOT_JSON"

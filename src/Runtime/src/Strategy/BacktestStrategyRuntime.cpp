@@ -6,7 +6,7 @@
 #include "Diagnostics/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
-#include "trading_core/Execution/Order/OrderPathWarmup.hpp"
+#include "trading_core/Strategy/Orders/WarmupIntents.hpp"
 #include "trading_core/Strategy/StrategyInputFreshness.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
@@ -141,7 +141,7 @@ bool drainUserEvents(const trading_core::StrategyDescriptor& descriptor,
                      const trading_core::ShardControlState& control,
                      const BacktestRunRequest& request,
                      std::int64_t untilTs,
-                     RunUntilBoundary boundary = RunUntilBoundary::Inclusive) {
+                     RunUntilBoundary boundary) {
   if (engine.liquidated || engine.riskStopped) return true;
   std::uint32_t guard = 0u;
   while (dueWithinBoundary(nextUserEventDeliveryTs(engine), untilTs, boundary)) {
@@ -167,7 +167,7 @@ bool drainUserEventsMulti(const trading_core::StrategyDescriptor& descriptor,
                           const trading_core::ShardControlState& control,
                           const BacktestRunRequest& request,
                           std::int64_t untilTs,
-                          RunUntilBoundary boundary = RunUntilBoundary::Inclusive) {
+                          RunUntilBoundary boundary) {
   for (const detail::EngineState& engine : engines) {
     if (engine.liquidated || engine.riskStopped) return true;
   }

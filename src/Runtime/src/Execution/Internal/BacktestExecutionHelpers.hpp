@@ -66,10 +66,10 @@ void publishProblem(EngineState& engine,
                     Id clientIntentId,
                     Id targetClientIntentId) noexcept;
 void recordRateLimitReject(EngineState& engine, std::uint8_t commandKind, std::int64_t tsNs) noexcept;
-std::int64_t rateLimitCooldownTsNs(const trading_core::RateLimitDecision& decision,
+std::int64_t rateLimitCooldownTsNs(const trading_core::execution::PermitDecision& decision,
                                    std::int64_t tsNs) noexcept;
 bool beginRateLimitCooldown(EngineState& engine,
-                            const trading_core::RateLimitDecision& decision,
+                            const trading_core::execution::PermitDecision& decision,
                             std::int64_t tsNs) noexcept;
 TimeNs timeNsFromI64Local(std::int64_t value) noexcept;
 std::int64_t remainingPctE4(std::int64_t remaining, std::int64_t limit) noexcept;

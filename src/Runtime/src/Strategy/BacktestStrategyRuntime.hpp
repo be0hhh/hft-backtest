@@ -82,6 +82,8 @@ void resolveRiskVenuesForSessions(
 [[nodiscard]] std::int64_t portfolioEquityE8(const std::vector<detail::EngineState>& engines,
                                              std::int64_t initialBalanceE8) noexcept;
 [[nodiscard]] TimeNs timeNsFromI64(std::int64_t value) noexcept;
+[[nodiscard]] TimeNs replayUtcFromMonotonic(std::int64_t monotonicNs,
+                                          std::int64_t utcOffsetNs) noexcept;
 
 void applyMarketEventToSnapshots(detail::EngineState& engine,
                                  const detail::SessionData& session,

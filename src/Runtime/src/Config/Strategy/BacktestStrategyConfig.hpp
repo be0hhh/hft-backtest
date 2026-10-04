@@ -2,8 +2,8 @@
 
 #include "trading_core/Strategy/Params/StrategyParams.hpp"
 #include "trading_core/Algorithm/Primitives/AlgorithmPrimitives.hpp"
-#include "trading_core/Algorithm/RateLimit/RateLimit.hpp"
-#include "trading_core/Execution/PortfolioRisk.hpp"
+#include "hft_backtest/Backtest.hpp"
+#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
 
 #include "cxet/Canon/PositionAndExchange.hpp"
 #include "cxet/Canon/Subtypes.hpp"
@@ -38,7 +38,7 @@ struct BacktestStrategyVenueConfig {
   bool hasRiskMinEquityPct{false};
   bool hasRiskMinEquity{false};
   std::vector<Symbol> symbols{};
-  std::vector<trading_core::RateLimitBucketConfig> rateLimitBuckets{};
+  std::vector<BacktestQuotaBucketConfig> rateLimitBuckets{};
   std::vector<trading_core::RateLimitActionConfig> rateLimitActions{};
   BacktestLiveProbeMode liveProbe{BacktestLiveProbeMode::Default};
   trading_core::StrategyRuntimeParams params{};

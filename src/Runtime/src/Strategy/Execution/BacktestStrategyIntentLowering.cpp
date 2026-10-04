@@ -1,7 +1,7 @@
 #include "BacktestStrategyIntentLowering.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
-#include "trading_core/Execution/Order/StrategyTransactionValidation.hpp"
+#include "trading_core/Strategy/StrategyTransactionValidation.hpp"
 
 #include <array>
 

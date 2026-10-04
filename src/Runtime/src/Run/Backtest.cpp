@@ -18,7 +18,7 @@
 #include "trading_core/Contracts/Control/ControlState.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
 #include "trading_core/Contracts/Strategy/StrategyContract.hpp"
-#include "trading_core/Execution/PortfolioRisk.hpp"
+#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
 #include "trading_core/Strategy/GeneratedStrategyRegistry.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
@@ -143,6 +143,21 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)writeEmptyArtifacts(artifacts);
     return result;
   }
+  // Venue configuration is the replay policy baseline. Request/GUI schedules
+  // overlay it explicitly; no removed exchange preset supplies admission.
+  effectiveRequest.rateLimitSchedules.clear();
+  for (const BacktestStrategyVenueConfig& venue : cfg.venues) {
+    const auto separator = venue.name.rfind('_');
+    BacktestRateLimitSchedule schedule{};
+    schedule.exchange = venue.name.substr(0, separator);
+    schedule.market = venue.name.substr(separator + 1);
+    schedule.buckets = venue.rateLimitBuckets;
+    schedule.actions = venue.rateLimitActions;
+    schedule.enabled = venue.rateLimitsEnabled;
+    effectiveRequest.rateLimitSchedules.push_back(std::move(schedule));
+  }
+  effectiveRequest.rateLimitSchedules.insert(effectiveRequest.rateLimitSchedules.end(),
+      request.rateLimitSchedules.begin(), request.rateLimitSchedules.end());
   result.liveProbe = summarizeLiveProbeConfig(cfg);
   result.strategy = request.strategy.empty() ? cfg.strategyType : request.strategy;
   StrategyIndicatorProfileInfo indicatorProfile{};

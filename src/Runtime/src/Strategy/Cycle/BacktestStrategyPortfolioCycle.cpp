@@ -6,7 +6,7 @@
 #include "../Diagnostics/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
-#include "trading_core/Execution/Order/OrderPathWarmup.hpp"
+#include "trading_core/Strategy/Orders/WarmupIntents.hpp"
 #include "trading_core/Strategy/StrategyInputFreshness.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
@@ -158,7 +158,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   if (includeRateLimits) {
     ctx.rateLimits = trading_core::StrategyRateLimitBook{};
     for (std::size_t i = 0u; i < legCount; ++i) {
-      trading_core::StrategyRateLimitBook legLimits = engines[i].rateLimits.snapshotBook(
+      trading_core::StrategyRateLimitBook legLimits = engines[i].quotas.observationBook(
           trading_core::ExecutionRouteHandle{static_cast<std::uint32_t>(i + 1u)},
           engines[i].exchange,
           engines[i].market,
