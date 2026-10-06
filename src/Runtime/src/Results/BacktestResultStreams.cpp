@@ -51,6 +51,7 @@ bool writeFills(const std::filesystem::path& path, const EngineState& engine) no
         << ',' << row.slippageE8
         << ',' << row.slippageBpsE8
         << ',' << row.executionBookConsumedPctE8
+        << ',' << row.contextIndex
         << "]\n";
   }
   return out.good();

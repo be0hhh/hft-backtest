@@ -165,7 +165,6 @@ using strategy_intent_lowering::routeLegIndex;
 using strategy_intent_lowering::routeTradable;
 using strategy_intent_lowering::transactionAdmission;
 using strategy_runtime_detail::applyCapturedBookTicker;
-using strategy_runtime_detail::overlayBacktestReconstructedBbo;
 using strategy_runtime_detail::publishBacktestReconstructedBbo;
 using strategy_runtime_detail::reconstructionTimestampOrigin;
 using strategy_runtime_detail::refreshCapturedBookTicker;
@@ -176,26 +175,28 @@ void MultiLegCycleScratch::reset(std::size_t count) noexcept {
 }
 
 void MultiLegCycleScratch::refreshLeg(std::size_t leg,
-                                      const std::vector<detail::EngineState>& engines,
-                                      const std::vector<StrategyInstrumentSpec>& legInstruments) noexcept {
+                                      detail::ConstEngineView engines,
+                                      std::span<const StrategyInstrumentSpec> legInstruments) noexcept {
   if (leg >= legCount || leg >= engines.size()) return;
   const detail::EngineState& engine = engines[leg];
   snapshots[leg] = engine.snapshot;
   candles[leg] = engine.candle;
+  executionViews[leg] = detail::simulationOrderEvidenceView(engine);
   orderViews[leg].orders = orderStorage[leg].data();
   orderViews[leg].count = detail::visibleOrders(engine, orderStorage[leg].data(), orderStorage[leg].size());
   positions[leg] = engine.position;
+  positions[leg].unrealizedPnl.raw = detail::observedUnrealizedPnlE8(engine);
   accounts[leg] = accountStateFromEngine(engine);
   instruments[leg] = leg < legInstruments.size() ? legInstruments[leg] : StrategyInstrumentSpec{};
   markets[leg] = engine.market;
   revisions[leg] = engine.contextRevision;
 }
 
-void MultiLegCycleScratch::refreshDirty(const std::vector<detail::EngineState>& engines,
-                                        const std::vector<StrategyInstrumentSpec>& legInstruments) noexcept {
+void MultiLegCycleScratch::refreshDirty(detail::ConstEngineView engines,
+                                        std::span<const StrategyInstrumentSpec> legInstruments) noexcept {
   for (std::size_t leg = 0; leg < legCount; ++leg) {
     if (leg >= engines.size()) break;
-    if (revisions[leg] != engines[leg].contextRevision) refreshLeg(leg, engines, legInstruments);
+    if (engines[leg].sharedAccount || revisions[leg] != engines[leg].contextRevision) refreshLeg(leg, engines, legInstruments);
   }
 }
 
@@ -224,6 +225,9 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
                                  const Symbol& selectedSymbol,
                                  const StrategyInstrumentSpec& instrument,
                                  bool strategyVisible) {
+  cxet::composite::Trade trade{};
+  if (event.kind == detail::kTimelineKindTrade &&
+      !detail::toRuntime(session.trades[event.index], trade)) return;
   trading_core::StrategyMarketSnapshot& snapshot = strategyVisible ? engine.snapshot : engine.venueSnapshot;
   trading_core::LocalOrderBookState& orderBook = strategyVisible ? engine.orderBook : engine.venueOrderBook;
   trading_core::BboReconstructionState& bbo = strategyVisible ? engine.bboReconstruction : engine.venueBboReconstruction;
@@ -303,20 +307,19 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     TimeNs depthTimestamp{};
     depthTimestamp.raw = static_cast<std::uint64_t>(depth.tsNs > 0 ? depth.tsNs : 0);
     trading_core::copyDepthTimestamp(snapshot, depthTimestamp);
-    orderBook.config.tickSizeRaw = instrument.tickSizeRaw;
+    if (instrument.tickSizeRaw > 0) {
+      (void)trading_core::configureLocalOrderBookTick(orderBook, instrument.tickSizeRaw);
+    }
     if (orderBook.hasStorage()) {
       (void)trading_core::refreshAuthoritativeOrderBook(
           orderBook, depthBook.view(), selectedSymbol);
     }
-    overlayBacktestReconstructedBbo(
-        snapshot, orderBook,
-        trading_core::bboReconstructionView(bbo));
     trading_core::bindOrderBookSnapshot(snapshot, orderBook);
     changed = true;
   } else if (event.kind == detail::kTimelineKindTrade) {
     const auto& row = session.trades[event.index];
-    const auto trade = detail::toRuntime(row);
-    trading_core::copyTradeSnapshot(snapshot, trade);
+    if (!trading_core::copyTradeSnapshot(snapshot, trade,
+            session.trades[event.index].nativeIdentity)) return;
     const bool reconstructionApplied =
         trading_core::applyBboReconstructionKnownInitiatorTrade(
         bbo, trade,
@@ -351,6 +354,7 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     }
   }
   if (changed) {
+    detail::recordSpotValuationMark(engine, strategyVisible);
     if (strategyVisible) {
       recordBacktestStrategySourceDelivery(engine, event);
     }
@@ -369,11 +373,11 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   applyMarketEventToSnapshots(engine, sessions[legIndex], event, selectedSymbol, instrument, strategyVisible);
 }
 
-void applyMarketEventToSnapshots(std::vector<detail::EngineState>& engines,
+void applyMarketEventToSnapshots(detail::EngineView engines,
                                  const std::vector<detail::SessionData>& sessions,
                                  const detail::TimelineEvent& event,
                                  const std::vector<Symbol>& symbols,
-                                 const std::vector<StrategyInstrumentSpec>& instruments,
+                                 std::span<const StrategyInstrumentSpec> instruments,
                                  bool strategyVisible) {
   const std::size_t legIndex = event.legIndex;
   if (legIndex >= engines.size() || legIndex >= sessions.size() || legIndex >= symbols.size() || legIndex >= instruments.size()) return;

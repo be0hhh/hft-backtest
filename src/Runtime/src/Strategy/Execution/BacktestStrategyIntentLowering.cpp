@@ -59,7 +59,7 @@ struct TransactionOrderSimulation final {
 };
 
 [[nodiscard]] TransactionOrderSimulation transactionOrderSimulation(
-    Span<const detail::EngineState> engines,
+    detail::ConstEngineView engines,
     const std::array<std::size_t,
                      trading_core::kStrategyRuntimeMaxLegs>& firstRecords,
     std::size_t leg,
@@ -124,15 +124,18 @@ bool footprintSupported(
     const trading_core::StrategyDescriptor& descriptor) noexcept {
   const trading_core::StrategyRuntimeFootprint& footprint =
       descriptor.footprint;
-  return trading_core::strategyDescriptorContractValid(descriptor) &&
+  return descriptor.stateDiscipline == trading_core::StrategyStateDiscipline::Snapshot &&
+      descriptor.footprint.stateScope == trading_core::StrategyStateScope::Instrument &&
+      trading_core::strategyDescriptorContractValid(descriptor) &&
       footprint.maxOrders <= detail::kIntentCapacity &&
       footprint.maxCancels <= detail::kIntentCapacity &&
       footprint.maxDesiredOrders == 0u &&
       trading_core::strategyRuntimeCommandCapacity(footprint) <=
           trading_core::kStrategyRuntimeMaxCommands +
               2u * trading_core::kStrategyRuntimeMaxDesiredOrders &&
-      footprint.maxTransactions <=
-          trading_core::kStrategyRuntimeMaxTransactions;
+      // Canonical transaction reconciliation needs an execution evidence
+      // book; this simulator currently owns only snapshot order views.
+      footprint.maxTransactions == 0u;
 }
 
 bool validateOutput(trading_core::StrategyContext& context) noexcept {
@@ -326,7 +329,7 @@ void applyToSingleLeg(detail::EngineState& engine,
   detail::applyIntents(engine, filtered, tsNs, latency);
 }
 
-void applyToLegs(Span<detail::EngineState> engines,
+void applyToLegs(detail::EngineView engines,
                  const trading_core::StrategyContext& context,
                  std::int64_t tsNs,
                  const BacktestRunRequest& request) {
@@ -402,7 +405,7 @@ bool applyTransactionCycle(
     const trading_core::StrategyDescriptor& descriptor,
     void* state,
     const trading_core::StrategyContext& context,
-    Span<detail::EngineState> engines,
+    detail::EngineView engines,
     std::int64_t tsNs,
     StrategyTransactionAdmission admission) {
   const trading_core::StrategyIo& io = context.io;
@@ -530,8 +533,7 @@ bool applyTransactionCycle(
             engines[routeLeg], one, tsNs, engines[routeLeg].latency);
         const TransactionOrderSimulation simulation =
             transactionOrderSimulation(
-                Span<const detail::EngineState>(
-                    engines.data(), engines.size()),
+                detail::ConstEngineView(engines),
                 firstRecords,
                 routeLeg,
                 order.clientIntentId);

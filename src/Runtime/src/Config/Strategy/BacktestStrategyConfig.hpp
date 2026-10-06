@@ -29,6 +29,8 @@ enum class BacktestPortfolioTradeMode : std::uint8_t {
 
 struct BacktestStrategyVenueConfig {
   std::string name{};
+  std::int64_t initialBalanceE8{};
+  bool hasInitialBalance{false};
   ExchangeId exchange{canon::kExchangeIdUnknown};
   canon::MarketType market{canon::kMarketTypeUnknown};
   bool rateLimitsEnabled{false};

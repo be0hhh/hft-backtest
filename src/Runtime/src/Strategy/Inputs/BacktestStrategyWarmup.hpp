@@ -30,7 +30,7 @@ Id allocateBacktestServiceClientIntentId(detail::EngineState& engine) noexcept;
 void markBacktestWarmupSkipped(detail::EngineState& engine,
                                trading_core::strategy::OrderPathWarmupSkipReason reason) noexcept;
 bool applyBacktestWarmupGate(trading_core::StrategyContext& ctx,
-                             detail::EngineState* engines,
+                             detail::EngineView engines,
                              std::size_t engineCount,
                              const BacktestRunRequest& request) noexcept;
 }

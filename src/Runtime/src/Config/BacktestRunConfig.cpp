@@ -2,7 +2,7 @@
 #include "BacktestRunConfig.hpp"
 
 #include "trading_core/Algorithm/Fees/FeePresets.hpp"
-#include "trading_core/Needed/NotionalQty.hpp"
+#include "trading_core/Algorithm/Math/PriceQuantity/NotionalQty.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
 #include <chrono>

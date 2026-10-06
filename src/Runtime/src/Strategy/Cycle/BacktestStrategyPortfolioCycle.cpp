@@ -44,8 +44,8 @@ using strategy_runtime_detail::retainCancelOutputsWhenNewOrdersBlocked;
 bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
                    const BacktestStrategyInputPolicy& inputPolicy,
                    void* state,
-                   std::vector<detail::EngineState>& engines,
-                   const std::vector<StrategyInstrumentSpec>& legInstruments,
+                   detail::EngineView engines,
+                   std::span<const StrategyInstrumentSpec> legInstruments,
                    MultiLegCycleScratch& scratch,
                    const trading_core::SymbolShardConfig& shard,
                    const trading_core::ShardControlState& control,
@@ -55,13 +55,15 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
                    const cxet::composite::UserDataEvent* userEvent) {
   if (!footprintSupported(descriptor)) return false;
   if (engines.empty()) return true;
+  for (const detail::EngineState& engine : engines) if (engine.simulationEvidenceFailed) return false;
   for (const detail::EngineState& engine : engines) {
-    if (engine.liquidated || engine.riskStopped) return true;
+    if (engine.liquidated || engine.riskStopped ||
+        (engine.capturedSourceManaged && !engine.capturedSourceMember)) return true;
   }
   const std::size_t legCount = engines.size() < trading_core::kStrategyRuntimeMaxLegs ? engines.size() : trading_core::kStrategyRuntimeMaxLegs;
   const std::uint64_t configuredTradableMask = backtestTradableLegMask(request, legCount);
   const std::uint64_t sourceFreshMask = backtestSourceFreshLegMask(
-      inputPolicy, engines.data(), legCount, tsNs);
+      inputPolicy, engines, legCount, tsNs);
   const trading_core::strategy::StrategyInputSourceMaskState freshness =
       trading_core::strategy::strategyInputSourceMaskState(legCount, configuredTradableMask, sourceFreshMask);
   std::uint64_t readinessMask = freshness.sourceFreshLegMask;
@@ -112,6 +114,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   ctx.userEventAdmittedSemanticMask =
       backtestSimulatedUserEventSemanticMask(userEvent);
   ctx.hasUserEvent = ctx.userEventAdmittedSemanticMask != 0u;
+  if (eventLegIndex < engines.size()) bindBacktestUserEventIdentity(ctx, engines[eventLegIndex]);
   ctx.eventLegIndex = eventLegIndex;
   ctx.hasEventLeg = eventLegIndex < legCount;
   ctx.nowMono.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
@@ -158,7 +161,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   if (includeRateLimits) {
     ctx.rateLimits = trading_core::StrategyRateLimitBook{};
     for (std::size_t i = 0u; i < legCount; ++i) {
-      trading_core::StrategyRateLimitBook legLimits = engines[i].quotas.observationBook(
+      trading_core::StrategyRateLimitBook legLimits = engines[i].quotaOwner().observationBook(
           trading_core::ExecutionRouteHandle{static_cast<std::uint32_t>(i + 1u)},
           engines[i].exchange,
           engines[i].market,
@@ -174,6 +177,8 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
       engines[i].rateLimitSnapshotRequested = false;
     }
   }
+  ctx.state.orders.executionLegs = scratch.executionViews.data();
+  ctx.state.orders.executionLegCount = legCount;
   bindBacktestStrategyStateView(ctx);
   ctx.userEventRecvMono = ctx.nowMono;
   ctx.userEventRecvUtc = ctx.nowUtc;
@@ -261,7 +266,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   }
   const bool warmupGateHeldRealOrders = !newOrderEmissionBlocked &&
       canOrderFailureRollback &&
-      applyBacktestWarmupGate(ctx, engines.data(), legCount, request);
+      applyBacktestWarmupGate(ctx, engines, legCount, request);
   if (warmupGateHeldRealOrders && canOrderFailureRollback) {
     descriptor.restoreAfterOrderFailure(state, before);
     if (transactionCycle) ctx.io.transactionCount = 0u;
@@ -284,13 +289,14 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   if (ctx.io.transactionCount != 0u) {
     if (!applyTransactionCycle(
             descriptor, state, ctx,
-            Span<detail::EngineState>(engines.data(), legCount),
+            engines.first(legCount),
             tsNs, admission)) return false;
   } else {
     applyToLegs(
-        Span<detail::EngineState>(engines.data(), legCount),
+        engines.first(legCount),
         ctx, tsNs, request);
   }
+  for (const auto& engine : engines) if (engine.simulationEvidenceFailed) return false;
   return true;
 }
 

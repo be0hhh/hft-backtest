@@ -222,7 +222,11 @@ bool writeManifest(const std::filesystem::path& path,
       : rejectedCommandCount(manifestRateLimits);
   out << "{\n";
   out << "  " << q << "type" << q << ": " << q << "run.result" << q << ",\n";
-  out << "  " << q << "schema_version" << q << ": 4,\n";
+  out << "  " << q << "schema_version" << q << ": 5,\n";
+  out << "  " << q << "universe" << q << ": {" << q << "sources" << q << ": "
+      << result.universeSources << ", " << q << "contexts" << q << ": "
+      << result.universeContexts << ", " << q << "virtual_accounts" << q << ": "
+      << result.virtualAccounts << "},\n";
   out << "  " << q << "request_id" << q << ": " << quote(result.requestId) << ",\n";
   out << "  " << q << "run_id" << q << ": " << quote(result.runId) << ",\n";
   out << "  " << q << "status" << q << ": " << quote(resultStatusName(result.status)) << ",\n";

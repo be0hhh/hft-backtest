@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "../Internal/BacktestExecutionHelpers.hpp"
+#include "trading_core/Strategy/Orders/OrderDecisionCursor.hpp"
 
 namespace hft_backtest::detail::execution_detail {
 
@@ -30,7 +31,8 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
   event.kind = cxet::composite::UserDataEventKind::Order;
   event.symbol = engine.symbol;
   (void)makeBacktestClientOrderId(
-      engine.exchange, order.state.clientIntentId, event.clientOrderId);
+      engine.exchange, Id{simulationCommandId(engine, order.state.clientIntentId, order.contextIndex)},
+      event.clientOrderId, false);
   event.orderId = event.clientOrderId;
   event.side = order.state.side;
   event.orderType = order.state.orderType;
@@ -96,7 +98,8 @@ cxet::composite::UserDataEvent makeRejectedOrderEvent(EngineState& engine,
   event.kind = cxet::composite::UserDataEventKind::Order;
   event.symbol = engine.symbol;
   (void)makeBacktestClientOrderId(
-      engine.exchange, order.state.clientIntentId, event.clientOrderId);
+      engine.exchange, Id{simulationCommandId(engine, order.state.clientIntentId, order.contextIndex)},
+      event.clientOrderId, false);
   event.orderId = event.clientOrderId;
   event.side = order.state.side;
   event.orderType = order.state.orderType;
@@ -140,7 +143,8 @@ cxet::composite::UserDataEvent makeCanceledOrderEvent(EngineState& engine,
   event.kind = cxet::composite::UserDataEventKind::Order;
   event.symbol = engine.symbol;
   (void)makeBacktestClientOrderId(
-      engine.exchange, order.state.clientIntentId, event.clientOrderId);
+      engine.exchange, Id{simulationCommandId(engine, order.state.clientIntentId, order.contextIndex)},
+      event.clientOrderId, false);
   event.orderId = event.clientOrderId;
   event.side = order.state.side;
   event.orderType = order.state.orderType;
@@ -184,13 +188,37 @@ cxet::composite::UserDataEvent makeCanceledOrderEvent(EngineState& engine,
 std::int64_t userEventDeliveryTs(EngineState& engine, std::int64_t eventTsNs) noexcept {
   const std::uint64_t latencyUs = sampleLatencyUs(engine.latency, BacktestLatencyChannel::UserData);
   const std::int64_t add = latencyNs(latencyUs);
-  if (eventTsNs > std::numeric_limits<std::int64_t>::max() - add) return std::numeric_limits<std::int64_t>::max();
-  return eventTsNs + add;
+  const auto sampled = eventTsNs > std::numeric_limits<std::int64_t>::max() - add
+      ? std::numeric_limits<std::int64_t>::max() : eventTsNs + add;
+  // One simulated producer stream preserves its append order. Latency jitter
+  // may delay a later event, but cannot deliver it ahead of an earlier one.
+  auto scheduled = engine.userEventDeliveryTsNs.empty() ? sampled :
+      std::max(sampled, engine.userEventDeliveryTsNs.back());
+  if (engine.sharedAccount) {
+    scheduled = std::max(scheduled, engine.sharedAccount->lastPrivateDeliveryNs + 1);
+    engine.sharedAccount->lastPrivateDeliveryNs = scheduled;
+  }
+  return scheduled;
 }
 
-void pushUserEvent(EngineState& engine, cxet::composite::UserDataEvent event, std::int64_t eventTsNs) {
+void pushUserEvent(EngineState& engine, cxet::composite::UserDataEvent event, std::int64_t eventTsNs, Id clientIntentId, std::uint32_t contextIndex, bool service) {
+  if (engine.sharedAccount && engine.sharedAccount->lastPrivateDeliveryNs == std::numeric_limits<std::int64_t>::max()) {
+    engine.simulationEvidenceFailed = true; return;
+  }
+  const auto deliveryTs = userEventDeliveryTs(engine, eventTsNs);
+  const auto savedContext = engine.activeContextIndex;
+  engine.activeContextIndex = contextIndex;
+  const auto view = simulationOrderEvidenceView(engine);
+  const auto* evidence = trading_core::strategy::canonicalOrderEvidenceIdentity(view, clientIntentId, 1u);
+  engine.activeContextIndex = savedContext;
+  engine.userEventCommandIds.push_back(evidence ? evidence->commandId : 0u);
+  engine.userEventGenerations.push_back(evidence ? evidence->generation : 0u);
+  engine.userEventServiceFlags.push_back(service ? 1u : 0u);
+  engine.userEventContextIndices.push_back(contextIndex);
+  engine.userEventConsumed.push_back(0u);
+  engine.userEventClientIntentIds.push_back(clientIntentId);
   engine.userEvents.push_back(event);
-  engine.userEventDeliveryTsNs.push_back(userEventDeliveryTs(engine, eventTsNs));
+  engine.userEventDeliveryTsNs.push_back(deliveryTs);
 }
 
 void publishProblem(EngineState& engine,
@@ -274,9 +302,9 @@ using execution_detail::sameRateLimitUsagePoint;
 using execution_detail::timeNsFromI64Local;
 
 void appendRateLimitUsageSnapshot(EngineState& engine, std::int64_t tsNs) {
-  if (!engine.quotas.configured()) return;
+  if (!engine.quotaOwner().configured()) return;
   const trading_core::StrategyRateLimitBook book =
-      engine.quotas.observationBook(trading_core::kDefaultExecutionRouteHandle,
+      engine.quotaOwner().observationBook(trading_core::kDefaultExecutionRouteHandle,
                                      engine.exchange,
                                      engine.market,
                                      1u,

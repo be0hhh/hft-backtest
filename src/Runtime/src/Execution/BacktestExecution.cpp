@@ -17,7 +17,7 @@ namespace hft_backtest::detail::execution_detail {
 std::size_t findOpenIndex(EngineState& engine, Id id) noexcept {
   for (std::size_t i = 0; i < engine.open.size(); ++i) {
     const OpenOrder& order = engine.open[i];
-    if (order.state.valid && (order.state.clientIntentId.raw == id.raw || order.state.desiredClientIntentId.raw == id.raw || order.state.pendingClientIntentId.raw == id.raw)) return i;
+    if (order.contextIndex == engine.activeContextIndex && order.state.valid && (order.state.clientIntentId.raw == id.raw || order.state.desiredClientIntentId.raw == id.raw || order.state.pendingClientIntentId.raw == id.raw)) return i;
   }
   return kNoRecordIndex;
 }
@@ -30,7 +30,7 @@ std::size_t findFreeIndex(EngineState& engine) noexcept {
 }
 
 bool matchesExpectedOrder(const OpenOrder& order, const PendingAction& action) noexcept {
-  if (!order.state.valid) return false;
+  if (!order.state.valid || order.contextIndex != action.contextIndex) return false;
   if (action.targetClientIntentId.raw != 0 && order.state.clientIntentId.raw != action.targetClientIntentId.raw) return false;
   if (action.commandClientIntentId.raw == 0) return true;
   if (action.kind == PendingActionKind::OrderAck) return order.state.clientIntentId.raw == action.commandClientIntentId.raw;
@@ -93,9 +93,15 @@ bool submitCancelIntent(EngineState& engine,
                         const trading_core::CancelIntent& intent,
                         std::int64_t tsNs,
                         std::int64_t activeTs) {
+  if (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
+      (engine.capturedExecutionRequiredChannels & ~engine.capturedActiveChannels) != 0u ||
+      (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u)) return false;
   const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
+  if (slotIndex != kNoRecordIndex && engine.capturedSourceManaged &&
+      (engine.open[slotIndex].sourceGeneration != engine.capturedSourceGeneration || engine.open[slotIndex].executionBoundaryEpoch != engine.executionBoundaryEpoch)) return false;
   const std::size_t recordIndex = engine.orders.size();
   engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, kRecordActionCancel, kRecordSideNone, kRecordTypeNone, kRecordStatusPending, 0, 0, false});
+  engine.orders.back().contextIndex = engine.activeContextIndex;
   if (slotIndex != kNoRecordIndex) {
     const OpenOrder& target = engine.open[slotIndex];
     engine.orders.back().service = serviceOrder(target);
@@ -107,7 +113,7 @@ bool submitCancelIntent(EngineState& engine,
     return false;
   }
   const trading_core::execution::PermitDecision rateLimitDecision =
-      engine.quotas.admit(trading_core::RateLimitActionKind::CancelOrder, timeNsFromI64Local(tsNs));
+      engine.quotaOwner().admit(trading_core::RateLimitActionKind::CancelOrder, timeNsFromI64Local(tsNs));
   if (!rateLimitDecision.ok()) {
     recordRateLimitReject(engine, 3u, tsNs);
     const bool notify = beginRateLimitCooldown(engine, rateLimitDecision, tsNs);
@@ -123,11 +129,19 @@ bool submitCancelIntent(EngineState& engine,
     return false;
   }
   appendRateLimitUsageSnapshot(engine, tsNs);
+  if (!beginSimulationCancel(engine, intent.targetClientIntentId, intent.clientIntentId)) {
+    engine.orders[recordIndex].status = kRecordStatusRejected;
+    engine.simulationEvidenceFailed = true;
+    return false;
+  }
   OpenOrder& order = engine.open[slotIndex];
   order.state.cancelPending = true;
   order.state.pendingClientIntentId = intent.clientIntentId;
   order.state.state = trading_core::StrategyOrderLocalState::CancelPending;
   PendingAction action{};
+  action.contextIndex = engine.activeContextIndex;
+  action.sourceGeneration = engine.capturedSourceGeneration;
+  action.executionBoundaryEpoch = engine.executionBoundaryEpoch;
   action.kind = PendingActionKind::CancelAck;
   action.slotIndex = slotIndex;
   action.recordIndex = recordIndex;
@@ -145,18 +159,36 @@ bool submitCancelIntent(EngineState& engine,
                                      bool warmup,
                                      std::uint32_t warmupCancelTimeoutMs,
                                      bool warmupCancelAfterAck) {
+  if (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
+      (engine.capturedExecutionRequiredChannels & ~engine.capturedActiveChannels) != 0u ||
+      (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u)) return false;
   const bool postOnly = intent.orderType == canon::OrderType::Limit && isPostOnlyPolicy(intent.limitTimeInForcePolicy);
   const bool service = intent.service || warmup;
   const bool reduceOnly =
       trading_core::positionReductionRequested(intent.positionReduction);
   const std::size_t recordIndex = engine.orders.size();
   engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, kRecordActionOrder, recordSide(intent.side), recordType(intent.orderType), kRecordStatusPending, intent.price.raw, intent.qty.raw, reduceOnly, postOnly});
+  engine.orders.back().contextIndex = engine.activeContextIndex;
+  if (!installSimulationOrderIntent(engine, intent)) {
+    engine.orders.back().status = kRecordStatusRejected;
+    engine.simulationEvidenceFailed = true;
+    return false;
+  }
+  if (warmup && !markSimulationWarmupIntent(engine, intent.clientIntentId, false)) {
+    engine.simulationEvidenceFailed = true; return false;
+  }
   engine.orders.back().triggerPriceE8 = intent.triggerPrice.raw;
   engine.orders.back().triggerSource = static_cast<std::uint8_t>(intent.triggerSource);
   engine.orders.back().service = service;
   engine.orders.back().warmup = warmup;
-  if (badStopMarketIntent(intent)) {
+  // This simulator has no immediate match-and-cancel IOC model. Reject the
+  // newly expressible policy before quota/active-order installation instead
+  // of silently turning it into a resting GTC order.
+  if (badStopMarketIntent(intent) ||
+      (intent.orderType == canon::OrderType::Limit &&
+       intent.limitTimeInForcePolicy == trading_core::LimitTimeInForcePolicy::Ioc)) {
     OpenOrder rejected{};
+    rejected.contextIndex = engine.activeContextIndex;
     rejected.state.valid = true;
     rejected.state.clientIntentId = intent.clientIntentId;
     rejected.state.desiredClientIntentId = intent.clientIntentId;
@@ -182,13 +214,15 @@ bool submitCancelIntent(EngineState& engine,
     rejected.postOnly = postOnly;
     rejected.service = service;
     rejected.warmup = warmup;
-    if (!serviceOrder(rejected)) pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs), tsNs);
+    if (!settleSimulationOrderSubmit(engine, intent.clientIntentId, false)) engine.simulationEvidenceFailed = true;
+    pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs), tsNs, rejected.state.clientIntentId, rejected.contextIndex, serviceOrder(rejected));
     engine.orders[recordIndex].status = kRecordStatusRejected;
     return false;
   }
   const std::size_t slotIndex = findFreeIndex(engine);
   if (slotIndex == kNoRecordIndex) {
     OpenOrder rejected{};
+    rejected.contextIndex = engine.activeContextIndex;
     rejected.state.valid = true;
     rejected.state.clientIntentId = intent.clientIntentId;
     rejected.state.desiredClientIntentId = intent.clientIntentId;
@@ -214,23 +248,37 @@ bool submitCancelIntent(EngineState& engine,
     rejected.postOnly = postOnly;
     rejected.service = service;
     rejected.warmup = warmup;
-    if (!serviceOrder(rejected)) pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs), tsNs);
+    if (!settleSimulationOrderSubmit(engine, intent.clientIntentId, false)) engine.simulationEvidenceFailed = true;
+    pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs), tsNs, rejected.state.clientIntentId, rejected.contextIndex, serviceOrder(rejected));
+    engine.orders[recordIndex].status = kRecordStatusRejected;
+    return false;
+  }
+  if (!reserveSpotObservedIntent(engine, intent)) {
+    OpenOrder rejected{};
+    rejected.contextIndex = engine.activeContextIndex; rejected.state.clientIntentId = intent.clientIntentId;
+    rejected.state.side = intent.side; rejected.state.orderType = intent.orderType;
+    rejected.state.qty = intent.qty; rejected.state.price = intent.price;
+    rejected.reduceOnly = reduceOnly; rejected.service = service; rejected.warmup = warmup;
+    if (!settleSimulationOrderSubmit(engine, intent.clientIntentId, false)) engine.simulationEvidenceFailed = true;
+    pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs, canon::OrderProblem::ValidationRejected),
+        tsNs, intent.clientIntentId, engine.activeContextIndex, service);
     engine.orders[recordIndex].status = kRecordStatusRejected;
     return false;
   }
   const trading_core::execution::PermitDecision rateLimitDecision =
-      engine.quotas.admit((reduceOnly
+      engine.quotaOwner().admit((reduceOnly
           ? (intent.orderType == canon::OrderType::Limit
               ? trading_core::RateLimitActionKind::ReduceOnlyLimitOrder
               : trading_core::RateLimitActionKind::ReduceOnlyMarketOrder)
           : (intent.orderType == canon::OrderType::Limit
               ? trading_core::RateLimitActionKind::LimitOrder
-              : trading_core::RateLimitActionKind::MarketOrder)), timeNsFromI64Local(tsNs));
+          : trading_core::RateLimitActionKind::MarketOrder)), timeNsFromI64Local(tsNs));
   if (!rateLimitDecision.ok()) {
     recordRateLimitReject(engine, 1u, tsNs);
     const bool notify = beginRateLimitCooldown(engine, rateLimitDecision, tsNs);
     appendRateLimitUsageSnapshot(engine, tsNs);
     OpenOrder rejected{};
+    rejected.contextIndex = engine.activeContextIndex;
     rejected.state.valid = true;
     rejected.state.clientIntentId = intent.clientIntentId;
     rejected.state.desiredClientIntentId = intent.clientIntentId;
@@ -256,9 +304,9 @@ bool submitCancelIntent(EngineState& engine,
     rejected.postOnly = postOnly;
     rejected.service = service;
     rejected.warmup = warmup;
-    if (!serviceOrder(rejected)) {
-      pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs, canon::OrderProblem::RateLimited), tsNs);
-    }
+    if (!settleSimulationOrderSubmit(engine, intent.clientIntentId, false)) engine.simulationEvidenceFailed = true;
+    pushUserEvent(engine, makeRejectedOrderEvent(engine, rejected, tsNs, canon::OrderProblem::RateLimited), tsNs,
+        rejected.state.clientIntentId, rejected.contextIndex, serviceOrder(rejected));
     if (notify) {
       publishProblem(engine, canon::OrderProblem::RateLimited, 1u, intent.clientIntentId, Id{});
     }
@@ -267,7 +315,15 @@ bool submitCancelIntent(EngineState& engine,
   }
   appendRateLimitUsageSnapshot(engine, tsNs);
   if (reduceOnly) ++engine.reduceOnlyOrders;
+  if (!settleSimulationOrderSubmit(engine, intent.clientIntentId, true)) {
+    engine.orders[recordIndex].status = kRecordStatusRejected;
+    engine.simulationEvidenceFailed = true;
+    return false;
+  }
   OpenOrder& slot = engine.open[slotIndex];
+  slot.contextIndex = engine.activeContextIndex;
+  slot.sourceGeneration = engine.capturedSourceGeneration;
+  slot.executionBoundaryEpoch = engine.executionBoundaryEpoch;
   slot.state.valid = true;
   slot.state.clientIntentId = intent.clientIntentId;
   slot.state.desiredClientIntentId = intent.clientIntentId;
@@ -304,17 +360,24 @@ bool submitCancelIntent(EngineState& engine,
   slot.warmupCancelAfterAck = warmup && warmupCancelAfterAck;
   slot.warmupCancelRequested = false;
   slot.warmupCancelTimeoutTsNs = warmup && warmupCancelTimeoutMs != 0u ? addMs(activeTs, warmupCancelTimeoutMs) : 0;
+  engine.lastOrderPathCommandMono = timeNsFromI64Local(tsNs);
   if (warmup) {
-    engine.lastOrderPathHotMono = TimeNs{};
+    engine.lastOrderPathAckMono = TimeNs{};
+    engine.lastOrderPathWarmupMono = timeNsFromI64Local(tsNs);
+    engine.warmupClientIntentId = intent.clientIntentId;
+    engine.warmupContextIndex = engine.activeContextIndex;
     engine.lastWarmupSkipReason = 0u;
     engine.warmupInFlight = true;
   } else if (!service) {
-    engine.lastOrderPathHotMono = timeNsFromI64Local(tsNs);
+    engine.lastOrderPathCommandMono = timeNsFromI64Local(tsNs);
     engine.lastWarmupSkipReason = 0u;
   }
   slot.triggerSourcePriceRaw = 0;
   slot.triggerTsNs = 0;
   PendingAction action{};
+  action.contextIndex = engine.activeContextIndex;
+  action.sourceGeneration = engine.capturedSourceGeneration;
+  action.executionBoundaryEpoch = engine.executionBoundaryEpoch;
   action.kind = PendingActionKind::OrderAck;
   action.slotIndex = slotIndex;
   action.recordIndex = recordIndex;

@@ -52,6 +52,20 @@ struct DepthRebaseCursor final {
   bool active{false};
 };
 
+struct BinaryDecodeState final {
+  std::int64_t ingestSequence{};
+  std::uint64_t retainedBboSequence{};
+  std::uint64_t retainedBboSessionEpoch{};
+  corpus::BinaryMarketBookTickerPayload retainedBboPayload{};
+  std::uint16_t retainedBboPresenceFlags{};
+  DepthRebaseCursor depthRebase{};
+};
+[[nodiscard]] Status decodeBinaryMarketRecords(const corpus::BinaryMarketSelection& selection,
+    BinaryDecodeState& state, SessionData& output, std::string& error);
+[[nodiscard]] Status initializeBinaryMarketSession(const corpus::BinaryMarketSelectionRequest& request,
+    const corpus::BinaryMarketSelection& selection, const SessionLoadPlan& plan,
+    SessionData& output, std::string& error);
+
 [[nodiscard]] Status convertStatus(hftrec::Status status) noexcept;
 
 [[nodiscard]] std::string_view fixedText(const char* data,
@@ -69,6 +83,11 @@ void appendWarning(SessionData& output, std::string warning);
 [[nodiscard]] bool rescaleToE8(std::uint64_t input,
                                std::uint8_t scaleDigits,
                                std::int64_t& output) noexcept;
+
+[[nodiscard]] bool canonicalMarketQuantityToE8(const corpus::BinaryMarketSource& source,
+    corpus::BinaryMarketChannel channel, std::int64_t input, std::int64_t& output) noexcept;
+[[nodiscard]] bool canonicalMarketQuantityToE8(const corpus::BinaryMarketSource& source,
+    corpus::BinaryMarketChannel channel, std::uint64_t input, std::int64_t& output) noexcept;
 
 [[nodiscard]] const corpus::BinaryMarketBookTickerPayload*
 checkedBookTickerPayload(

@@ -78,13 +78,20 @@ using strategy_runtime_detail::venueMatchesSession;
 
 trading_core::StrategyAccountState accountStateFromEngine(const detail::EngineState& engine) noexcept {
   trading_core::StrategyAccountState out{};
-  out.initialBalanceE8 = engine.initialBalanceE8;
-  out.walletBalanceE8 = engine.walletBalanceE8;
-  out.availableBalanceE8 = engine.walletBalanceE8;
-  out.equityE8 = detail::equityE8(engine);
+  out.initialBalanceE8 = engine.sharedAccount ? engine.sharedAccount->initialBalanceE8 : engine.initialBalanceE8;
+  out.walletBalanceE8 = engine.sharedAccount ? (engine.sharedAccount->observedInitialized
+      ? engine.sharedAccount->observedWalletBalanceE8 : engine.sharedAccount->initialBalanceE8) : engine.observedWalletBalanceE8;
+  out.availableBalanceE8 = out.walletBalanceE8;
+  if (engine.market.raw == canon::kMarketTypeSpot.raw) {
+    const auto held = engine.sharedAccount ? engine.sharedAccount->observedReservedQuoteE8 : engine.observedReservedQuoteE8;
+    out.availableBalanceE8 = held > out.walletBalanceE8 ? 0 : out.walletBalanceE8 - held;
+  }
+  out.equityE8 = engine.sharedAccount ? trading_core::saturatingAddI64(
+      out.walletBalanceE8, engine.sharedAccount->observedPositionEquityValueE8) : trading_core::saturatingAddI64(
+          out.walletBalanceE8, detail::positionEquityValueE8(engine, true));
   out.makerFeeBpsE8 = engine.makerFeeBpsE8;
   out.takerFeeBpsE8 = engine.takerFeeBpsE8;
-  out.hasBalance = engine.initialBalanceE8 != 0 || engine.walletBalanceE8 != 0;
+  out.hasBalance = out.initialBalanceE8 != 0 || out.walletBalanceE8 != 0;
   out.hasFees = engine.makerFeeBpsE8 != 0 || engine.takerFeeBpsE8 != 0;
   return out;
 }
@@ -96,7 +103,7 @@ std::size_t boundedRiskLegCount(std::size_t count) noexcept {
 }
 
 void refreshRiskAccountsFromEngines(
-    const std::vector<detail::EngineState>& engines,
+    detail::ConstEngineView engines,
     std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs>& out) noexcept {
   out.fill(trading_core::StrategyAccountState{});
   const std::size_t count = boundedRiskLegCount(engines.size());
@@ -134,7 +141,7 @@ bool forceCloseForTraderRisk(detail::EngineState& engine, std::int64_t tsNs) {
   return detail::forceClosePosition(engine, tsNs, closeLatencyUs);
 }
 
-std::int64_t portfolioEquityE8(const std::vector<detail::EngineState>& engines,
+std::int64_t portfolioEquityE8(detail::ConstEngineView engines,
                                std::int64_t initialBalanceE8) noexcept {
   std::int64_t out = initialBalanceE8;
   for (const detail::EngineState& engine : engines) {

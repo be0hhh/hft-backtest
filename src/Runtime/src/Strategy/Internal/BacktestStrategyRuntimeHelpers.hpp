@@ -42,12 +42,12 @@ backtestSimulatedUserEventSemanticMask(
 std::int64_t nextUserEventDeliveryTs(const detail::EngineState& engine) noexcept;
 std::int64_t nextWakeTs(const trading_core::StrategyDescriptor& descriptor, const void* state) noexcept;
 std::int64_t nextRateLimitCooldownTs(const detail::EngineState& engine) noexcept;
-std::int64_t nextRateLimitCooldownTs(const std::vector<detail::EngineState>& engines) noexcept;
+std::int64_t nextRateLimitCooldownTs(detail::ConstEngineView engines) noexcept;
 void clearRateLimitCooldown(detail::EngineState& engine, std::int64_t tsNs) noexcept;
-void clearRateLimitCooldown(std::vector<detail::EngineState>& engines, std::int64_t tsNs) noexcept;
+void clearRateLimitCooldown(detail::EngineView engines, std::int64_t tsNs) noexcept;
 bool dueWithinBoundary(std::int64_t tsNs, std::int64_t untilTs, RunUntilBoundary boundary) noexcept;
-std::int64_t nextPendingTs(const std::vector<detail::EngineState>& engines) noexcept;
-std::int64_t nextUserEventDeliveryTs(const std::vector<detail::EngineState>& engines) noexcept;
+std::int64_t nextPendingTs(detail::ConstEngineView engines) noexcept;
+std::int64_t nextUserEventDeliveryTs(detail::ConstEngineView engines) noexcept;
 bool drainUserEvents(const trading_core::StrategyDescriptor& descriptor,
                      const BacktestStrategyInputPolicy& inputPolicy,
                      void* state,
@@ -62,16 +62,16 @@ bool drainUserEvents(const trading_core::StrategyDescriptor& descriptor,
 bool drainUserEventsMulti(const trading_core::StrategyDescriptor& descriptor,
                           const BacktestStrategyInputPolicy& inputPolicy,
                           void* state,
-                          std::vector<detail::EngineState>& engines,
-                          const std::vector<StrategyInstrumentSpec>& legInstruments,
+                          detail::EngineView engines,
+                          std::span<const StrategyInstrumentSpec> legInstruments,
                           MultiLegCycleScratch& scratch,
                           const trading_core::SymbolShardConfig& shard,
                           const trading_core::ShardControlState& control,
                           const BacktestRunRequest& request,
                           std::int64_t untilTs,
                           RunUntilBoundary boundary = RunUntilBoundary::Inclusive);
-bool hasUndeliveredUserEvents(const std::vector<detail::EngineState>& engines) noexcept;
-bool portfolioHasOpenState(const std::vector<detail::EngineState>& engines) noexcept;
+bool hasUndeliveredUserEvents(detail::ConstEngineView engines) noexcept;
+bool portfolioHasOpenState(detail::ConstEngineView engines) noexcept;
 std::int64_t toInt64Time(TimeNs value) noexcept;
 [[nodiscard]] bool hasExactExchangeTimestamp(
     const hftrec::replay::EventArrival& arrival,

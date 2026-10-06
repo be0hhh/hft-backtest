@@ -24,7 +24,7 @@ struct BacktestStrategyInputPolicy {
 
 [[nodiscard]] std::uint64_t backtestSourceFreshLegMask(
     const BacktestStrategyInputPolicy& inputPolicy,
-    const detail::EngineState* engines,
+    detail::ConstEngineView engines,
     std::size_t legCount,
     std::int64_t tsNs) noexcept;
 

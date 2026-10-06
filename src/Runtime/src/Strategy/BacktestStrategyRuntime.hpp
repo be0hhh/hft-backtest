@@ -27,6 +27,7 @@ enum class RunUntilBoundary : std::uint8_t {
 };
 
 struct SingleLegCycleScratch {
+  trading_core::StrategyOrderEvidenceView executionView{};
   std::array<trading_core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<trading_core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
   std::array<trading_core::StrategyCommandIntent,
@@ -40,6 +41,7 @@ struct SingleLegCycleScratch {
 };
 
 struct MultiLegCycleScratch {
+  std::array<trading_core::StrategyOrderEvidenceView, trading_core::kStrategyRuntimeMaxLegs> executionViews{};
   std::array<trading_core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<trading_core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
   std::array<trading_core::StrategyCommandIntent,
@@ -62,24 +64,27 @@ struct MultiLegCycleScratch {
 
   void reset(std::size_t count) noexcept;
   void refreshLeg(std::size_t leg,
-                  const std::vector<detail::EngineState>& engines,
-                  const std::vector<StrategyInstrumentSpec>& legInstruments) noexcept;
-  void refreshDirty(const std::vector<detail::EngineState>& engines,
-                    const std::vector<StrategyInstrumentSpec>& legInstruments) noexcept;
+                  detail::ConstEngineView engines,
+                  std::span<const StrategyInstrumentSpec> legInstruments) noexcept;
+  void refreshDirty(detail::ConstEngineView engines,
+                    std::span<const StrategyInstrumentSpec> legInstruments) noexcept;
 };
+
+void bindBacktestUserEventIdentity(trading_core::StrategyContext& context,
+    const detail::EngineState& engine) noexcept;
 
 [[nodiscard]] trading_core::StrategyAccountState accountStateFromEngine(
     const detail::EngineState& engine) noexcept;
 [[nodiscard]] std::size_t boundedRiskLegCount(std::size_t count) noexcept;
 void refreshRiskAccountsFromEngines(
-    const std::vector<detail::EngineState>& engines,
+    detail::ConstEngineView engines,
     std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs>& out) noexcept;
 void resolveRiskVenuesForSessions(
     const BacktestStrategyConfig& cfg,
     const std::vector<detail::SessionData>& sessions,
     std::array<const BacktestStrategyVenueConfig*, trading_core::kStrategyRuntimeMaxLegs>& out) noexcept;
 [[nodiscard]] bool forceCloseForTraderRisk(detail::EngineState& engine, std::int64_t tsNs);
-[[nodiscard]] std::int64_t portfolioEquityE8(const std::vector<detail::EngineState>& engines,
+[[nodiscard]] std::int64_t portfolioEquityE8(detail::ConstEngineView engines,
                                              std::int64_t initialBalanceE8) noexcept;
 [[nodiscard]] TimeNs timeNsFromI64(std::int64_t value) noexcept;
 [[nodiscard]] TimeNs replayUtcFromMonotonic(std::int64_t monotonicNs,
@@ -97,11 +102,11 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
                                  const Symbol& selectedSymbol,
                                  const StrategyInstrumentSpec& instrument,
                                  bool strategyVisible);
-void applyMarketEventToSnapshots(std::vector<detail::EngineState>& engines,
+void applyMarketEventToSnapshots(detail::EngineView engines,
                                  const std::vector<detail::SessionData>& sessions,
                                  const detail::TimelineEvent& event,
                                  const std::vector<Symbol>& symbols,
-                                 const std::vector<StrategyInstrumentSpec>& instruments,
+                                 std::span<const StrategyInstrumentSpec> instruments,
                                  bool strategyVisible);
 
 [[nodiscard]] bool runCycle(const trading_core::StrategyDescriptor& descriptor,
@@ -118,8 +123,8 @@ void applyMarketEventToSnapshots(std::vector<detail::EngineState>& engines,
 [[nodiscard]] bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
                                  const BacktestStrategyInputPolicy& inputPolicy,
                                  void* state,
-                                 std::vector<detail::EngineState>& engines,
-                                 const std::vector<StrategyInstrumentSpec>& legInstruments,
+                                 detail::EngineView engines,
+                                 std::span<const StrategyInstrumentSpec> legInstruments,
                                  MultiLegCycleScratch& scratch,
                                  const trading_core::SymbolShardConfig& shard,
                                  const trading_core::ShardControlState& control,
@@ -141,8 +146,8 @@ void applyMarketEventToSnapshots(std::vector<detail::EngineState>& engines,
 [[nodiscard]] bool runUntilMulti(const trading_core::StrategyDescriptor& descriptor,
                                  const BacktestStrategyInputPolicy& inputPolicy,
                                  void* state,
-                                 std::vector<detail::EngineState>& engines,
-                                 const std::vector<StrategyInstrumentSpec>& legInstruments,
+                                 detail::EngineView engines,
+                                 std::span<const StrategyInstrumentSpec> legInstruments,
                                  MultiLegCycleScratch& scratch,
                                  const trading_core::SymbolShardConfig& shard,
                                  const trading_core::ShardControlState& control,
@@ -162,8 +167,8 @@ void applyMarketEventToSnapshots(std::vector<detail::EngineState>& engines,
 [[nodiscard]] bool settleAfterReplayMulti(const trading_core::StrategyDescriptor& descriptor,
                                           const BacktestStrategyInputPolicy& inputPolicy,
                                           void* state,
-                                          std::vector<detail::EngineState>& engines,
-                                          const std::vector<StrategyInstrumentSpec>& legInstruments,
+                                          detail::EngineView engines,
+                                          std::span<const StrategyInstrumentSpec> legInstruments,
                                           MultiLegCycleScratch& scratch,
                                           const trading_core::SymbolShardConfig& shard,
                                           const trading_core::ShardControlState& control,

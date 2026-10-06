@@ -13,7 +13,7 @@
 
 namespace hft_backtest {
 
-inline constexpr std::uint32_t kBacktestApiVersion = 5u;
+inline constexpr std::uint32_t kBacktestApiVersion = 6u;
 
 extern "C" HFT_BACKTEST_API std::uint32_t hft_backtest_api_version() noexcept;
 
@@ -98,6 +98,9 @@ struct BacktestRunRequest {
   std::vector<BacktestSessionRequest> sessions{};
   std::filesystem::path corpusPath{};
   std::vector<BacktestCorpusSourceRequest> corpusSources{};
+  // Empty selections discover every config-eligible source in this folder.
+  std::int64_t corpusBeginReceiveNs{};
+  std::int64_t corpusEndReceiveNs{};
   std::filesystem::path configPath{};
   std::filesystem::path outputPath{};
   std::string requestId{};
@@ -207,6 +210,9 @@ struct BacktestLegSummary {
 };
 
 struct BacktestRunResult {
+  std::uint64_t universeSources{};
+  std::uint64_t universeContexts{};
+  std::uint64_t virtualAccounts{};
   Status status{Status::Unknown};
   std::string requestId{};
   std::string runId{};

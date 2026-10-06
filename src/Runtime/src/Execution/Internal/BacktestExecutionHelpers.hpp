@@ -59,7 +59,7 @@ cxet::composite::UserDataEvent makeCanceledOrderEvent(EngineState& engine,
                                                       const OpenOrder& order,
                                                       std::int64_t tsNs) noexcept;
 std::int64_t userEventDeliveryTs(EngineState& engine, std::int64_t eventTsNs) noexcept;
-void pushUserEvent(EngineState& engine, cxet::composite::UserDataEvent event, std::int64_t eventTsNs);
+void pushUserEvent(EngineState& engine, cxet::composite::UserDataEvent event, std::int64_t eventTsNs, Id clientIntentId, std::uint32_t contextIndex = 0u, bool service = false);
 void publishProblem(EngineState& engine,
                     canon::OrderProblem problem,
                     std::uint8_t commandKind,

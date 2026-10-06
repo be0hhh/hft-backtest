@@ -254,6 +254,9 @@ void loadInstrumentMetadata(const std::filesystem::path& path, InstrumentMetadat
   if (!readText(path, text)) return;
   (void)extractPositiveI64Field(text, "\"tick_size_e8\"", out.tickSizeE8);
   (void)extractPositiveI64Field(text, "\"lot_size_e8\"", out.lotSizeE8);
+  const bool canonicalStep = extractPositiveI64Field(text, "\"canonical_step_size_e8\"", out.lotSizeE8);
+  const bool executableStep = extractPositiveI64Field(text, "\"execution_quantity_step_e8\"", out.executionQuantityStepE8);
+  out.hasExecutionQuantityGrid = canonicalStep && executableStep;
   (void)extractPositiveI64Field(text, "\"contract_base_qty_e8\"", out.contractBaseQtyE8);
   (void)extractPositiveI64Field(text, "\"price_basis_qty_e8\"", out.priceBasisQtyE8);
   (void)extractPositiveI64Field(text, "\"expiry_utc_ns\"", out.expiryUtcNs);

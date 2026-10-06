@@ -11,6 +11,8 @@
 #include <utility>
 
 #include "../Internal/BacktestExecutionHelpers.hpp"
+#include "../../Strategy/Inputs/BacktestStrategyWarmup.hpp"
+#include "trading_core/Strategy/Orders/OrderDecisionCursor.hpp"
 
 namespace hft_backtest::detail::execution_detail {
 
@@ -53,9 +55,9 @@ std::int64_t fillableOrderQty(const EngineState& engine,
 
 bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
   if (!order.state.valid) return false;
-  if (!serviceOrder(order)) pushUserEvent(engine, makeRejectedOrderEvent(engine, order, tsNs), tsNs);
-  if (order.warmup) engine.warmupInFlight = false;
-  if (order.serviceAutounwind) engine.serviceExposureOpen = false;
+  updateSpotVenueReservation(engine, order, 0);
+  pushUserEvent(engine, makeRejectedOrderEvent(engine, order, tsNs), tsNs, order.state.clientIntentId, order.contextIndex, serviceOrder(order));
+  if (order.serviceAutounwind) engine.serviceExposureOpen = engine.netQtyRaw != 0;
   if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusRejected;
   order = OpenOrder{};
   bumpContextRevision(engine);
@@ -64,9 +66,9 @@ bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
 
 void terminalizeUnavailableLiquidity(EngineState& engine, OpenOrder& order, std::int64_t tsNs) {
   if (!order.state.valid) return;
-  if (!serviceOrder(order)) pushUserEvent(engine, makeCanceledOrderEvent(engine, order, tsNs), tsNs);
-  if (order.warmup) engine.warmupInFlight = false;
-  if (order.serviceAutounwind) engine.serviceExposureOpen = false;
+  updateSpotVenueReservation(engine, order, 0);
+  pushUserEvent(engine, makeCanceledOrderEvent(engine, order, tsNs), tsNs, order.state.clientIntentId, order.contextIndex, serviceOrder(order));
+  if (order.serviceAutounwind) engine.serviceExposureOpen = engine.netQtyRaw != 0;
   if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusPartialUnfilled;
   order = OpenOrder{};
   bumpContextRevision(engine);
@@ -290,11 +292,6 @@ void activateOrder(EngineState& engine, OpenOrder& order, std::int64_t activeTsN
   order.active = true;
   order.activeTsNs = activeTsNs;
   order.state.state = trading_core::StrategyOrderLocalState::LiveLocal;
-  if (order.warmup) {
-    engine.lastOrderPathHotMono = timeNsFromI64Local(activeTsNs);
-    engine.warmupInFlight = false;
-    engine.lastWarmupSkipReason = 0u;
-  }
   if (order.recordIndex < engine.orders.size()) {
     engine.orders[order.recordIndex].activeTsNs = activeTsNs;
     engine.orders[order.recordIndex].status = kRecordStatusActive;
@@ -307,6 +304,13 @@ void activateOrder(EngineState& engine, OpenOrder& order, std::int64_t activeTsN
     (void)rejectOrder(engine, order, activeTsNs);
     return;
   }
+  if (!reserveSpotVenueOrder(engine, order)) {
+    (void)rejectOrder(engine, order, activeTsNs);
+    return;
+  }
+  auto ack = makeCanceledOrderEvent(engine, order, activeTsNs);
+  ack.orderStatus = canon::OrderStatus::Open;
+  pushUserEvent(engine, ack, activeTsNs, order.state.clientIntentId, order.contextIndex, serviceOrder(order));
   if (order.state.orderType == canon::OrderType::Limit) {
     if (const trading_core::LocalOrderBookState* book = executionDepthBook(engine, activeTsNs); book != nullptr) {
       initializePassiveQueue(order, engine, *book);
@@ -331,7 +335,6 @@ using execution_detail::makeFillEvent;
 using execution_detail::marketDepthPlanUsable;
 using execution_detail::marketExecutionOrder;
 using execution_detail::needsTopExecutionBook;
-using execution_detail::nextOrderId;
 using execution_detail::oppositeSide;
 using execution_detail::overlayedTakerExecutionBook;
 using execution_detail::pushUserEvent;
@@ -349,12 +352,21 @@ std::size_t visibleOrders(const EngineState& engine,
                           trading_core::StrategyOrderState* out,
                           std::size_t capacity) noexcept {
   if (!out || capacity == 0u) return 0u;
+  if (!engine.simulationOrders || !engine.simulationOrders->ready) return 0u;
   std::size_t count = 0u;
-  for (const OpenOrder& order : engine.open) {
-    if (!order.state.valid) continue;
-    if (serviceOrder(order)) continue;
+  const auto view = simulationOrderEvidenceView(engine);
+  const auto& owner = *engine.simulationOrders;
+  for (std::size_t i = 0u; i < owner.identities.size(); ++i) {
+    const auto& identity = owner.identities[i];
+    if (!identity.clientIntentId.raw || identity.contextIndex != engine.activeContextIndex || owner.serviceFlags[i]) continue;
+    const auto* record = trading_core::strategy::canonicalOrderEvidence(view, identity.clientIntentId, identity.generation);
+    if (!record || record->terminal()) continue;
     if (count >= capacity) break;
-    out[count++] = order.state;
+    auto state = owner.localStates[i];
+    state.cancelPending = record->cancelStatus == trading_core::execution::CancelStatus::Pending;
+    state.state = state.cancelPending ? trading_core::StrategyOrderLocalState::CancelPending :
+        record->venueObserved ? trading_core::StrategyOrderLocalState::LiveLocal : trading_core::StrategyOrderLocalState::PendingNew;
+    out[count++] = state;
   }
   return count;
 }
@@ -373,11 +385,13 @@ bool fillOrderQty(EngineState& engine,
                   bool taker,
                   const FillExecutionMetadata& metadata) {
   if (engine.liquidated || engine.riskStopped) return false;
-  if (!order.state.valid || !order.active || order.state.qty.raw <= 0 || priceE8 <= 0) return false;
+  if (!order.state.valid || !order.active || order.state.qty.raw <= 0 || priceE8 <= 0 ||
+      (engine.capturedSourceManaged && (!engine.capturedSourceMember || (order.sourceGeneration != engine.capturedSourceGeneration || order.executionBoundaryEpoch != engine.executionBoundaryEpoch)))) return false;
   const std::int64_t fillQty = fillableOrderQty(engine, order, requestedQty);
   if (fillQty <= 0) return rejectOrder(engine, order, tsNs);
   const std::int64_t feeBpsE8 = taker ? engine.takerFeeBpsE8 : engine.makerFeeBpsE8;
   const std::int64_t closeQtyBefore = reduceOnlyPositionCloseQty(engine, order);
+  if (!spotVenueFillAffordable(engine, order, priceE8, fillQty, feeBpsE8)) return rejectOrder(engine, order, tsNs);
   const trading_core::FillPositionAccountingResult accounting = updatePosition(
       engine, order.state.side, priceE8, fillQty, tsNs, feeBpsE8);
   if (!accounting.applied) return rejectOrder(engine, order, tsNs);
@@ -386,6 +400,7 @@ bool fillOrderQty(EngineState& engine,
   order.filledQtyRaw += fillQty;
   const bool finalFill = order.filledQtyRaw >= order.state.qty.raw ||
                          (order.reduceOnly && closeQtyBefore != std::numeric_limits<std::int64_t>::max() && fillQty >= closeQtyBefore);
+  updateSpotVenueReservation(engine, order, finalFill ? 0 : order.state.qty.raw - order.filledQtyRaw);
   const std::uint8_t fillReason = metadata.fillReason != kFillReasonUnknown
                                       ? metadata.fillReason
                                       : (taker ? kFillReasonTop : kFillReasonTrade);
@@ -417,26 +432,92 @@ bool fillOrderQty(EngineState& engine,
                                   metadata.slippageE8,
                                   metadata.slippageBpsE8,
                                   metadata.executionBookConsumedPctE8});
+  engine.fills.back().contextIndex = order.contextIndex;
   appendEquityPoint(engine, tsNs);
   appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonFill);
   if (order.reduceOnly) ++engine.reduceOnlyFills;
   const bool serviceFill = serviceOrder(order);
-  if (!serviceFill) {
-    pushUserEvent(engine, makeFillEvent(engine, order, priceE8, fillQty, order.filledQtyRaw, tsNs, feeE8, netRealized, taker, finalFill), tsNs);
-  } else if (order.warmup) {
+  pushUserEvent(engine, makeFillEvent(engine, order, priceE8, fillQty, order.filledQtyRaw, tsNs, feeE8, netRealized, taker, finalFill),
+      tsNs, order.state.clientIntentId, order.contextIndex, serviceFill);
+  if (order.warmup) {
     engine.serviceExposureOpen = true;
     const Side unwindSide = oppositeSide(order.state.side);
+    std::int64_t unwindPrice{};
+    {
+      const auto& venueTop = effectiveBookTicker(engine.venueSnapshot);
+      const auto& opposite = unwindSide.raw == Side::Sell().raw ? venueTop.bid : venueTop.ask;
+      unwindPrice = opposite.px.raw;
+      if (unwindPrice <= 0 || opposite.qty.raw < fillQty) {
+        engine.simulationEvidenceFailed = true;
+        if (finalFill) {
+          if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
+          order = OpenOrder{};
+        }
+        bumpContextRevision(engine);
+        return true;
+      }
+    }
+    const auto savedContext = engine.activeContextIndex;
+    engine.activeContextIndex = order.contextIndex;
+    trading_core::OrderIntent unwindIntent;
+    unwindIntent.clientIntentId = strategy_runtime_detail::allocateBacktestServiceClientIntentId(engine);
+    unwindIntent.orderType = canon::OrderType::Market;
+    unwindIntent.side = unwindSide; unwindIntent.qty.raw = fillQty; unwindIntent.service = true;
+    if (!unwindIntent.clientIntentId.raw || !installSimulationOrderIntent(engine, unwindIntent) ||
+        !markSimulationWarmupIntent(engine, unwindIntent.clientIntentId, true) ||
+        !settleSimulationOrderSubmit(engine, unwindIntent.clientIntentId, true)) {
+      engine.activeContextIndex = savedContext;
+      engine.simulationEvidenceFailed = true;
+      if (finalFill) {
+        if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
+        order = OpenOrder{};
+      }
+      return true;
+    }
+    engine.activeContextIndex = savedContext;
+    OpenOrder unwind;
+    unwind.contextIndex = order.contextIndex; unwind.state.clientIntentId = unwindIntent.clientIntentId;
+    unwind.state.orderType = canon::OrderType::Market; unwind.state.side = unwindSide;
+    unwind.state.qty.raw = fillQty; unwind.reduceOnly = unwind.service = unwind.serviceAutounwind = true;
+    if (!reserveSpotVenueOrder(engine, unwind) ||
+        !spotVenueFillAffordable(engine, unwind, unwindPrice, fillQty, engine.takerFeeBpsE8)) {
+      updateSpotVenueReservation(engine, unwind, 0);
+      pushUserEvent(engine, makeRejectedOrderEvent(engine, unwind, tsNs), tsNs,
+          unwind.state.clientIntentId, unwind.contextIndex, true);
+      engine.simulationEvidenceFailed = true;
+      if (finalFill) {
+        if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
+        order = OpenOrder{};
+      }
+      return true;
+    }
+    auto unwindAck = makeCanceledOrderEvent(engine, unwind, tsNs);
+    unwindAck.orderStatus = canon::OrderStatus::Open;
+    pushUserEvent(engine, unwindAck, tsNs, unwind.state.clientIntentId, unwind.contextIndex, true);
     const trading_core::FillPositionAccountingResult unwindAccounting =
         updatePosition(engine,
                        unwindSide,
-                       priceE8,
+                       unwindPrice,
                        fillQty,
                        tsNs,
                        engine.takerFeeBpsE8);
+    if (!unwindAccounting.applied) {
+      updateSpotVenueReservation(engine, unwind, 0);
+      pushUserEvent(engine, makeRejectedOrderEvent(engine, unwind, tsNs), tsNs,
+          unwind.state.clientIntentId, unwind.contextIndex, true);
+      engine.simulationEvidenceFailed = true;
+      if (finalFill) {
+        if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
+        order = OpenOrder{};
+      }
+      return true;
+    }
+    updateSpotVenueReservation(engine, unwind, 0);
     const std::int64_t unwindRealized = unwindAccounting.netRealizedPnlE8;
     JsonOrder unwindOrder{};
     unwindOrder.legIndex = engine.legIndex;
-    unwindOrder.id = nextOrderId(engine);
+    unwindOrder.id = unwindIntent.clientIntentId.raw;
+    unwindOrder.contextIndex = order.contextIndex;
     unwindOrder.submitTsNs = tsNs;
     unwindOrder.activeTsNs = tsNs;
     unwindOrder.tsNs = tsNs;
@@ -444,7 +525,7 @@ bool fillOrderQty(EngineState& engine,
     unwindOrder.side = recordSide(unwindSide);
     unwindOrder.type = kRecordTypeMarket;
     unwindOrder.status = kRecordStatusFilled;
-    unwindOrder.priceE8 = priceE8;
+    unwindOrder.priceE8 = unwindPrice;
     unwindOrder.qtyE8 = fillQty;
     unwindOrder.reduceOnly = true;
     unwindOrder.service = true;
@@ -453,10 +534,11 @@ bool fillOrderQty(EngineState& engine,
     JsonFill unwindFill{};
     unwindFill.legIndex = engine.legIndex;
     unwindFill.orderId = unwindOrder.id;
+    unwindFill.contextIndex = order.contextIndex;
     unwindFill.entryTsNs = tsNs;
     unwindFill.exitTsNs = tsNs;
     unwindFill.side = recordSide(unwindSide);
-    unwindFill.priceE8 = priceE8;
+    unwindFill.priceE8 = unwindPrice;
     unwindFill.qtyE8 = fillQty;
     unwindFill.realizedPnlE8 = unwindRealized;
     unwindFill.reduceOnly = true;
@@ -464,16 +546,18 @@ bool fillOrderQty(EngineState& engine,
     unwindFill.liquidity = kFillLiquidityTaker;
     unwindFill.orderQtyE8 = fillQty;
     unwindFill.cumulativeFilledQtyE8 = fillQty;
-    unwindFill.avgPriceE8 = priceE8;
+    unwindFill.avgPriceE8 = unwindPrice;
     engine.fills.push_back(unwindFill);
+    pushUserEvent(engine, makeFillEvent(engine, unwind, unwindPrice, fillQty, fillQty, tsNs,
+        unwindAccounting.feeE8, unwindRealized, true, true), tsNs,
+        unwind.state.clientIntentId, unwind.contextIndex, true);
     appendEquityPoint(engine, tsNs);
     appendRiskSnapshot(engine, tsNs, kRiskSnapshotReasonFill);
     ++engine.reduceOnlyFills;
     engine.serviceExposureOpen = false;
   }
   if (finalFill) {
-    if (order.warmup) engine.warmupInFlight = false;
-    if (order.serviceAutounwind) engine.serviceExposureOpen = false;
+      if (order.serviceAutounwind) engine.serviceExposureOpen = engine.netQtyRaw != 0;
     if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
     order = OpenOrder{};
   } else if (order.recordIndex < engine.orders.size()) {
@@ -521,6 +605,7 @@ void triggerStopMarketsOnLastBbo(EngineState& engine,
                                  std::int64_t tsNs) {
   if (bid <= 0 || ask <= 0) return;
   for (OpenOrder& order : engine.open) {
+    if (engine.capturedSourceManaged && (!engine.capturedSourceMember || (order.sourceGeneration != engine.capturedSourceGeneration || order.executionBoundaryEpoch != engine.executionBoundaryEpoch))) continue;
     if (!order.state.valid || !order.active || order.stopTriggered) continue;
     if (order.state.orderType != canon::OrderType::Stop ||
         order.state.triggerSource != canon::OrderTriggerSource::Last) continue;
@@ -551,6 +636,7 @@ void tryFillOnTop(EngineState& engine,
     fillBook = &overlayedTakerExecutionBook(engine.venueSnapshot, top, *rawBook, overlayBook);
   }
   for (OpenOrder& order : engine.open) {
+    if (engine.capturedSourceManaged && (!engine.capturedSourceMember || (order.sourceGeneration != engine.capturedSourceGeneration || order.executionBoundaryEpoch != engine.executionBoundaryEpoch))) continue;
     if (!order.state.valid || !order.active) continue;
     if (order.state.orderType == canon::OrderType::Stop && !order.stopTriggered) continue;
     AggressiveFillPlan* plan = fillBook != nullptr ? &topExecutionFillPlanScratch(engine) : nullptr;
@@ -636,6 +722,7 @@ void tryFillOnTrade(EngineState& engine,
                     std::int64_t venueTsNs) {
   if (engine.liquidated || engine.riskStopped) return;
   for (OpenOrder& order : engine.open) {
+    if (engine.capturedSourceManaged && (!engine.capturedSourceMember || (order.sourceGeneration != engine.capturedSourceGeneration || order.executionBoundaryEpoch != engine.executionBoundaryEpoch))) continue;
     if (!order.state.valid || !order.active || order.state.orderType == canon::OrderType::Market ||
         order.state.orderType == canon::OrderType::Stop) continue;
     const PassiveQueueTradeFill fill = consumePassiveQueueForTrade(engine, order, trade);

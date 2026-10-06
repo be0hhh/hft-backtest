@@ -14,7 +14,7 @@ foreach(required_target IN ITEMS
     cxet::cxet_lib
     trading_core::algorithm
     trading_core::execution
-    trading_core_needed_math
+    trading_core_math
     trading_core::strategy
     hftrec::corpus_contract
     absl::flat_hash_map
@@ -120,10 +120,12 @@ add_library(hft_backtest_core STATIC
   src/Runtime/src/Replay/BacktestReplayClock.cpp
   src/Runtime/src/Replay/BacktestTimeline.cpp
   src/Runtime/src/Execution/BacktestExecution.cpp
+  src/Runtime/src/Execution/BacktestOrderEvidence.cpp
   src/Runtime/src/Execution/Model/BacktestExecutionDepth.cpp
   src/Runtime/src/Execution/Model/BacktestFillModel.cpp
   src/Runtime/src/Execution/Model/BacktestLatency.cpp
   src/Runtime/src/Input/Binary/BinaryCorpusLoader.cpp
+  src/Runtime/src/Input/Binary/BinaryCorpusStream.cpp
   src/Runtime/src/Input/Binary/BinaryCorpusDepth.cpp
   src/Runtime/src/Input/Session/SessionLoader.cpp
   src/Runtime/src/Input/Session/SessionChannels.cpp
@@ -131,6 +133,7 @@ add_library(hft_backtest_core STATIC
   src/Runtime/src/Results/BacktestResultWriter.cpp
   src/Runtime/src/Run/Backtest.cpp
     src/Runtime/src/Strategy/Inputs/BacktestStrategySnapshots.cpp
+    src/Runtime/src/Strategy/Inputs/BacktestStrategyInstrument.cpp
     src/Runtime/src/Strategy/Cycle/BacktestStrategySingleCycle.cpp
     src/Runtime/src/Strategy/Cycle/BacktestStrategyPortfolioCycle.cpp
     src/Runtime/src/Strategy/Execution/BacktestStrategySettlement.cpp
@@ -146,6 +149,9 @@ add_library(hft_backtest_core STATIC
     src/Runtime/src/Results/BacktestResultManifest.cpp
     src/Runtime/src/Run/BacktestPreparation.cpp
     src/Runtime/src/Run/BacktestReplay.cpp
+  src/Runtime/src/Run/BacktestUniverse.cpp
+  src/Runtime/src/Run/BacktestUniversePreparation.cpp
+  src/Runtime/src/Run/BacktestUniverseMembership.cpp
     src/Runtime/src/Run/BacktestFinalization.cpp
     src/Runtime/src/Run/BacktestArtifacts.cpp
     src/Runtime/src/Run/BacktestReplayRisk.cpp
@@ -171,7 +177,7 @@ add_dependencies(hft_backtest_core hft_backtest_generate_strategy_metadata)
 target_link_libraries(hft_backtest_core
   PUBLIC
     cxet::cxet_lib
-    trading_core_needed_math
+    trading_core_math
     trading_core::algorithm
     trading_core::execution
   PRIVATE

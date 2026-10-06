@@ -61,10 +61,10 @@ bool backtestStrategySnapshotReady(
 
 std::uint64_t backtestSourceFreshLegMask(
     const BacktestStrategyInputPolicy& inputPolicy,
-    const detail::EngineState* engines,
+    detail::ConstEngineView engines,
     std::size_t legCount,
     std::int64_t tsNs) noexcept {
-  if (!engines || legCount == 0u) return 0u;
+  if (engines.empty() || legCount == 0u) return 0u;
   const TimeNs nowMono = backtestMonoFromTs(tsNs);
   std::uint64_t out = 0u;
   for (std::size_t i = 0u; i < legCount && i < 64u; ++i) {

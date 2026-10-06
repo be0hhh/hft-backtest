@@ -18,7 +18,11 @@ bool buildTradeWarmupRows(const detail::SessionData& session,
   stats.rowsProvided = static_cast<std::uint64_t>(session.tradeWarmup.size());
   stats.firstTs = timeNsFromI64(session.tradeWarmup.empty() ? 0 : session.tradeWarmup.front().tsNs);
   stats.lastTs = timeNsFromI64(session.tradeHistoryRequestedEndNs > 0 ? session.tradeHistoryRequestedEndNs : (session.tradeWarmup.empty() ? 0 : session.tradeWarmup.back().tsNs));
-  for (const detail::TradeRow& row : session.tradeWarmup) out.push_back(detail::toRuntime(row));
+  for (const detail::TradeRow& row : session.tradeWarmup) {
+    cxet::composite::Trade trade{};
+    if (!detail::toRuntime(row, trade)) { out.clear(); return false; }
+    out.push_back(trade);
+  }
   return !out.empty();
 }
 
@@ -117,14 +121,14 @@ bool warmupReasonFailOpen(trading_core::strategy::OrderPathWarmupSkipReason reas
 
 trading_core::StrategyOrderPathWarmupView backtestWarmupView(const detail::EngineState& engine) noexcept {
   trading_core::StrategyOrderPathWarmupView view{};
-  view.lastCommandMono = engine.lastOrderPathHotMono;
-  view.lastWarmupMono = engine.lastOrderPathHotMono;
-  view.lastAckMono = engine.lastOrderPathHotMono;
-  view.lastHotMono = engine.lastOrderPathHotMono;
+  view.lastCommandMono = engine.lastOrderPathCommandMono;
+  view.lastWarmupMono = engine.lastOrderPathWarmupMono;
+  view.lastAckMono = engine.lastOrderPathAckMono;
+  view.lastHotMono = engine.lastOrderPathAckMono;
   view.lastSkipReason = engine.lastWarmupSkipReason;
   view.sessionHealthy = true;
   view.warmupInFlight = engine.warmupInFlight;
-  view.serviceExposureOpen = engine.serviceExposureOpen;
+  view.serviceExposureOpen = engine.observedServiceNetQtyRaw != 0;
   view.routeHot = view.sessionHealthy &&
                   !view.warmupInFlight &&
                   !view.serviceExposureOpen &&
@@ -142,13 +146,10 @@ bool backtestOrderPathHot(const detail::EngineState& engine, TimeNs nowMono) noe
 }
 
 Id allocateBacktestServiceClientIntentId(detail::EngineState& engine) noexcept {
-  if ((engine.nextServiceClientIntentRaw & 0x8000000000000000ull) == 0u ||
-      engine.nextServiceClientIntentRaw == 0u) {
-    engine.nextServiceClientIntentRaw = 0x8000000000000000ull;
-  }
+  if ((engine.nextServiceClientIntentRaw & 0x8000000000000000ull) == 0u)
+    return Id{};
   Id out{};
   out.raw = engine.nextServiceClientIntentRaw++;
-  if (engine.nextServiceClientIntentRaw == 0u) engine.nextServiceClientIntentRaw = 0x8000000000000000ull;
   return out;
 }
 
@@ -158,10 +159,10 @@ void markBacktestWarmupSkipped(detail::EngineState& engine,
 }
 
 bool applyBacktestWarmupGate(trading_core::StrategyContext& ctx,
-                             detail::EngineState* engines,
+                             detail::EngineView engines,
                              std::size_t engineCount,
                              const BacktestRunRequest& request) noexcept {
-  if (!engines || engineCount == 0u || ctx.io.commandOut.size() == 0u) return false;
+  if (engines.empty() || engineCount == 0u || ctx.io.commandOut.size() == 0u) return false;
   std::size_t warmupLegs[trading_core::kStrategyRuntimeMaxLegs]{};
   trading_core::OrderIntent warmupTemplates[trading_core::kStrategyRuntimeMaxLegs]{};
   std::size_t warmupRouteCount = 0u;

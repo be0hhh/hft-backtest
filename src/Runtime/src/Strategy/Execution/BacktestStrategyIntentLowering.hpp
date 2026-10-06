@@ -61,7 +61,7 @@ void applyToSingleLeg(
     const BacktestRunRequest& request);
 
 void applyToLegs(
-    Span<detail::EngineState> engines,
+    detail::EngineView engines,
     const trading_core::StrategyContext& context,
     std::int64_t tsNs,
     const BacktestRunRequest& request);
@@ -70,7 +70,7 @@ void applyToLegs(
     const trading_core::StrategyDescriptor& descriptor,
     void* state,
     const trading_core::StrategyContext& context,
-    Span<detail::EngineState> engines,
+    detail::EngineView engines,
     std::int64_t tsNs,
     StrategyTransactionAdmission admission);
 

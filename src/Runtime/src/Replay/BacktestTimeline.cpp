@@ -25,6 +25,8 @@ bool timelineLess(const TimelineEvent& lhs, const TimelineEvent& rhs) noexcept {
 const hftrec::replay::EventArrival& arrivalFor(const SessionData& session,
                                                std::uint8_t kind,
                                                std::size_t index) noexcept {
+  if (kind == kTimelineKindHealth) return session.sourceHealth[index].arrival;
+  if (kind == kTimelineKindLifecycle) return session.sourceLifecycle[index].arrival;
   if (kind == kTimelineKindDepth) return session.depths[index].arrival;
   if (kind == kTimelineKindTrade) return session.trades[index].arrival;
   if (kind == kTimelineKindBookTicker) return session.bookTickers[index].arrival;
@@ -34,6 +36,8 @@ const hftrec::replay::EventArrival& arrivalFor(const SessionData& session,
 std::int64_t exchangeTsFor(const SessionData& session,
                            std::uint8_t kind,
                            std::size_t index) noexcept {
+  if (kind == kTimelineKindHealth) return session.sourceHealth[index].record.header.exchangeTimestampNs;
+  if (kind == kTimelineKindLifecycle) return session.sourceLifecycle[index].exchangeTsNs;
   if (kind == kTimelineKindDepth) return session.depths[index].tsNs;
   if (kind == kTimelineKindTrade) return session.trades[index].tsNs;
   if (kind == kTimelineKindBookTicker) return session.bookTickers[index].tsNs;
@@ -43,6 +47,8 @@ std::int64_t exchangeTsFor(const SessionData& session,
 std::int64_t ingestSeqFor(const SessionData& session,
                           std::uint8_t kind,
                           std::size_t index) noexcept {
+  if (kind == kTimelineKindHealth) return static_cast<std::int64_t>(session.sourceHealth[index].arrival.shardSequence);
+  if (kind == kTimelineKindLifecycle) return static_cast<std::int64_t>(session.sourceLifecycle[index].arrival.shardSequence);
   if (kind == kTimelineKindDepth) return session.depths[index].ingestSeq;
   if (kind == kTimelineKindTrade) return session.trades[index].ingestSeq;
   if (kind == kTimelineKindBookTicker) return session.bookTickers[index].ingestSeq;
@@ -72,9 +78,8 @@ TimelineEvent makeEvent(const SessionData& session,
   const bool applicationAtomicRebase =
       kind == kTimelineKindDepth &&
       session.depths[index].applicationAtomicRebase;
-  const bool applicationOnly =
-      kind == kTimelineKindBookTicker &&
-      session.bookTickers[index].freshnessOnly;
+  const bool applicationOnly = kind == kTimelineKindLifecycle || kind == kTimelineKindHealth ||
+      (kind == kTimelineKindBookTicker && session.bookTickers[index].freshnessOnly);
 
   TimelineEvent out{};
   out.tsNs = applicationAtomicRebase || applicationOnly
@@ -104,6 +109,8 @@ TimelineEvent makeEvent(const SessionData& session,
 }
 
 std::size_t channelSize(const SessionData& session, std::uint8_t kind) noexcept {
+  if (kind == kTimelineKindHealth) return session.sourceHealth.size();
+  if (kind == kTimelineKindLifecycle) return session.sourceLifecycle.size();
   if (kind == kTimelineKindDepth) return session.depths.size();
   if (kind == kTimelineKindTrade) return session.trades.size();
   if (kind == kTimelineKindBookTicker) return session.bookTickers.size();

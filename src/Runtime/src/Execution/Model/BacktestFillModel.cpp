@@ -33,13 +33,13 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
                                           const cxet::composite::Trade& trade) noexcept {
   const std::int64_t minCross = makerFillMinCrossE8(engine);
   if (minCross == std::numeric_limits<std::int64_t>::max()) return false;
-  if (trade.initiatorSide == cxet::composite::TradeInitiatorSide::Buyer && order.state.side.raw == Side::Sell().raw) {
+  if (trade.initiatorSide() == cxet::composite::TradeInitiatorSide::Buyer && order.state.side.raw == Side::Sell().raw) {
     if (order.state.price.raw > std::numeric_limits<std::int64_t>::max() - minCross) return false;
-    return trade.price.raw >= order.state.price.raw + minCross;
+    return trade.price().raw >= order.state.price.raw + minCross;
   }
-  if (trade.initiatorSide == cxet::composite::TradeInitiatorSide::Seller && order.state.side.raw == Side::Buy().raw) {
+  if (trade.initiatorSide() == cxet::composite::TradeInitiatorSide::Seller && order.state.side.raw == Side::Buy().raw) {
     if (order.state.price.raw < std::numeric_limits<std::int64_t>::min() + minCross) return false;
-    return trade.price.raw <= order.state.price.raw - minCross;
+    return trade.price().raw <= order.state.price.raw - minCross;
   }
   return false;
 }
@@ -99,10 +99,12 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
   (void)engine;
   if (order.state.price.raw <= 0) return 0;
   const trading_core::LocalOrderBookView view = trading_core::orderBook(book);
-  const trading_core::LocalOrderBookSideState* side = view.side(passiveBookSide(order));
+  const trading_core::BookSide bookSide = passiveBookSide(order);
+  const trading_core::LocalOrderBookSideState* side = view.side(bookSide);
   if (side == nullptr) return 0;
   for (std::uint32_t i = 0u; i < side->activeCount.raw; ++i) {
-    const trading_core::LocalOrderBookLevel& level = side->levels[i];
+    trading_core::LocalOrderBookLevel level{};
+    if (!view.readLevel(bookSide, Index{i}, level)) return 0;
     if (level.px.raw == order.state.price.raw) return level.qty.raw > 0 ? level.qty.raw : 0;
   }
   return 0;
@@ -231,16 +233,22 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
   if (limitOrder && order.lastAggressiveBookTsNs != 0) return false;
 
   const trading_core::LocalOrderBookView view = trading_core::orderBook(book);
-  const trading_core::LocalOrderBookSideState* side = view.side(aggressiveBookSide(order));
+  const trading_core::BookSide bookSide = aggressiveBookSide(order);
+  const trading_core::LocalOrderBookSideState* side = view.side(bookSide);
   if (side == nullptr) return false;
   out.bookTsNs = book.ts.raw <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
                      ? static_cast<std::int64_t>(book.ts.raw)
                      : std::numeric_limits<std::int64_t>::max();
-  if (side->activeCount.raw != 0u) out.referencePriceE8 = side->levels[0].px.raw;
+  if (side->activeCount.raw != 0u) {
+    trading_core::LocalOrderBookLevel level{};
+    if (!view.readLevel(bookSide, Index{0u}, level)) return false;
+    out.referencePriceE8 = level.px.raw;
+  }
 
   std::int64_t visibleExecutableQty = 0;
   for (std::uint32_t i = 0u; i < side->activeCount.raw; ++i) {
-    const trading_core::LocalOrderBookLevel& level = side->levels[i];
+    trading_core::LocalOrderBookLevel level{};
+    if (!view.readLevel(bookSide, Index{i}, level)) return false;
     if (level.px.raw <= 0 || level.qty.raw <= 0) continue;
     if (!levelExecutableByLimit(order, level.px.raw)) break;
     if (visibleExecutableQty > std::numeric_limits<std::int64_t>::max() - level.qty.raw) {
@@ -259,7 +267,8 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
   __int128 notionalSum = 0;
   std::int64_t remaining = out.requestedQtyE8;
   for (std::uint32_t i = 0u; i < side->activeCount.raw && remaining > 0 && out.count < out.chunks.size(); ++i) {
-    const trading_core::LocalOrderBookLevel& level = side->levels[i];
+    trading_core::LocalOrderBookLevel level{};
+    if (!view.readLevel(bookSide, Index{i}, level)) return false;
     if (level.px.raw <= 0 || level.qty.raw <= 0) continue;
     if (!levelExecutableByLimit(order, level.px.raw)) break;
     const std::int64_t fillQty = level.qty.raw < remaining ? level.qty.raw : remaining;
@@ -294,13 +303,13 @@ PassiveQueueTradeFill consumePassiveQueueForTrade(EngineState& engine,
   }
   out.queueAheadBeforeE8 = order.queueAheadQtyRaw;
   out.queueAheadAfterE8 = order.queueAheadQtyRaw;
-  if (trade.qty.raw <= 0 || !makerTradeCrossesOrder(engine, order, trade)) return out;
-  if (trade.qty.raw <= order.queueAheadQtyRaw) {
-    order.queueAheadQtyRaw -= trade.qty.raw;
+  if (trade.qty().raw <= 0 || !makerTradeCrossesOrder(engine, order, trade)) return out;
+  if (trade.qty().raw <= order.queueAheadQtyRaw) {
+    order.queueAheadQtyRaw -= trade.qty().raw;
     out.queueAheadAfterE8 = order.queueAheadQtyRaw;
     return out;
   }
-  out.requestedQtyE8 = trade.qty.raw - order.queueAheadQtyRaw;
+  out.requestedQtyE8 = trade.qty().raw - order.queueAheadQtyRaw;
   order.queueAheadQtyRaw = 0;
   out.queueAheadAfterE8 = 0;
   return out;

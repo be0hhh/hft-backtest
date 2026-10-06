@@ -1,4 +1,5 @@
 #include "Internal/BacktestStrategyConfigHelpers.hpp"
+#include "cxet/Parse/DecimalToScaled.hpp"
 #include "BacktestStrategyConfig.hpp"
 
 
@@ -211,7 +212,7 @@ namespace strategy_config {
 [[nodiscard]] bool ignoredVenueOnlyKey(const std::string& key) noexcept {
   return key == "api_slot" || key == "market_enabled" ||
       key == "user_enabled" || key == "order_enabled" ||
-      key == "control_enabled" || key == "initial_balance_usdt" ||
+      key == "control_enabled" ||
       key == "maker_fee_bps" || key == "taker_fee_bps" ||
       key == "recovery_account_exclusive" ||
       key == "market_ws_lanes" || key == "user_ws_lanes" ||
@@ -386,6 +387,12 @@ bool loadBacktestStrategyConfig(const char* path,
           }
           currentVenue.symbols.push_back(symbol);
         }
+      } else if (key == "initial_balance_usdt") {
+        if (!cxet::parse::parseUnsignedScaledDecimalStrict(
+              cxet::StringView{value.data(), value.size()}, 8u, &currentVenue.initialBalanceE8)) {
+          error = "invalid exact venue initial_balance_usdt"; return false;
+        }
+        currentVenue.hasInitialBalance = true;
       } else if (key == "live_probe") {
         if (!parseLiveProbeMode(value, currentVenue.liveProbe)) {
           error = "invalid venue live_probe: " + currentVenue.name;

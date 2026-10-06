@@ -43,8 +43,10 @@ processors and `-j N` overrides it. See `--help` for supported options.
 
 The `cpp` workflow overlays the triggering Backtest revision into the private
 CXETCPP root checkout for direct-source family integration. The retired offline
-CTest suite is not current acceptance evidence; new meaningful checks are
-deferred. The badge is a workflow link, not evidence of current passing CI.
+CTest suite is not current acceptance evidence. The current registered owner
+offline suites check quota, captured replay and canonical order evidence; their
+local results are separate from CI. The badge is a workflow link, not evidence
+of current passing CI.
 The root checkout requires
 the repository secret `CI_CXETCPP_SSH_KEY`; fork pull requests without that
 secret fail explicitly before checkout and do not provide a passing CI result.
@@ -52,8 +54,63 @@ secret fail explicitly before checkout and do not provide a passing CI result.
 Run and sweep artifacts contain financial/simulation results without stage,
 wall/CPU or depth-read profiling. Simulated execution latency, replay timestamps,
 fills, equity, drawdown, progress and bounded sweep worker scheduling remain.
-The public Backtest ABI is version 4; Recorder checks that same numeric guard
-before invoking the runtime. Financial JSON schemas remain `run.result` schema 4
-and `sweep.result.v1` schema 1: removing optional profiling metadata leaves their
-financial payload unchanged, and existing financial artifacts remain readable.
-The cleanup has static-only acceptance; build, tests and GUI execution are unrun.
+The public Backtest ABI is version 6; Recorder checks that numeric guard before
+invoking the runtime. New `run.result` artifacts use schema 5; `fills.csv` adds
+`context_index` after the existing columns. Recorder can display older schema 4
+financial summaries read-only.
+
+Binary corpus runs stream checked compressed blocks directly into bounded RAM.
+An empty corpus source selection discovers eligible contexts over the recording
+folder: single-source strategies run each source, canonical cross-venue
+strategies group the same instrument, and explicit groups come from the strategy
+configuration. Account balances and quotas are shared across its instruments.
+The whole run requires one common exact captured quote asset; unknown or mixed
+currencies are refused before strategy admission. Account totals use this same
+unit without conversion. Missing canonical execution/reference inputs are refused.
+
+Recorded monotonic arrival determines when data becomes visible to the strategy;
+exchange timestamps remain market evidence. Source lifecycle boundaries suspend
+affected contexts and preserve their orders and positions. Stream decode creates
+no unpacked file. The preparation memory guard is not an RSS or throughput proof.
+
+This adapter requires the recorded canonical executable quantity grid and
+exact recorded market-quantity conversion authority for Crypto Spot or linear
+Futures/Swaps. Unknown, inverse and traditional-finance market units,
+nonunit price-basis accounting, transaction
+actors and instrument-rule rebinding remain unsupported and fail before admission
+or at the captured rule boundary. A source pause retains venue orders; real data
+from a healthy sibling source can still fill its existing venue-active orders.
+
+Whole-universe replay uses the binary corpus's exact quote identity. Configured
+sources without market rows keep paused contexts while healthy sources proceed.
+Legacy JSON archives remain structurally readable, but executable replay
+requires the current binary quantity authority. Multiple legacy sessions also
+lack authoritative common quote identity and refuse before balance aggregation.
+
+Spot simulation owns shared quote cash and working-buy reservations per venue
+account, and base inventory and working-sell reservations per captured source.
+It refuses unfunded buys and naked sells. Fills debit or credit principal and
+exact Core fees; linear Futures/Swaps retain the PnL wallet model. Local pending
+reservations are immediately known, while venue ACK, fill, rejection and cancel
+facts advance observed cash, inventory and terminal releases only at modeled
+private delivery. Shared-account private delivery preserves venue event order
+across sources even when latency samples tie; payload timestamps are unchanged.
+
+Spot equity includes marked positive base inventory. During a source pause it
+uses the last genuine bid received on each actual/observed plane as a historical
+valuation; this cache supplies no quote readiness or fill liquidity. Service
+unwind on Spot and linear Futures/Swaps requires a genuine opposite venue price and sufficient visible quantity;
+missing liquidity retains exposure and refuses continuation. Aggregate wallet
+results sum actual source cash contributions with each account seeded once.
+
+Warmup command timestamps describe local sends. ACK timestamps and warmup
+settlement become visible only on correlated private delivery. Service exposure
+tracks only delivered tagged warmup/unwind fills, separately from ordinary
+strategy inventory. PnL curves include actual per-source unrealized marks; final
+aggregate snapshots sum quote-denominated PnL without a cross-symbol price.
+
+The bounded canonical simulation evidence owner retains at most 1024 orders per
+source, including terminals, and refuses exhaustion without eviction. These
+source changes and fixtures are static-only until the authorized owner check
+can compile past the current Core dependency blockers. They provide no CI,
+performance, runtime or live-trading proof.

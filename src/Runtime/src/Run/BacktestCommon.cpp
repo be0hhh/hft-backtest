@@ -205,15 +205,23 @@ Side sideFromRow(std::int64_t raw) noexcept {
   return raw == 1 ? Side::Buy() : Side::Sell();
 }
 
-cxet::composite::Trade toRuntime(const TradeRow& row) noexcept {
-  cxet::composite::Trade out{};
-  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
-  out.price.raw = row.priceE8;
-  out.qty.raw = row.qtyE8;
-  out.initiatorSide = row.side == 1 ? cxet::composite::TradeInitiatorSide::Buyer
+bool toRuntime(const TradeRow& row, cxet::composite::Trade& out) noexcept {
+  using Shape = cxet::api::market::PublicMarketNativeIdentityShape;
+  Id projected{};
+  projected.raw = row.nativeIdentity.nativeShape == Shape::U64Pair
+      ? row.nativeIdentity.nativeSecond : row.nativeIdentity.nativeFirst;
+  if (!trading_core::nativeTradeIdentityMatches(projected, row.nativeIdentity)) return false;
+  Price price{}; price.raw = row.priceE8;
+  Amount quantity{}; quantity.raw = row.qtyE8;
+  const auto side = row.side == 1 ? cxet::composite::TradeInitiatorSide::Buyer
       : (row.side == 0 ? cxet::composite::TradeInitiatorSide::Seller
                        : cxet::composite::TradeInitiatorSide::Unknown);
-  return out;
+  if (row.side < -1 || row.side > 1 || !out.setValues(price, quantity, side)) return false;
+  out.ts.raw = static_cast<std::uint64_t>(row.tsNs > 0 ? row.tsNs : 0);
+  // The currently registered exact Trade pair is Hyperliquid time+tid,
+  // whose native scalar component is the second limb.
+  out.eventId = projected;
+  return true;
 }
 
 cxet::composite::BookTicker toRuntime(const BookTickerRow& row) noexcept {

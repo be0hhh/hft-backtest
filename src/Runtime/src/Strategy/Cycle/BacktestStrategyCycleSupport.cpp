@@ -7,11 +7,13 @@
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
 #include "trading_core/Strategy/Orders/WarmupIntents.hpp"
+#include "trading_core/Strategy/Orders/OrderDecisionCursor.hpp"
 #include "trading_core/Strategy/StrategyInputFreshness.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
 #include <algorithm>
 #include <limits>
+#include <iterator>
 #include <string>
 
 #include "../Internal/BacktestStrategyRuntimeHelpers.hpp"
@@ -80,3 +82,36 @@ void bindBacktestStrategyStateView(
 
 }  // namespace hft_backtest::strategy_runtime_detail
 
+
+namespace hft_backtest {
+void bindBacktestUserEventIdentity(trading_core::StrategyContext& context,
+    const detail::EngineState& engine) noexcept {
+  context.userEventClientIntentId = {};
+  context.userEventGeneration = 0u;
+  if (!context.hasUserEvent || !context.userEvent || engine.deliveredUserEvents == 0u) return;
+  const auto index = engine.lastDeliveredUserEvent < engine.userEvents.size()
+      ? engine.lastDeliveredUserEvent : engine.deliveredUserEvents - 1u;
+  if (index >= engine.userEvents.size() || index >= engine.userEventClientIntentIds.size() ||
+      index >= engine.userEventGenerations.size() || index >= engine.userEventCommandIds.size() ||
+      index >= engine.userEventContextIndices.size() || index >= engine.userEventConsumed.size() ||
+      !engine.userEventConsumed[index] ||
+      (index < engine.userEventServiceFlags.size() && engine.userEventServiceFlags[index]) ||
+      engine.userEventContextIndices[index] != engine.activeContextIndex ||
+      engine.userEvents[index].eventId.raw != context.userEvent->eventId.raw ||
+      engine.userEvents[index].exchangeId.raw != context.userEvent->exchangeId.raw ||
+      engine.userEvents[index].orderStatus != context.userEvent->orderStatus ||
+      engine.userEvents[index].updateTime.raw != context.userEvent->updateTime.raw ||
+      engine.userEvents[index].filledQty.raw != context.userEvent->filledQty.raw ||
+      !std::equal(std::begin(engine.userEvents[index].symbol.data), std::end(engine.userEvents[index].symbol.data),
+          std::begin(context.userEvent->symbol.data)) ||
+      !std::equal(std::begin(engine.userEvents[index].clientOrderId.data), std::end(engine.userEvents[index].clientOrderId.data),
+          std::begin(context.userEvent->clientOrderId.data))) return;
+  const auto view = detail::simulationOrderEvidenceView(engine);
+  const auto* evidence = trading_core::strategy::canonicalOrderEvidenceIdentity(
+      view, engine.userEventClientIntentIds[index], engine.userEventGenerations[index]);
+  if (!evidence || !engine.userEventGenerations[index] ||
+      evidence->commandId != engine.userEventCommandIds[index]) return;
+  context.userEventClientIntentId = evidence->clientIntentId;
+  context.userEventGeneration = evidence->generation;
+}
+}  // namespace hft_backtest

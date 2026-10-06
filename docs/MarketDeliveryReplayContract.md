@@ -22,25 +22,24 @@ For every live row the loader retains:
 Historical REST/archive rows are warmup seeds only. They never enter the live
 delivery timeline.
 
-## Two replay planes
+## Binary folder replay
 
 The strategy-delivery coordinate is the captured monotonic delta projected from
 the corpus anchor pair. Strategy-visible state changes and market-driven
 `runCycle` happen only at this coordinate.
 
-The venue coordinate projects the exchange timestamp onto the same replay axis.
-It is never allowed after captured delivery. Missing or unusable exchange time
-falls back visibly to delivery and increments venue-adjustment evidence.
+The binary folder consumer uses captured arrival for both venue updates and
+strategy visibility. Exchange timestamps remain exact payload evidence; a later
+frame cannot be applied early based on its exchange timestamp. One Recorder
+cursor retains one catalog and bounded shard blocks, and Backtest stages only
+the current complete native transaction. Legacy JSON-session replay retains its
+existing exchange projection and is a separate input consumer.
 
-The venue plane may update fills, stops and execution state before a message is
-visible locally. It cannot make that message visible to the strategy and it
-cannot retroactively fill an order that had not reached the venue.
-
-The scheduler never advances internal actions past an undispatched captured
-arrival. Before one application delivery it drains only actions strictly
-earlier than that delivery; after the market-driven strategy cycle it drains
-actions at the same coordinate. On an exact venue/application tie the venue
-state is applied first, then the application delivery, then internal actions.
+Before a captured transaction, the universe scheduler drains the globally
+earliest pending action, user event or canonical timer strictly before arrival.
+It applies every depth part before invoking each subscribed context once, then
+drains internal actions at the same coordinate. Equal arrival records retain
+their durable shard/frame/ordinal order.
 
 Order-submit, cancel and user-data latency remains a separate deterministic
 execution model. It is never added to market-data delivery.
@@ -82,11 +81,11 @@ interval ineligible.
 
 ## Result evidence
 
-The current `run.result` with mandatory `schema_version = 4` labels the model as:
+The current `run.result` with mandatory `schema_version = 5` labels the model as:
 
 - `arrival_boundary = hft-parser.application-frame-ready`;
 - `market_data_delivery = captured_application_frame_arrival`;
-- `venue_schedule = exchange_projected_not_after_delivery`.
+- `venue_schedule = captured_arrival_no_future_lookahead` for binary folders.
 
 It also carries captured clock ranges, replay delivery ranges, venue ranges,
 anomaly counters and adjusted-venue-event counts. The final watermark is the
@@ -94,3 +93,108 @@ greatest replay/execution coordinate actually processed, not the last exchange
 timestamp found in input.
 
 Build, tests, runtime capture and live exchange behavior require separate proof.
+
+
+## Whole universe and virtual accounts
+
+An empty binary source selection discovers config-eligible sources in the
+folder's selected common capture interval. `SingleSource` creates one context
+per source; `SameCanonicalCrossVenue` groups equal captured canonical IDs with
+distinct venues; `ExplicitGroup` consumes complete configured portfolios only.
+The descriptor's leg bound applies to each context. A context borrows permanent
+source owners, including when configured groups overlap.
+
+One configured exchange/market venue is one virtual account. Its initial wallet
+is seeded once, every source fill updates that wallet once, and all sources on
+that account debit one permit ledger. Conflicting explicit source balances on
+one account fail preflight. Context-local IDs retain an exact simulated
+producer correlation; native client-order text supplies no strategy ID.
+Result fill rows append `context_index`, and lifetime joins use source/context/ID.
+
+Cold source, cursor, book and context storage is checked against a 3 GiB
+preparation envelope. This static preparation calculation is separate from RSS,
+throughput and whole-run output-growth evidence. A canonical actor requiring
+unavailable typed reference inputs or execution evidence fails preflight.
+
+Capture exhaustion preserves managed orders and positions without a fabricated
+teardown fill, cancellation or flatten. Actual producer `SourceLifecycle`
+administrative records use their captured clocks, masks, directory revisions,
+source generation and native session epoch. They suspend only contexts whose
+required lanes disappeared. Unaffected native lanes retain their state. A real
+add/readd clears the affected market view and waits for fresh captured data;
+strategy state, orders, pending actions and positions survive. Interval preflight
+returns exact effective source metadata and membership strictly before the
+selected beginning, so replay uses that initial state without prefix events. Old simulated
+execution actions remain fenced across the observed membership boundary even
+when the producer's logical source generation is unchanged. No lifecycle row is
+represented as a market frame or an extra strategy market ping.
+
+Captured `Stale`, `Degraded` and source `SequenceGap` flags, and an exact
+native Depth `State/Gap` payload, are observed health evidence. They produce a
+typed pause on the affected lane without installing its unhealthy prices or
+calling an extra market cycle. Other contexts continue. The next healthy
+compatible record clears the affected view and installs only its actual native
+payload; old simulated execution remains fenced by an application-owned
+monotonic boundary epoch. Producer directory revisions and source generations
+are retained unchanged. An interval containing only exact health observations
+can remain paused throughout and emit no strategy actions.
+
+Unexplained capture-loss ledger entries, `GapBoundary` records and corrupt
+market rows still refuse preflight. Intentional source membership and observed
+health records are distinct from unknown missing capture data. Source freshness
+continues to gate new actions through the canonical strategy policy.
+
+
+## Simulation capability and quantity authority
+
+Strategy preparation consumes the producer's separately flagged
+`canonicalStepSizeRaw` and `executionQuantityStepRaw`, both already in canonical
+base E8. Native lot size and economic contract base quantity remain evidence;
+they never manufacture an execution grid. The canonical derived-grid check is
+mandatory on initial and lifecycle metadata. Legacy JSON requires explicit
+`canonical_step_size_e8` and `execution_quantity_step_e8` metadata. Missing
+quantity authority refuses admission.
+
+The current accounting adapter accepts unit native price basis only. Captured
+market quantities admit Crypto Spot and linear Futures/Swaps with an exact
+producer-owned quantity conversion for every selected replay lane. Base,
+contract and lot lanes first scale native quantities to E8 and use the public
+Core exact rational projection with recorded package multipliers and native
+contract/lot base factors. Already-canonical Spot quantities use Base 1/1 and
+are never packaged twice. Native corpus quantities remain unchanged. Unknown
+selected units, missing factors, inverse/quote quantities, nonexact division
+and overflow refuse replay. Traditional-finance units remain unsupported.
+Effective interval-start metadata supplies the same conversion facts as real
+in-interval lifecycle rows; a changed conversion refuses rebind instead of
+reinterpreting retained state.
+A changed instrument grid or tick requires a
+canonical strategy-state rebind; without that boundary the current replay
+refuses the transition rather than resetting strategy state.
+
+The simulation owns a fixed 1024-record canonical order store and context-scoped
+identity table per captured source. Each has at most 32 lookup/admission probes;
+terminal records remain retained and capacity/correlation exhaustion refuses
+further replay actions. Unresolved records also respect the 256-order snapshot
+capacity. Command IDs have disjoint source ranges and remain
+separate from strategy-local IDs. The fresh empty virtual venue starts from its
+actual empty model cut. Local submission and send precede delayed venue ACK,
+fill or cancel evidence; canonical observation occurs only when the exact
+private event reaches its source delivery head. Service feedback updates that
+store while remaining outside strategy user-event cycles.
+
+Venue position, wallet and financial results retain the actual fill time.
+Strategy order, position and shared-wallet views expose only local intent/send
+facts and consumed private evidence. Pending quotes stay pending before private
+ACK and remain visible after a venue terminal until its private event arrives.
+Exact cumulative fill deltas, prices, fees and realized amounts advance the
+observed position and account only at delivery; another symbol on the shared
+account sees the same observed wallet. Private source heads drain while their
+strategy contexts are paused or waiting for market readiness, without invoking
+those strategies. Terminal evidence remains available when market data recovers.
+
+Transaction-emitting descriptors still require transaction execution and
+reconciliation inputs beyond these order views. They explicitly refuse
+preflight by capability. Simulated user-data
+latency preserves source emission order: independently sampled jitter is
+bounded below by the previous scheduled delivery, with ties retaining append
+order and exact event identities/payload timestamps.

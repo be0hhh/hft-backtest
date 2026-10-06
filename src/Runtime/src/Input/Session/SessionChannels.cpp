@@ -40,7 +40,8 @@ bool parseI64(std::string_view text, std::size_t& pos, std::int64_t& out) noexce
 
 bool parseContractTradeLine(std::string_view line, TradeRow& out) noexcept {
   hftrec::replay::TradeRow row{};
-  if (!hftrec::isOk(hftrec::replay::parseTradeLine(line, row))) return false;
+  if (!hftrec::isOk(hftrec::replay::parseTradeLine(line, row)) ||
+      row.priceE8 < 0 || row.qtyE8 < 0) return false;
   out.priceE8 = row.priceE8;
   out.qtyE8 = row.qtyE8;
   out.side = row.side;

@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "../Internal/BacktestExecutionHelpers.hpp"
+#include "../../Strategy/Inputs/BacktestStrategyWarmup.hpp"
 
 namespace hft_backtest::detail::execution_detail {
 
@@ -20,20 +21,32 @@ namespace hft_backtest::detail {
 using execution_detail::activateOrder;
 using execution_detail::makeCanceledOrderEvent;
 using execution_detail::matchesExpectedOrder;
-using execution_detail::nextOrderId;
 using execution_detail::pendingEarlier;
 using execution_detail::pushUserEvent;
 using execution_detail::serviceOrder;
 using execution_detail::submitCancelIntent;
 
 void applyDueActions(EngineState& engine, std::int64_t tsNs) {
-  if (engine.liquidated || engine.riskStopped) return;
+  if (engine.liquidated || engine.riskStopped ||
+      (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
+       (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u))) return;
   bool changed = false;
   while (!engine.pending.empty()) {
-    if (engine.pending.front().activeTsNs > tsNs) break;
-    std::pop_heap(engine.pending.begin(), engine.pending.end(), pendingEarlier);
-    PendingAction action = std::move(engine.pending.back());
+    std::size_t next = engine.pending.size();
+    for (std::size_t i = 0; i < engine.pending.size(); ++i) {
+      const auto& candidate = engine.pending[i];
+      if (candidate.activeTsNs > tsNs || (engine.capturedSourceManaged &&
+          (candidate.sourceGeneration != engine.capturedSourceGeneration || candidate.executionBoundaryEpoch != engine.executionBoundaryEpoch))) continue;
+      if (next == engine.pending.size() || candidate.activeTsNs < engine.pending[next].activeTsNs ||
+          (candidate.activeTsNs == engine.pending[next].activeTsNs &&
+           candidate.submitSequence < engine.pending[next].submitSequence)) next = i;
+    }
+    if (next == engine.pending.size()) break;
+    PendingAction action = std::move(engine.pending[next]);
+    engine.pending[next] = std::move(engine.pending.back());
     engine.pending.pop_back();
+    std::make_heap(engine.pending.begin(), engine.pending.end(), pendingEarlier);
+    action.activeTsNs = std::max(action.activeTsNs, engine.replayNotBeforeNs);
     changed = true;
     if (action.kind == PendingActionKind::CancelAck && action.recordIndex < engine.orders.size()) {
       engine.orders[action.recordIndex].activeTsNs = action.activeTsNs;
@@ -53,18 +66,22 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
             action.activeTsNs >= order.warmupCancelTimeoutTsNs;
         if (ackDue || timeoutDue) {
           trading_core::CancelIntent cancel{};
-          cancel.clientIntentId.raw = nextOrderId(engine);
+          cancel.clientIntentId = strategy_runtime_detail::allocateBacktestServiceClientIntentId(engine);
+          if (!cancel.clientIntentId.raw) { engine.simulationEvidenceFailed = true; continue; }
           cancel.targetClientIntentId = order.state.clientIntentId;
           cancel.targetOrderType = order.state.orderType;
           cancel.routeHandle = order.routeHandle;
           const std::int64_t cancelTs = ackDue ? action.activeTsNs : order.warmupCancelTimeoutTsNs;
           order.warmupCancelRequested = true;
+          const auto savedContext = engine.activeContextIndex;
+          engine.activeContextIndex = order.contextIndex;
           (void)submitCancelIntent(engine, cancel, action.activeTsNs, cancelTs);
+          engine.activeContextIndex = savedContext;
         }
       }
     } else if (action.kind == PendingActionKind::CancelAck) {
-      if (!serviceOrder(order)) pushUserEvent(engine, makeCanceledOrderEvent(engine, order, action.activeTsNs), action.activeTsNs);
-      if (order.warmup) engine.warmupInFlight = false;
+      updateSpotVenueReservation(engine, order, 0);
+      pushUserEvent(engine, makeCanceledOrderEvent(engine, order, action.activeTsNs), action.activeTsNs, order.state.clientIntentId, order.contextIndex, serviceOrder(order));
       if (order.serviceAutounwind) engine.serviceExposureOpen = false;
       if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusCancelled;
       order = OpenOrder{};

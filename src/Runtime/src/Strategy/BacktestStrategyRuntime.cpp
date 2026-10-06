@@ -19,11 +19,21 @@
 namespace hft_backtest::strategy_runtime_detail {
 
 std::int64_t nextPendingTs(const detail::EngineState& engine) noexcept {
-  return engine.pending.empty()
-      ? std::numeric_limits<std::int64_t>::max()
-      : engine.pending.front().activeTsNs;
+  if (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
+       (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u))
+    return std::numeric_limits<std::int64_t>::max();
+  auto due = std::numeric_limits<std::int64_t>::max();
+  for (const auto& action : engine.pending) {
+    if (engine.capturedSourceManaged && (action.sourceGeneration != engine.capturedSourceGeneration || action.executionBoundaryEpoch != engine.executionBoundaryEpoch)) continue;
+    due = std::min(due, std::max(action.activeTsNs, engine.replayNotBeforeNs));
+  }
+  return due;
 }
-
+std::int64_t contextReplayFloor(detail::ConstEngineView engines) noexcept {
+  std::int64_t floor = 0;
+  for (const auto& engine : engines) floor = std::max(floor, engine.replayNotBeforeNs);
+  return floor;
+}
 std::int64_t userEventFallbackTs(const cxet::composite::UserDataEvent& event) noexcept {
   if (cxet::composite::userDataFieldPresent(
           event, cxet::composite::UserDataField::UpdateTime)) {
@@ -65,12 +75,20 @@ backtestSimulatedUserEventSemanticMask(
   return 0u;
 }
 
+std::size_t nextOwnedUserEventIndex(const detail::EngineState& engine) noexcept {
+  // Delivered events form one exact source prefix; context selection cannot
+  // skip its head. The prefix cursor also bounds this lookup independently of
+  // retained output history.
+  const auto index = engine.deliveredUserEvents;
+  return index < engine.userEvents.size() && index < engine.userEventConsumed.size() &&
+      !engine.userEventConsumed[index] && index < engine.userEventContextIndices.size() &&
+      engine.userEventContextIndices[index] == engine.activeContextIndex ? index : engine.userEvents.size();
+}
 std::int64_t nextUserEventDeliveryTs(const detail::EngineState& engine) noexcept {
-  if (engine.deliveredUserEvents >= engine.userEvents.size()) return std::numeric_limits<std::int64_t>::max();
-  if (engine.deliveredUserEvents < engine.userEventDeliveryTsNs.size()) {
-    return engine.userEventDeliveryTsNs[engine.deliveredUserEvents];
-  }
-  return userEventFallbackTs(engine.userEvents[engine.deliveredUserEvents]);
+  const auto index = nextOwnedUserEventIndex(engine);
+  if (index >= engine.userEvents.size()) return std::numeric_limits<std::int64_t>::max();
+  if (index < engine.userEventDeliveryTsNs.size()) return std::max(engine.userEventDeliveryTsNs[index], engine.replayNotBeforeNs);
+  return userEventFallbackTs(engine.userEvents[index]);
 }
 
 std::int64_t nextWakeTs(const trading_core::StrategyDescriptor& descriptor, const void* state) noexcept {
@@ -85,7 +103,7 @@ std::int64_t nextRateLimitCooldownTs(const detail::EngineState& engine) noexcept
   return engine.rateLimitCooldownUntilTsNs;
 }
 
-std::int64_t nextRateLimitCooldownTs(const std::vector<detail::EngineState>& engines) noexcept {
+std::int64_t nextRateLimitCooldownTs(detail::ConstEngineView engines) noexcept {
   std::int64_t out = std::numeric_limits<std::int64_t>::max();
   for (const detail::EngineState& engine : engines) {
     const std::int64_t candidate = nextRateLimitCooldownTs(engine);
@@ -104,7 +122,7 @@ void clearRateLimitCooldown(detail::EngineState& engine, std::int64_t tsNs) noex
   }
 }
 
-void clearRateLimitCooldown(std::vector<detail::EngineState>& engines, std::int64_t tsNs) noexcept {
+void clearRateLimitCooldown(detail::EngineView engines, std::int64_t tsNs) noexcept {
   for (detail::EngineState& engine : engines) clearRateLimitCooldown(engine, tsNs);
 }
 
@@ -113,7 +131,7 @@ bool dueWithinBoundary(std::int64_t tsNs, std::int64_t untilTs, RunUntilBoundary
   return boundary == RunUntilBoundary::Exclusive ? tsNs < untilTs : tsNs <= untilTs;
 }
 
-std::int64_t nextPendingTs(const std::vector<detail::EngineState>& engines) noexcept {
+std::int64_t nextPendingTs(detail::ConstEngineView engines) noexcept {
   std::int64_t out = std::numeric_limits<std::int64_t>::max();
   for (const detail::EngineState& engine : engines) {
     const std::int64_t candidate = nextPendingTs(engine);
@@ -122,7 +140,7 @@ std::int64_t nextPendingTs(const std::vector<detail::EngineState>& engines) noex
   return out;
 }
 
-std::int64_t nextUserEventDeliveryTs(const std::vector<detail::EngineState>& engines) noexcept {
+std::int64_t nextUserEventDeliveryTs(detail::ConstEngineView engines) noexcept {
   std::int64_t out = std::numeric_limits<std::int64_t>::max();
   for (const detail::EngineState& engine : engines) {
     const std::int64_t candidate = nextUserEventDeliveryTs(engine);
@@ -142,15 +160,17 @@ bool drainUserEvents(const trading_core::StrategyDescriptor& descriptor,
                      const BacktestRunRequest& request,
                      std::int64_t untilTs,
                      RunUntilBoundary boundary) {
-  if (engine.liquidated || engine.riskStopped) return true;
   std::uint32_t guard = 0u;
   while (dueWithinBoundary(nextUserEventDeliveryTs(engine), untilTs, boundary)) {
     if (++guard > 4096u) return false;
-    const std::size_t eventIndex = engine.deliveredUserEvents++;
+    const std::size_t eventIndex = nextOwnedUserEventIndex(engine);
+
     const cxet::composite::UserDataEvent event = engine.userEvents[eventIndex];
     const std::int64_t tsNs = eventIndex < engine.userEventDeliveryTsNs.size()
         ? engine.userEventDeliveryTsNs[eventIndex]
         : userEventFallbackTs(event);
+    if (!detail::deliverSimulationOrderEvent(engine, eventIndex, tsNs)) return false;
+    if (eventIndex < engine.userEventServiceFlags.size() && engine.userEventServiceFlags[eventIndex]) continue;
     if (!runCycle(descriptor, inputPolicy, state, engine, instrument,
                   scratch, shard, control, tsNs, request, &event)) return false;
   }
@@ -160,17 +180,14 @@ bool drainUserEvents(const trading_core::StrategyDescriptor& descriptor,
 bool drainUserEventsMulti(const trading_core::StrategyDescriptor& descriptor,
                           const BacktestStrategyInputPolicy& inputPolicy,
                           void* state,
-                          std::vector<detail::EngineState>& engines,
-                          const std::vector<StrategyInstrumentSpec>& legInstruments,
+                          detail::EngineView engines,
+                          std::span<const StrategyInstrumentSpec> legInstruments,
                           MultiLegCycleScratch& scratch,
                           const trading_core::SymbolShardConfig& shard,
                           const trading_core::ShardControlState& control,
                           const BacktestRunRequest& request,
                           std::int64_t untilTs,
                           RunUntilBoundary boundary) {
-  for (const detail::EngineState& engine : engines) {
-    if (engine.liquidated || engine.riskStopped) return true;
-  }
   std::uint32_t guard = 0u;
   bool progressed = true;
   while (progressed) {
@@ -179,11 +196,14 @@ bool drainUserEventsMulti(const trading_core::StrategyDescriptor& descriptor,
       detail::EngineState& engine = engines[leg];
       if (!dueWithinBoundary(nextUserEventDeliveryTs(engine), untilTs, boundary)) continue;
       if (++guard > 4096u) return false;
-      const std::size_t eventIndex = engine.deliveredUserEvents++;
+      const std::size_t eventIndex = nextOwnedUserEventIndex(engine);
+
       const cxet::composite::UserDataEvent event = engine.userEvents[eventIndex];
-      const std::int64_t tsNs = eventIndex < engine.userEventDeliveryTsNs.size()
-          ? engine.userEventDeliveryTsNs[eventIndex]
-          : userEventFallbackTs(event);
+      const std::int64_t tsNs = std::max(contextReplayFloor(engines),
+          eventIndex < engine.userEventDeliveryTsNs.size() ? engine.userEventDeliveryTsNs[eventIndex] : userEventFallbackTs(event));
+      if (!detail::deliverSimulationOrderEvent(engine, eventIndex, tsNs)) return false;
+      progressed = true;
+      if (eventIndex < engine.userEventServiceFlags.size() && engine.userEventServiceFlags[eventIndex]) continue;
       if (!runCycleMulti(descriptor, inputPolicy, state, engines,
                          legInstruments, scratch, shard, control,
                          static_cast<std::uint32_t>(leg), tsNs, request,
@@ -194,14 +214,14 @@ bool drainUserEventsMulti(const trading_core::StrategyDescriptor& descriptor,
   return true;
 }
 
-bool hasUndeliveredUserEvents(const std::vector<detail::EngineState>& engines) noexcept {
+bool hasUndeliveredUserEvents(detail::ConstEngineView engines) noexcept {
   for (const detail::EngineState& engine : engines) {
-    if (engine.deliveredUserEvents < engine.userEvents.size()) return true;
+    if (nextOwnedUserEventIndex(engine) < engine.userEvents.size()) return true;
   }
   return false;
 }
 
-bool portfolioHasOpenState(const std::vector<detail::EngineState>& engines) noexcept {
+bool portfolioHasOpenState(detail::ConstEngineView engines) noexcept {
   for (const detail::EngineState& engine : engines) {
     if (engine.netQtyRaw != 0 || !engine.pending.empty()) return true;
   }
@@ -222,6 +242,7 @@ using strategy_intent_lowering::validateOutput;
 using strategy_intent_lowering::routeLegIndex;
 using strategy_intent_lowering::routeTradable;
 using strategy_intent_lowering::transactionAdmission;
+using strategy_runtime_detail::contextReplayFloor;
 using strategy_runtime_detail::clearRateLimitCooldown;
 using strategy_runtime_detail::drainUserEvents;
 using strategy_runtime_detail::drainUserEventsMulti;
@@ -243,7 +264,11 @@ bool runUntil(const trading_core::StrategyDescriptor& descriptor,
               std::int64_t untilTs,
               const BacktestRunRequest& request,
               RunUntilBoundary boundary) {
-  if (engine.liquidated || engine.riskStopped) return true;
+  if (engine.liquidated || engine.riskStopped ||
+      (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
+       (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u)))
+    return drainUserEvents(descriptor, inputPolicy, state, engine,
+        instrument, scratch, shard, control, request, untilTs, boundary);
   std::uint32_t guard = 0u;
   while (true) {
     if (++guard > 8192u) return false;
@@ -278,8 +303,8 @@ bool runUntil(const trading_core::StrategyDescriptor& descriptor,
 bool runUntilMulti(const trading_core::StrategyDescriptor& descriptor,
                    const BacktestStrategyInputPolicy& inputPolicy,
                    void* state,
-                   std::vector<detail::EngineState>& engines,
-                   const std::vector<StrategyInstrumentSpec>& legInstruments,
+                   detail::EngineView engines,
+                   std::span<const StrategyInstrumentSpec> legInstruments,
                    MultiLegCycleScratch& scratch,
                    const trading_core::SymbolShardConfig& shard,
                    const trading_core::ShardControlState& control,
@@ -287,12 +312,16 @@ bool runUntilMulti(const trading_core::StrategyDescriptor& descriptor,
                    const BacktestRunRequest& request,
                    RunUntilBoundary boundary) {
   for (const detail::EngineState& engine : engines) {
-    if (engine.liquidated || engine.riskStopped) return true;
+    if (engine.liquidated || engine.riskStopped ||
+        (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
+       (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u)))
+      return drainUserEventsMulti(descriptor, inputPolicy, state, engines,
+          legInstruments, scratch, shard, control, request, untilTs, boundary);
   }
   const std::int64_t pendingTs = nextPendingTs(engines);
-  const std::int64_t wakeTs = nextWakeTs(descriptor, state);
-  const std::int64_t userTs = nextUserEventDeliveryTs(engines);
-  const std::int64_t cooldownTs = nextRateLimitCooldownTs(engines);
+  const std::int64_t wakeTs = std::max(nextWakeTs(descriptor, state), contextReplayFloor(engines));
+  const std::int64_t userTs = std::max(nextUserEventDeliveryTs(engines), contextReplayFloor(engines));
+  const std::int64_t cooldownTs = std::max(nextRateLimitCooldownTs(engines), contextReplayFloor(engines));
   const std::int64_t nextTs = std::min(std::min(pendingTs, wakeTs), std::min(userTs, cooldownTs));
   if (!hasUndeliveredUserEvents(engines) &&
       (nextTs == std::numeric_limits<std::int64_t>::max() || !dueWithinBoundary(nextTs, untilTs, boundary))) {
@@ -302,9 +331,9 @@ bool runUntilMulti(const trading_core::StrategyDescriptor& descriptor,
   while (true) {
     if (++guard > 8192u) return false;
     const std::int64_t pendingTs = nextPendingTs(engines);
-    const std::int64_t wakeTs = nextWakeTs(descriptor, state);
-    const std::int64_t userTs = nextUserEventDeliveryTs(engines);
-    const std::int64_t cooldownTs = nextRateLimitCooldownTs(engines);
+    const std::int64_t wakeTs = std::max(nextWakeTs(descriptor, state), contextReplayFloor(engines));
+    const std::int64_t userTs = std::max(nextUserEventDeliveryTs(engines), contextReplayFloor(engines));
+    const std::int64_t cooldownTs = std::max(nextRateLimitCooldownTs(engines), contextReplayFloor(engines));
     std::int64_t nextTs = std::min(std::min(pendingTs, wakeTs), std::min(userTs, cooldownTs));
     if (nextTs == std::numeric_limits<std::int64_t>::max() || !dueWithinBoundary(nextTs, untilTs, boundary)) break;
     if (userTs <= pendingTs && userTs <= wakeTs && userTs <= cooldownTs) {

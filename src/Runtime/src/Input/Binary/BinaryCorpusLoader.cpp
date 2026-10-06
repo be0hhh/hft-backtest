@@ -2,7 +2,9 @@
 #include "BinaryCorpusLoader.hpp"
 
 #include "hftrec/CorpusContract/BinaryMarketCorpusReader.hpp"
+#include "trading_core/Algorithm/Market/StrategyInputs.hpp"
 #include "cxet/Primitives/Buf/CanonConstants.hpp"
+#include "cxet/Network/Common/NativeOrderQuantity.hpp"
 
 #include <algorithm>
 #include <array>
@@ -59,6 +61,8 @@ void appendWarning(SessionData& output, std::string warning) {
 
 [[nodiscard]] const char* channelName(corpus::BinaryMarketChannel channel) {
   switch (channel) {
+    case corpus::BinaryMarketChannel::SourceLifecycle:
+      return "source_lifecycle";
     case corpus::BinaryMarketChannel::BookTicker:
       return "bookticker";
     case corpus::BinaryMarketChannel::Trade:
@@ -140,6 +144,35 @@ void includeChannel(ChannelPlan& output,
   return rescaleToE8(static_cast<std::int64_t>(input), scaleDigits, output);
 }
 
+bool canonicalMarketQuantityToE8(const corpus::BinaryMarketSource& source,
+    corpus::BinaryMarketChannel channel, std::int64_t input, std::int64_t& output) noexcept {
+  const auto& conversion = source.quantityConversion;
+  const auto index = corpus::binaryMarketChannelIndex(channel);
+  if (index >= conversion.kinds.size() || !corpus::validBinaryMarketQuantityConversion(conversion)) return false;
+  std::int64_t scaled{};
+  if (!rescaleToE8(input, source.quantityScale, scaled)) return false;
+  auto canonicalPackage = conversion.canonicalBaseMultiplier;
+  auto nativePackage = conversion.nativeBaseMultiplier;
+  auto unit = cxet::contract::Unit::None;
+  switch (conversion.kinds[index]) {
+    case corpus::BinaryMarketQuantityKind::CanonicalBase:
+      unit = cxet::contract::Unit::BaseQuantity; canonicalPackage = nativePackage = 1u; break;
+    case corpus::BinaryMarketQuantityKind::NativeBase: unit = cxet::contract::Unit::BaseQuantity; break;
+    case corpus::BinaryMarketQuantityKind::NativeContract: unit = cxet::contract::Unit::ContractQuantity; break;
+    case corpus::BinaryMarketQuantityKind::NativeLot: unit = cxet::contract::Unit::LotQuantity; break;
+    case corpus::BinaryMarketQuantityKind::Unknown: return false;
+  }
+  return cxet::network::common::canonicalNativeQuantityRawExact(scaled,
+      conversion.nativeContractBaseQtyRaw, unit, canonicalPackage, nativePackage, &output,
+      conversion.nativeLotBaseQtyRaw);
+}
+
+bool canonicalMarketQuantityToE8(const corpus::BinaryMarketSource& source,
+    corpus::BinaryMarketChannel channel, std::uint64_t input, std::int64_t& output) noexcept {
+  return input <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) &&
+      canonicalMarketQuantityToE8(source, channel, static_cast<std::int64_t>(input), output);
+}
+
 
 
 [[nodiscard]] const corpus::BinaryMarketBookTickerPayload*
@@ -168,16 +201,18 @@ checkedBookTickerPayload(
 
 [[nodiscard]] std::uint32_t arrivalFlags(
     const corpus::BinaryMarketRecordHeader& header) noexcept {
-  std::uint32_t flags = hftrec::replay::EventArrivalApplicationFrame;
+  const bool lifecycle = header.channel == corpus::BinaryMarketChannel::SourceLifecycle;
+  std::uint32_t flags = lifecycle ? hftrec::replay::EventArrivalSourceLifecycle :
+      hftrec::replay::EventArrivalApplicationFrame;
   if ((header.flags & corpus::BinaryMarketRecordRealtimeRegression) != 0u)
     flags |= hftrec::replay::EventArrivalRealtimeRegression;
   if ((header.flags &
        corpus::BinaryMarketRecordMonotonicNonIncreasing) != 0u) {
     flags |= hftrec::replay::EventArrivalMonotonicNonIncreasing;
   }
-  if ((header.flags & corpus::BinaryMarketRecordExchangeAheadOfReceive) != 0u)
+  if (!lifecycle && (header.flags & corpus::BinaryMarketRecordExchangeAheadOfReceive) != 0u)
     flags |= hftrec::replay::EventArrivalExchangeAheadOfReceive;
-  if ((header.flags &
+  if (!lifecycle && (header.flags &
        corpus::BinaryMarketRecordExchangeTimestampMissing) != 0u) {
     flags |= hftrec::replay::EventArrivalExchangeTimestampMissing;
   }
@@ -299,198 +334,14 @@ void appendEvidenceWarnings(SessionData& output) {
   }
 }
 
-}  // namespace binary_corpus
-
-using namespace binary_corpus;
-
-Status loadBinaryMarketCorpus(
-    const std::filesystem::path& corpusPath,
-    const BacktestCorpusSourceRequest& sourceRequest,
-    const SessionLoadPlan& plan,
-    SessionData& output,
-    std::string& error) noexcept {
-  output = {};
-  error.clear();
-  if (corpusPath.empty() || sourceRequest.exchange.empty() ||
-      sourceRequest.market.empty() || sourceRequest.canonicalSymbol.empty() ||
-      sourceRequest.beginReceiveNs <= 0 ||
-      sourceRequest.endReceiveNs <= sourceRequest.beginReceiveNs) {
-    error = "invalid binary corpus source selection";
-    return Status::InvalidArgument;
-  }
-  if (plan.requireCandles) {
-    error = "strategy requires candle history, which is not part of the live binary market corpus";
-    return Status::Unsupported;
-  }
-
-  try {
-    corpus::BinaryMarketCorpusReader reader{};
-    corpus::BinaryMarketManifest manifest{};
-    std::vector<corpus::BinaryMarketSource> sources{};
-    const hftrec::Status catalogStatus =
-        reader.catalog(corpusPath, manifest, sources, error);
-    if (!hftrec::isOk(catalogStatus)) return convertStatus(catalogStatus);
-
-    const corpus::BinaryMarketSource* selectedSource = nullptr;
-    for (const auto& source : sources) {
-      if (fixedText(source.venue.data(), source.venue.size(),
-                    source.venueBytes) != sourceRequest.exchange ||
-          fixedText(source.market.data(), source.market.size(),
-                    source.marketBytes) != sourceRequest.market ||
-          fixedText(source.canonicalSymbol.data(),
-                    source.canonicalSymbol.size(),
-                    source.canonicalSymbolBytes) !=
-              sourceRequest.canonicalSymbol) {
-        continue;
-      }
-      if (selectedSource) {
-        error = "binary corpus source selection is ambiguous";
-        return Status::CorruptData;
-      }
-      selectedSource = &source;
-    }
-    if (!selectedSource) {
-      error = "binary corpus source was not found";
-      return Status::InvalidArgument;
-    }
-
-    const ChannelPlan requested = channelPlan(plan);
-    const std::uint16_t missingRequired = static_cast<std::uint16_t>(
-        requested.requiredMask & ~selectedSource->availableChannelMask);
-    if (missingRequired != 0u) {
-      error = "required strategy channel was not captured for selected source";
-      return Status::CorruptData;
-    }
-    const std::uint16_t incompatibleRequired = static_cast<std::uint16_t>(
-        requested.requiredMask & ~selectedSource->traderReplayChannelMask);
-    if (incompatibleRequired != 0u) {
-      error = "required strategy channel is not trader-replay compatible";
-      return Status::Unsupported;
-    }
-    const std::uint16_t optionalRecordedOnly = static_cast<std::uint16_t>(
-        requested.loadMask & selectedSource->availableChannelMask &
-        ~selectedSource->traderReplayChannelMask);
-    const std::uint16_t selectedMask = static_cast<std::uint16_t>(
-        requested.loadMask & selectedSource->availableChannelMask &
-        selectedSource->traderReplayChannelMask);
-    if (selectedMask == 0u) {
-      error = "binary corpus has no trader-replay compatible channel requested by the strategy";
-      return Status::Unsupported;
-    }
-
-    corpus::BinaryMarketSelectionRequest selectionRequest{};
-    selectionRequest.root = corpusPath;
-    selectionRequest.exchange = sourceRequest.exchange;
-    selectionRequest.market = sourceRequest.market;
-    selectionRequest.canonicalSymbol = sourceRequest.canonicalSymbol;
-    selectionRequest.beginReceiveNs = sourceRequest.beginReceiveNs;
-    selectionRequest.endReceiveNs = sourceRequest.endReceiveNs;
-    selectionRequest.channelMask = selectedMask;
-    selectionRequest.requiredChannelMask = requested.requiredMask;
-    selectionRequest.requireTraderReplayCompatibility = true;
-    corpus::BinaryMarketSelection selection{};
-    const hftrec::Status selectStatus =
-        reader.select(selectionRequest, selection, error);
-    if (!hftrec::isOk(selectStatus)) return convertStatus(selectStatus);
-
-    output.sessionPath = corpusPath;
-    output.exchange = sourceRequest.exchange;
-    output.market = sourceRequest.market;
-    output.symbol = sourceRequest.canonicalSymbol;
-    output.binaryMarketCorpus = true;
-    output.replayAnchorMonotonicNs =
-        selection.manifest.replayAnchorMonotonicNs;
-    output.replayAnchorReceiveNs =
-        selection.manifest.replayAnchorReceiveNs;
-    if (plan.loadCandles) {
-      appendWarning(output,
-          "optional candle history is unavailable in live binary corpus");
-    }
-    for (std::size_t index = 0u;
-         index < corpus::kBinaryMarketChannelCount; ++index) {
-      const std::uint16_t bit = static_cast<std::uint16_t>(1u << index);
-      if ((optionalRecordedOnly & bit) != 0u) {
-        appendWarning(output,
-            std::string{"optional recorded-only channel ignored: "} +
-                channelName(static_cast<corpus::BinaryMarketChannel>(
-                    index + 1u)));
-      } else if ((requested.loadMask & bit) != 0u &&
-                 (selectedSource->availableChannelMask & bit) == 0u) {
-        appendWarning(output,
-            std::string{"optional channel was not captured: "} +
-                channelName(static_cast<corpus::BinaryMarketChannel>(
-                    index + 1u)));
-      }
-    }
-
-    if (selection.source.tickSizeRaw <= 0 ||
-        !rescaleToE8(selection.source.tickSizeRaw,
-                     selection.source.priceScale,
-                     output.instrument.tickSizeE8) ||
-        output.instrument.tickSizeE8 <= 0) {
-      error = "binary corpus tick size cannot be represented exactly in E8";
-      return Status::CorruptData;
-    }
-    if ((selection.source.instrumentMetadataFlags &
-         corpus::BinaryMarketInstrumentStepSize) == 0u ||
-        !rescaleToE8(selection.source.stepSizeRaw,
-                     selection.source.quantityScale,
-                     output.instrument.lotSizeE8) ||
-        output.instrument.lotSizeE8 <= 0) {
-      error = "binary corpus has no exact E8 quantity step";
-      return Status::CorruptData;
-    }
-    if (selection.source.contractBaseQtyRaw > 0 &&
-        (!rescaleToE8(selection.source.contractBaseQtyRaw,
-                      selection.source.quantityScale,
-                      output.instrument.contractBaseQtyE8) ||
-         output.instrument.contractBaseQtyE8 <= 0)) {
-      error = "binary corpus contract base quantity cannot be represented exactly in E8";
-      return Status::CorruptData;
-    }
-    if (selection.source.priceBasisQtyRaw > 0 &&
-        (!rescaleToE8(selection.source.priceBasisQtyRaw,
-                      selection.source.quantityScale,
-                      output.instrument.priceBasisQtyE8) ||
-         output.instrument.priceBasisQtyE8 <= 0)) {
-      error = "binary corpus price basis cannot be represented exactly in E8";
-      return Status::CorruptData;
-    }
-
-    std::array<std::size_t, corpus::kBinaryMarketChannelCount> counts{};
-    for (const auto& record : selection.records) {
-      switch (record.header.channel) {
-        case corpus::BinaryMarketChannel::BookTicker:
-        case corpus::BinaryMarketChannel::Trade:
-        case corpus::BinaryMarketChannel::Depth:
-        case corpus::BinaryMarketChannel::PriceLimit:
-        case corpus::BinaryMarketChannel::Liquidation:
-        case corpus::BinaryMarketChannel::MarkPrice:
-        case corpus::BinaryMarketChannel::IndexPrice:
-        case corpus::BinaryMarketChannel::Funding:
-          break;
-        default:
-          error = "unknown binary corpus channel tag";
-          return Status::CorruptData;
-      }
-      ++counts[corpus::binaryMarketChannelIndex(record.header.channel)];
-    }
-    output.trades.reserve(
-        counts[corpus::binaryMarketChannelIndex(
-            corpus::BinaryMarketChannel::Trade)]);
-    output.bookTickers.reserve(
-        counts[corpus::binaryMarketChannelIndex(
-            corpus::BinaryMarketChannel::BookTicker)]);
-    output.depths.reserve(
-        counts[corpus::binaryMarketChannelIndex(
-            corpus::BinaryMarketChannel::Depth)]);
-
-    std::int64_t ingestSequence = 0;
-    std::uint64_t retainedBboSequence = 0u;
-    std::uint64_t retainedBboSessionEpoch = 0u;
-    corpus::BinaryMarketBookTickerPayload retainedBboPayload{};
-    std::uint16_t retainedBboPresenceFlags = 0u;
-    DepthRebaseCursor depthRebase{};
+Status decodeBinaryMarketRecords(const corpus::BinaryMarketSelection& selection,
+    BinaryDecodeState& state, SessionData& output, std::string& error) {
+  auto& ingestSequence = state.ingestSequence;
+  auto& retainedBboSequence = state.retainedBboSequence;
+  auto& retainedBboSessionEpoch = state.retainedBboSessionEpoch;
+  auto& retainedBboPayload = state.retainedBboPayload;
+  auto& retainedBboPresenceFlags = state.retainedBboPresenceFlags;
+  auto& depthRebase = state.depthRebase;
     std::size_t recordIndex = 0u;
     while (recordIndex < selection.records.size()) {
       const auto& record = selection.records[recordIndex];
@@ -601,12 +452,12 @@ Status loadBinaryMarketCorpus(
           BookTickerRow row{};
           if (!rescaleToE8(payload->bidPriceRaw,
                            selection.source.priceScale, row.bidPriceE8) ||
-              !rescaleToE8(payload->bidQtyRaw,
-                           selection.source.quantityScale, row.bidQtyE8) ||
+              !canonicalMarketQuantityToE8(selection.source, corpus::BinaryMarketChannel::BookTicker,
+                           payload->bidQtyRaw, row.bidQtyE8) ||
               !rescaleToE8(payload->askPriceRaw,
                            selection.source.priceScale, row.askPriceE8) ||
-              !rescaleToE8(payload->askQtyRaw,
-                           selection.source.quantityScale, row.askQtyE8)) {
+              !canonicalMarketQuantityToE8(selection.source, corpus::BinaryMarketChannel::BookTicker,
+                           payload->askQtyRaw, row.askQtyE8)) {
             error = "binary corpus bookticker cannot be represented exactly in E8";
             return Status::CorruptData;
           }
@@ -634,8 +485,8 @@ Status loadBinaryMarketCorpus(
           TradeRow row{};
           if (!rescaleToE8(payload->priceRaw, selection.source.priceScale,
                            row.priceE8) ||
-              !rescaleToE8(payload->qtyRaw, selection.source.quantityScale,
-                           row.qtyE8) ||
+              !canonicalMarketQuantityToE8(selection.source, corpus::BinaryMarketChannel::Trade,
+                           payload->qtyRaw, row.qtyE8) ||
               row.priceE8 <= 0 || row.qtyE8 <= 0) {
             error = "binary corpus trade cannot be represented exactly in E8";
             return Status::CorruptData;
@@ -644,6 +495,26 @@ Status loadBinaryMarketCorpus(
           row.tsNs = record.header.exchangeTimestampNs;
           row.ingestSeq = ingestSequence;
           row.arrival = arrival;
+          row.nativeIdentity.nativeFirst = record.header.nativeIdentityFirst;
+          row.nativeIdentity.nativeSecond = record.header.nativeIdentitySecond;
+          row.nativeIdentity.nativeShape = static_cast<cxet::api::market::PublicMarketNativeIdentityShape>(
+              record.header.nativeIdentityShape);
+          row.nativeIdentity.origin = record.header.nativeIdentityShape == 4u
+              ? cxet::api::market::PublicMarketIdentityOrigin::NativeTail64
+              : (record.header.nativeIdentityShape == 0u
+                  ? cxet::api::market::PublicMarketIdentityOrigin::SourcePosition
+                  : cxet::api::market::PublicMarketIdentityOrigin::NativeExact);
+          row.nativeIdentity.scope = record.header.nativeIdentityShape == 0u
+              ? cxet::api::market::PublicMarketIdentityScope::Lane
+              : cxet::api::market::PublicMarketIdentityScope::NativeSymbol;
+          using Shape = cxet::api::market::PublicMarketNativeIdentityShape;
+          Id projected{};
+          projected.raw = row.nativeIdentity.nativeShape == Shape::U64Pair
+              ? row.nativeIdentity.nativeSecond : row.nativeIdentity.nativeFirst;
+          if (!trading_core::nativeTradeIdentityMatches(projected, row.nativeIdentity)) {
+            error = "invalid binary corpus native trade identity";
+            return Status::CorruptData;
+          }
           output.trades.push_back(row);
           break;
         }
@@ -669,6 +540,232 @@ Status loadBinaryMarketCorpus(
       error = "binary corpus depth rebase transaction is incomplete";
       return Status::CorruptData;
     }
+
+  return Status::Ok;
+}
+
+Status initializeBinaryMarketSession(const corpus::BinaryMarketSelectionRequest& selectionRequest,
+    const corpus::BinaryMarketSelection& selection, const SessionLoadPlan& plan,
+    SessionData& output, std::string& error) {
+    const ChannelPlan requested = channelPlan(plan);
+    const auto selectedQuantities = static_cast<std::uint16_t>(requested.loadMask &
+        selection.source.availableChannelMask & selection.source.traderReplayChannelMask);
+    for (const auto channel : {corpus::BinaryMarketChannel::BookTicker, corpus::BinaryMarketChannel::Trade,
+                              corpus::BinaryMarketChannel::Depth}) {
+      if ((selectedQuantities & corpus::binaryMarketChannelBit(channel)) == 0u) continue;
+      std::int64_t ignored{};
+      if (!canonicalMarketQuantityToE8(selection.source, channel, std::int64_t{0}, ignored)) {
+        error = "selected binary market quantity lane has no exact canonical conversion authority";
+        return Status::Unsupported;
+      }
+    }
+    const std::uint16_t optionalRecordedOnly = requested.loadMask &
+        selection.source.availableChannelMask & ~selection.source.traderReplayChannelMask;
+    output.sessionPath = selectionRequest.root;
+    output.exchange = selectionRequest.exchange;
+    output.market = selectionRequest.market;
+    output.symbol = selectionRequest.canonicalSymbol;
+    output.binaryMarketCorpus = true;
+    output.capturedSourceId = selection.source.sourceId;
+    output.canonicalInstrumentId = selection.source.canonicalSymbolId;
+    output.assetDomainRaw = selection.source.assetDomainRaw;
+    output.capturedMarketKindRaw = selection.source.marketKindRaw;
+    output.capturedMarketRaw = selection.source.marketRaw;
+    output.capturedQuantityConversion = selection.source.quantityConversion;
+    output.quoteAssetId = selection.source.quoteAssetId;
+    output.capturedInitiallyPresent = selection.source.initiallyPresent != 0u;
+    output.capturedSourceGeneration = selection.source.initialSourceGeneration;
+    output.capturedAvailableChannels = selection.source.availableChannelMask;
+    output.instrument = {};
+    output.replayAnchorMonotonicNs =
+        selection.manifest.replayAnchorMonotonicNs;
+    output.replayAnchorReceiveNs =
+        selection.manifest.replayAnchorReceiveNs;
+    if (plan.loadCandles) {
+      appendWarning(output,
+          "optional candle history is unavailable in live binary corpus");
+    }
+    for (std::size_t index = 0u;
+         index < corpus::kBinaryMarketChannelCount; ++index) {
+      const std::uint16_t bit = static_cast<std::uint16_t>(1u << index);
+      if ((optionalRecordedOnly & bit) != 0u) {
+        appendWarning(output,
+            std::string{"optional recorded-only channel ignored: "} +
+                channelName(static_cast<corpus::BinaryMarketChannel>(
+                    index + 1u)));
+      } else if ((requested.loadMask & bit) != 0u &&
+                 (selection.source.availableChannelMask & bit) == 0u) {
+        appendWarning(output,
+            std::string{"optional channel was not captured: "} +
+                channelName(static_cast<corpus::BinaryMarketChannel>(
+                    index + 1u)));
+      }
+    }
+
+    if (selection.source.tickSizeRaw <= 0 ||
+        !rescaleToE8(selection.source.tickSizeRaw,
+                     selection.source.priceScale,
+                     output.instrument.tickSizeE8) ||
+        output.instrument.tickSizeE8 <= 0) {
+      error = "binary corpus tick size cannot be represented exactly in E8";
+      return Status::CorruptData;
+    }
+    // Native contract lots remain corpus evidence. Execution requires the
+    // separate producer-projected canonical base quantity grid, already E8.
+    output.instrument.lotSizeE8 = 0;
+    constexpr auto quantityFlags = corpus::BinaryMarketInstrumentCanonicalStepSize |
+        corpus::BinaryMarketInstrumentExecutionQuantityStep;
+    if ((selection.source.instrumentMetadataFlags & quantityFlags) == quantityFlags) {
+      output.instrument.lotSizeE8 = selection.source.canonicalStepSizeRaw;
+      output.instrument.executionQuantityStepE8 = selection.source.executionQuantityStepRaw;
+      output.instrument.hasExecutionQuantityGrid = true;
+    }
+    if (selection.source.contractBaseQtyRaw > 0 &&
+        (!rescaleToE8(selection.source.contractBaseQtyRaw,
+                      selection.source.quantityScale,
+                      output.instrument.contractBaseQtyE8) ||
+         output.instrument.contractBaseQtyE8 <= 0)) {
+      error = "binary corpus contract base quantity cannot be represented exactly in E8";
+      return Status::CorruptData;
+    }
+    if (selection.source.priceBasisQtyRaw > 0 &&
+        (!rescaleToE8(selection.source.priceBasisQtyRaw,
+                      selection.source.quantityScale,
+                      output.instrument.priceBasisQtyE8) ||
+         output.instrument.priceBasisQtyE8 <= 0)) {
+      error = "binary corpus price basis cannot be represented exactly in E8";
+      return Status::CorruptData;
+    }
+
+    return Status::Ok;
+}
+
+}  // namespace binary_corpus
+
+using namespace binary_corpus;
+
+Status loadBinaryMarketCorpus(
+    const std::filesystem::path& corpusPath,
+    const BacktestCorpusSourceRequest& sourceRequest,
+    const SessionLoadPlan& plan,
+    SessionData& output,
+    std::string& error) noexcept {
+  output = {};
+  error.clear();
+  if (corpusPath.empty() || sourceRequest.exchange.empty() ||
+      sourceRequest.market.empty() || sourceRequest.canonicalSymbol.empty() ||
+      sourceRequest.beginReceiveNs <= 0 ||
+      sourceRequest.endReceiveNs <= sourceRequest.beginReceiveNs) {
+    error = "invalid binary corpus source selection";
+    return Status::InvalidArgument;
+  }
+  if (plan.requireCandles) {
+    error = "strategy requires candle history, which is not part of the live binary market corpus";
+    return Status::Unsupported;
+  }
+
+  try {
+    corpus::BinaryMarketCorpusReader reader{};
+    corpus::BinaryMarketManifest manifest{};
+    std::vector<corpus::BinaryMarketSource> sources{};
+    const hftrec::Status catalogStatus =
+        reader.catalog(corpusPath, manifest, sources, error);
+    if (!hftrec::isOk(catalogStatus)) return convertStatus(catalogStatus);
+
+    const corpus::BinaryMarketSource* selectedSource = nullptr;
+    for (const auto& source : sources) {
+      if (fixedText(source.venue.data(), source.venue.size(),
+                    source.venueBytes) != sourceRequest.exchange ||
+          fixedText(source.market.data(), source.market.size(),
+                    source.marketBytes) != sourceRequest.market ||
+          fixedText(source.canonicalSymbol.data(),
+                    source.canonicalSymbol.size(),
+                    source.canonicalSymbolBytes) !=
+              sourceRequest.canonicalSymbol) {
+        continue;
+      }
+      if (selectedSource) {
+        error = "binary corpus source selection is ambiguous";
+        return Status::CorruptData;
+      }
+      selectedSource = &source;
+    }
+    if (!selectedSource) {
+      error = "binary corpus source was not found";
+      return Status::InvalidArgument;
+    }
+
+    const ChannelPlan requested = channelPlan(plan);
+    const std::uint16_t missingRequired = static_cast<std::uint16_t>(
+        requested.requiredMask & ~selectedSource->availableChannelMask);
+    if (missingRequired != 0u) {
+      error = "required strategy channel was not captured for selected source";
+      return Status::CorruptData;
+    }
+    const std::uint16_t incompatibleRequired = static_cast<std::uint16_t>(
+        requested.requiredMask & ~selectedSource->traderReplayChannelMask);
+    if (incompatibleRequired != 0u) {
+      error = "required strategy channel is not trader-replay compatible";
+      return Status::Unsupported;
+    }
+    const std::uint16_t selectedMask = static_cast<std::uint16_t>(
+        requested.loadMask & selectedSource->availableChannelMask &
+        selectedSource->traderReplayChannelMask);
+    if (selectedMask == 0u) {
+      error = "binary corpus has no trader-replay compatible channel requested by the strategy";
+      return Status::Unsupported;
+    }
+
+    corpus::BinaryMarketSelectionRequest selectionRequest{};
+    selectionRequest.root = corpusPath;
+    selectionRequest.exchange = sourceRequest.exchange;
+    selectionRequest.market = sourceRequest.market;
+    selectionRequest.canonicalSymbol = sourceRequest.canonicalSymbol;
+    selectionRequest.beginReceiveNs = sourceRequest.beginReceiveNs;
+    selectionRequest.endReceiveNs = sourceRequest.endReceiveNs;
+    selectionRequest.channelMask = selectedMask;
+    selectionRequest.requiredChannelMask = requested.requiredMask;
+    selectionRequest.requireTraderReplayCompatibility = true;
+    corpus::BinaryMarketSelection selection{};
+    const hftrec::Status selectStatus =
+        reader.select(selectionRequest, selection, error);
+    if (!hftrec::isOk(selectStatus)) return convertStatus(selectStatus);
+
+    const Status initialized = initializeBinaryMarketSession(selectionRequest, selection, plan, output, error);
+    if (!isOk(initialized)) return initialized;
+
+    std::array<std::size_t, corpus::kBinaryMarketChannelCount> counts{};
+    for (const auto& record : selection.records) {
+      switch (record.header.channel) {
+        case corpus::BinaryMarketChannel::BookTicker:
+        case corpus::BinaryMarketChannel::Trade:
+        case corpus::BinaryMarketChannel::Depth:
+        case corpus::BinaryMarketChannel::PriceLimit:
+        case corpus::BinaryMarketChannel::Liquidation:
+        case corpus::BinaryMarketChannel::MarkPrice:
+        case corpus::BinaryMarketChannel::IndexPrice:
+        case corpus::BinaryMarketChannel::Funding:
+          break;
+        default:
+          error = "unknown binary corpus channel tag";
+          return Status::CorruptData;
+      }
+      ++counts[corpus::binaryMarketChannelIndex(record.header.channel)];
+    }
+    output.trades.reserve(
+        counts[corpus::binaryMarketChannelIndex(
+            corpus::BinaryMarketChannel::Trade)]);
+    output.bookTickers.reserve(
+        counts[corpus::binaryMarketChannelIndex(
+            corpus::BinaryMarketChannel::BookTicker)]);
+    output.depths.reserve(
+        counts[corpus::binaryMarketChannelIndex(
+            corpus::BinaryMarketChannel::Depth)]);
+
+    BinaryDecodeState decodeState{};
+    const Status decoded = decodeBinaryMarketRecords(selection, decodeState, output, error);
+    if (!isOk(decoded)) return decoded;
+    const auto ingestSequence = decodeState.ingestSequence;
 
     if (!requiredRowsPresent(plan, output, error)) return Status::CorruptData;
     if (output.firstReceiveMonotonicNs == 0u ||

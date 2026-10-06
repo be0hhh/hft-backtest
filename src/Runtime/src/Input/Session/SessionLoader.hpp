@@ -9,11 +9,13 @@
 
 #include "hft_backtest/Status.hpp"
 #include "hftrec/CorpusContract/EventRows.hpp"
+#include "hftrec/CorpusContract/BinaryMarketCorpusFormat.hpp"
 #include "cxet/Market/Depth.hpp"
+#include "cxet/Api/Market/PublicMarketDataTypes.hpp"
 
 namespace hft_backtest::detail {
 
-constexpr std::size_t kSessionTimelineKindCount = 3u;
+constexpr std::size_t kSessionTimelineKindCount = 5u;
 
 struct PriceLevelRow {
   std::int64_t priceE8{0};
@@ -28,6 +30,12 @@ struct TradeRow {
   std::int64_t tsNs{0};
   std::int64_t ingestSeq{0};
   hftrec::replay::EventArrival arrival{};
+  // Current binary corpus preserves its declared native key. Legacy JSON
+  // has no shape field and retains the existing unavailable-identity path.
+  cxet::api::market::PublicMarketEventIdentity nativeIdentity{
+      .origin = cxet::api::market::PublicMarketIdentityOrigin::SourcePosition,
+      .nativeShape = cxet::api::market::PublicMarketNativeIdentityShape::None,
+      .scope = cxet::api::market::PublicMarketIdentityScope::Lane};
 };
 
 struct BookTickerRow {
@@ -78,6 +86,8 @@ struct CandleRow {
 struct InstrumentMetadata {
   std::int64_t tickSizeE8{1};
   std::int64_t lotSizeE8{1};
+  std::int64_t executionQuantityStepE8{};
+  bool hasExecutionQuantityGrid{false};
   std::int64_t contractBaseQtyE8{0};
   std::int64_t priceBasisQtyE8{0};
   std::int64_t expiryUtcNs{0};
@@ -94,6 +104,16 @@ struct SessionLoadPlan {
   bool requireCandles{false};
 };
 
+struct SourceHealthRow {
+  hftrec::corpus::BinaryMarketRecord record{};
+  hftrec::replay::EventArrival arrival{};
+  bool unhealthy{};
+};
+struct SourceLifecycleRow {
+  hftrec::corpus::BinaryMarketSourceLifecyclePayload payload{};
+  hftrec::replay::EventArrival arrival{};
+  std::int64_t exchangeTsNs{};
+};
 struct SessionData {
   std::filesystem::path sessionPath{};
   std::string exchange{};
@@ -104,6 +124,8 @@ struct SessionData {
   std::vector<BookTickerRow> bookTickers{};
   std::vector<DepthRow> depths{};
   std::vector<CandleRow> candles{};
+  std::vector<SourceLifecycleRow> sourceLifecycle{};
+  std::vector<SourceHealthRow> sourceHealth{};
   InstrumentMetadata instrument{};
   std::int64_t tradeHistoryWarmupSec{0};
   std::int64_t tradeHistoryRequestedStartNs{0};
@@ -124,6 +146,18 @@ struct SessionData {
   std::array<bool, kSessionTimelineKindCount> timelineChannelSorted{};
   bool timelineOrderKnown{false};
   bool binaryMarketCorpus{false};
+  std::uint32_t capturedSourceId{};
+  std::uint32_t canonicalInstrumentId{};
+  std::uint8_t assetDomainRaw{};
+  std::uint8_t capturedMarketKindRaw{};
+  std::uint8_t capturedMarketRaw{};
+  hftrec::corpus::BinaryMarketQuantityConversion capturedQuantityConversion{};
+  std::uint32_t quoteAssetId{};
+  bool capturedInitiallyPresent{true};
+  std::uint64_t capturedSourceGeneration{};
+  std::uint64_t capturedDirectoryRevision{};
+  std::uint16_t capturedAvailableChannels{};
+  std::uint16_t capturedUnhealthyChannels{};
   std::vector<std::string> warnings{};
 };
 

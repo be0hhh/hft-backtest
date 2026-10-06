@@ -272,8 +272,8 @@ namespace hft_backtest::detail::binary_corpus {
       PriceLevelRow converted{};
       if (!rescaleToE8(level.priceRaw, selection.source.priceScale,
                        converted.priceE8) ||
-          !rescaleToE8(level.quantityRaw, selection.source.quantityScale,
-                       converted.qtyE8)) {
+          !canonicalMarketQuantityToE8(selection.source, corpus::BinaryMarketChannel::Depth,
+                       level.quantityRaw, converted.qtyE8)) {
         error = "binary corpus depth value cannot be represented exactly in E8";
         return false;
       }

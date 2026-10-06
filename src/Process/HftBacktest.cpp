@@ -16,7 +16,7 @@ namespace {
 void printUsage() {
   std::cerr
       << "Usage: hft-backtest (--session DIR [--leg-session DIR] | "
-         "--corpus DIR --source exchange:market:canonical_symbol "
+         "--corpus DIR [--source exchange:market:canonical_symbol] "
          "[--source ...] --from-receive-ns N --to-receive-ns N) "
          "--config INI [--strategy NAME] [--indicator-profile NAME] "
          "[--primary-leg-index N] [--trade-mode all|primary] "
@@ -380,11 +380,13 @@ int main(int argc, char** argv) {
       !request.sessions.empty();
   if (binaryCorpus) {
     if (recorderSessions || request.corpusPath.empty() ||
-        request.corpusSources.empty() || corpusBeginReceiveNs <= 0 ||
+        corpusBeginReceiveNs <= 0 ||
         corpusEndReceiveNs <= corpusBeginReceiveNs) {
       printUsage();
       return 2;
     }
+    request.corpusBeginReceiveNs = corpusBeginReceiveNs;
+    request.corpusEndReceiveNs = corpusEndReceiveNs;
     for (auto& source : request.corpusSources) {
       source.beginReceiveNs = corpusBeginReceiveNs;
       source.endReceiveNs = corpusEndReceiveNs;

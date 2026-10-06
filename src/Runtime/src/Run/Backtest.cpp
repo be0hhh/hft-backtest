@@ -9,11 +9,14 @@
 #include "../Config/BacktestRunConfig.hpp"
 #include "../Config/Strategy/BacktestStrategyConfig.hpp"
 #include "../Strategy/Inputs/BacktestStrategyWarmup.hpp"
+#include "../Strategy/Inputs/BacktestStrategyInstrument.hpp"
 #include "../Strategy/BacktestStrategyRuntime.hpp"
 #include "../Strategy/Diagnostics/BacktestStrategyTrace.hpp"
 #include "../Input/Binary/BinaryCorpusLoader.hpp"
+#include "../Strategy/Execution/BacktestStrategyIntentLowering.hpp"
 #include "../Input/Session/SessionLoader.hpp"
 #include "BacktestRunError.hpp"
+#include "BacktestUniverse.hpp"
 
 #include "trading_core/Contracts/Control/ControlState.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
@@ -89,6 +92,16 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   const std::size_t requestedSessionCount = binaryCorpus
       ? request.corpusSources.size()
       : explicitSessionPathCount(request, hasExplicitSessions);
+  if (!binaryCorpus && recorderSessions && requestedSessionCount > 1u && !request.configPath.empty()) {
+    result.status = Status::Unsupported;
+    result.error = "legacy multiple recorder sessions have no authoritative common quote currency; use the binary universe";
+    return result;
+  }
+  if (!binaryCorpus && recorderSessions && !request.configPath.empty()) {
+    result.status = Status::Unsupported;
+    result.error = "recorded market quantity authority requires the current binary corpus for executable replay";
+    return result;
+  }
   const std::int64_t portfolioInitialBalance = portfolioInitialBalanceE8(request, requestedSessionCount);
   BacktestRunRequest effectiveRequest = request;
   effectiveRequest.initialBalanceE8 = portfolioInitialBalance;
@@ -109,19 +122,19 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
 
   if ((binaryCorpus && recorderSessions) ||
       (binaryCorpus &&
-       (request.corpusPath.empty() || request.corpusSources.empty())) ||
+       request.corpusPath.empty()) ||
       (!binaryCorpus && !recorderSessions) || request.configPath.empty()) {
     result.status = Status::InvalidArgument;
     result.error = "select either recorder sessions or a corpus path with source selections, plus config_path";
     return result;
   }
-  if (requestedSessionCount > trading_core::kStrategyRuntimeMaxLegs) {
+  if (!binaryCorpus && requestedSessionCount > trading_core::kStrategyRuntimeMaxLegs) {
     result.status = Status::InvalidArgument;
     result.error = "too many backtest market legs (max " +
         std::to_string(trading_core::kStrategyRuntimeMaxLegs) + ")";
     return result;
   }
-  if (request.hasPrimaryLegIndex && request.primaryLegIndex >= requestedSessionCount) {
+  if (!binaryCorpus && request.hasPrimaryLegIndex && request.primaryLegIndex >= requestedSessionCount) {
     result.status = Status::InvalidArgument;
     result.error = "primary leg index " + std::to_string(request.primaryLegIndex) +
                    " is outside selected leg count " + std::to_string(requestedSessionCount);
@@ -188,6 +201,19 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     return result;
   }
 
+  if (!strategy_intent_lowering::footprintSupported(*descriptor)) {
+    result.status = Status::Unsupported;
+    result.error = "Backtest execution adapter does not support this strategy state/output contract";
+    (void)writeEmptyArtifacts(artifacts);
+    return result;
+  }
+
+  if (binaryCorpus) {
+    auto universeRequest = effectiveRequest;
+    universeRequest.initialBalanceE8 = request.initialBalanceE8;
+    run_detail::runBinaryUniverse(result, universeRequest, cfg, *descriptor, progressCallback, userData);
+    return result;
+  }
   detail::SessionLoadPlan loadPlan{};
   if (!buildSessionLoadPlan(*descriptor, loadPlan, error)) {
     result.status = Status::Unsupported;
@@ -205,7 +231,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
                                    preparedMatches(*preparedInput, request, hasExplicitSessions, loadPlan);
   std::vector<detail::SessionData> loadedSessions{};
   const std::vector<detail::SessionData>* sessionsView = nullptr;
-  loadBacktestRunSessions(request, binaryCorpus, hasExplicitSessions, usePreparedSessions,
+  loadBacktestRunSessions(request, false, hasExplicitSessions, usePreparedSessions,
       preparedInput, loadPlan, loadedSessions, sessionsView, result, error);
   if (sessionsView != nullptr) appendSessionWarnings(result, *sessionsView);
   if (!isOk(result.status)) {
@@ -258,25 +284,23 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   const BacktestStrategyInputPolicy inputPolicy =
       resolveBacktestStrategyInputPolicy(*descriptor, params);
   StrategyInstrumentSpec instrument{};
-  instrument.tickSizeRaw = session.instrument.tickSizeE8;
-  instrument.stepSizeRaw = session.instrument.lotSizeE8;
-  instrument.contractBaseQtyRaw = session.instrument.contractBaseQtyE8;
-  instrument.priceBasisQtyRaw = session.instrument.priceBasisQtyE8;
-  instrument.expiryUtcNs = static_cast<std::uint64_t>(session.instrument.expiryUtcNs > 0 ? session.instrument.expiryUtcNs : 0);
-  (void)trading_core::prepareStrategyInstrumentSpecDerived(instrument);
+  const auto preparedInstrument = prepareBacktestStrategyInstrument(session.instrument, instrument, error);
+  if (!isOk(preparedInstrument)) {
+    result.status = preparedInstrument; result.error = error;
+    (void)writeEmptyArtifacts(artifacts); return result;
+  }
   std::vector<StrategyInstrumentSpec> legInstruments;
   std::vector<Symbol> legSymbols;
   if (hasExplicitSessions) {
     legInstruments.resize(sessions.size());
     legSymbols.resize(sessions.size());
     for (std::size_t leg = 0; leg < sessions.size(); ++leg) {
-      legInstruments[leg].tickSizeRaw = sessions[leg].instrument.tickSizeE8;
-      legInstruments[leg].stepSizeRaw = sessions[leg].instrument.lotSizeE8;
-      legInstruments[leg].contractBaseQtyRaw = sessions[leg].instrument.contractBaseQtyE8;
-      legInstruments[leg].priceBasisQtyRaw = sessions[leg].instrument.priceBasisQtyE8;
-      legInstruments[leg].expiryUtcNs = static_cast<std::uint64_t>(sessions[leg].instrument.expiryUtcNs > 0 ? sessions[leg].instrument.expiryUtcNs : 0);
-      (void)trading_core::prepareStrategyInstrumentSpecDerived(
-          legInstruments[leg]);
+      const auto preparedLeg = prepareBacktestStrategyInstrument(
+          sessions[leg].instrument, legInstruments[leg], error);
+      if (!isOk(preparedLeg)) {
+        result.status = preparedLeg; result.error = error;
+        (void)writeEmptyArtifacts(artifacts); return result;
+      }
       legSymbols[leg].copyFrom(sessions[leg].symbol.c_str());
     }
   }
@@ -403,6 +427,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       const std::int64_t legBalance = legInitialBalanceE8(request, leg);
       legEngine.initialBalanceE8 = legBalance;
       legEngine.walletBalanceE8 = legBalance;
+      legEngine.observedWalletBalanceE8 = legBalance;
       const BacktestFeeSchedule fee = resolveFeeSchedule(request, sessions[leg].exchange, sessions[leg].market);
       legEngine.makerFeeBpsE8 = fee.makerFeeBpsE8;
       legEngine.takerFeeBpsE8 = fee.takerFeeBpsE8;
@@ -420,13 +445,13 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (loadPlan.loadDepths) {
     if (hasExplicitSessions) {
       for (std::size_t leg = 0; leg < sessions.size() && leg < legEngines.size(); ++leg) {
-        legEngines[leg].venueOrderBookExecutionEnabled = !sessions[leg].depths.empty();
+        legEngines[leg].venueOrderBookExecutionEnabled = (binaryCorpus || !sessions[leg].depths.empty());
         if (legEngines[leg].venueOrderBookExecutionEnabled) {
           legEngines[leg].depthExecutionMode = BacktestDepthExecutionMode::Depth;
         }
       }
     } else {
-      engine.venueOrderBookExecutionEnabled = !session.depths.empty();
+      engine.venueOrderBookExecutionEnabled = (binaryCorpus || !session.depths.empty());
       if (engine.venueOrderBookExecutionEnabled) engine.depthExecutionMode = BacktestDepthExecutionMode::Depth;
     }
   }

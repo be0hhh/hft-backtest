@@ -427,16 +427,27 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
     return ExecutionDepthOpenStatus::Failed;
   }
   if (initialBook.initialized.raw == trading_core::kAlgoFlagTrue.raw) {
+    const trading_core::LocalOrderBookView initialView = trading_core::orderBook(initialBook);
     std::vector<cxet::composite::BookLevelPxQty> initialBids;
     std::vector<cxet::composite::BookLevelPxQty> initialAsks;
     initialBids.reserve(initialBook.bids.storedCount.raw);
     initialAsks.reserve(initialBook.asks.storedCount.raw);
     for (std::uint32_t i = 0u; i < initialBook.bids.storedCount.raw; ++i) {
-      const auto& level = initialBook.bids.levels[i];
+      trading_core::LocalOrderBookLevel level{};
+      if (!initialView.readStoredLevel(trading_core::BookSide::Bid, Index{i}, level)) {
+        failed_ = true;
+        failureReason_ = "initial_depth_rejected";
+        return ExecutionDepthOpenStatus::Failed;
+      }
       initialBids.push_back({level.px, level.qty});
     }
     for (std::uint32_t i = 0u; i < initialBook.asks.storedCount.raw; ++i) {
-      const auto& level = initialBook.asks.levels[i];
+      trading_core::LocalOrderBookLevel level{};
+      if (!initialView.readStoredLevel(trading_core::BookSide::Ask, Index{i}, level)) {
+        failed_ = true;
+        failureReason_ = "initial_depth_rejected";
+        return ExecutionDepthOpenStatus::Failed;
+      }
       initialAsks.push_back({level.px, level.qty});
     }
     cxet::runtime::market::DepthBookProjection projection{};

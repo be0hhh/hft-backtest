@@ -53,11 +53,15 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
               const BacktestRunRequest& request,
               const cxet::composite::UserDataEvent* userEvent) {
   if (!footprintSupported(descriptor)) return false;
+  if (engine.simulationEvidenceFailed) return false;
   if (engine.liquidated || engine.riskStopped) return true;
+  if (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
+      (engine.capturedExecutionRequiredChannels & ~engine.capturedActiveChannels) != 0u ||
+      (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u)) return true;
   if (!backtestStrategySnapshotReady(inputPolicy, engine.snapshot)) return true;
   const std::uint64_t configuredTradableMask = backtestTradableLegMask(request, 1u);
   const std::uint64_t sourceFreshMask =
-      backtestSourceFreshLegMask(inputPolicy, &engine, 1u, tsNs);
+      backtestSourceFreshLegMask(inputPolicy, detail::ConstEngineView(&engine, 1u), 1u, tsNs);
   const trading_core::strategy::StrategyInputSourceMaskState freshness =
       trading_core::strategy::strategyInputSourceMaskState(1u, configuredTradableMask, sourceFreshMask);
   const trading_core::ShardControlState effectiveControl =
@@ -82,6 +86,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   ctx.orderStates.legs = &ctx.orderState;
   ctx.orderStates.count = 1u;
   ctx.positionState = engine.position;
+  ctx.positionState.unrealizedPnl.raw = detail::observedUnrealizedPnlE8(engine);
   ctx.positionStates.legs = &ctx.positionState;
   ctx.positionStates.count = 1u;
   ctx.accountState = accountStateFromEngine(engine);
@@ -94,6 +99,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   ctx.userEventAdmittedSemanticMask =
       backtestSimulatedUserEventSemanticMask(userEvent);
   ctx.hasUserEvent = ctx.userEventAdmittedSemanticMask != 0u;
+  bindBacktestUserEventIdentity(ctx, engine);
   ctx.nowMono.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   ctx.nowUtc = replayUtcFromMonotonic(tsNs, engine.replayUtcOffsetNs);
   if (tsNs > engine.lastReplayMonotonicNs) engine.lastReplayMonotonicNs = tsNs;
@@ -116,13 +122,16 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
     engine.hasPendingProblem = false;
   }
   if (engine.rateLimitSnapshotRequested || ctx.hasUserEvent || ctx.hasProblemEvent) {
-    ctx.rateLimits = engine.quotas.observationBook(trading_core::kDefaultExecutionRouteHandle,
+    ctx.rateLimits = engine.quotaOwner().observationBook(trading_core::kDefaultExecutionRouteHandle,
                                                     engine.exchange,
                                                     engine.market,
                                                     1u,
                                                     ctx.nowMono);
     engine.rateLimitSnapshotRequested = false;
   }
+  scratch.executionView = detail::simulationOrderEvidenceView(engine);
+  ctx.state.orders.executionLegs = &scratch.executionView;
+  ctx.state.orders.executionLegCount = 1u;
   bindBacktestStrategyStateView(ctx);
   ctx.userEventRecvMono = ctx.nowMono;
   ctx.userEventRecvUtc = ctx.nowUtc;
@@ -207,7 +216,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   }
   const bool warmupGateHeldRealOrders = !newOrderEmissionBlocked &&
       canOrderFailureRollback &&
-      applyBacktestWarmupGate(ctx, &engine, 1u, request);
+      applyBacktestWarmupGate(ctx, detail::EngineView(&engine, 1u), 1u, request);
   if (warmupGateHeldRealOrders && canOrderFailureRollback) {
     descriptor.restoreAfterOrderFailure(state, before);
     if (transactionCycle) ctx.io.transactionCount = 0u;
@@ -235,7 +244,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   } else {
     applyToSingleLeg(engine, ctx, tsNs, engine.latency, request);
   }
-  return true;
+  return !engine.simulationEvidenceFailed;
 }
 
 

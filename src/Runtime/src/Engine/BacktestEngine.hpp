@@ -2,8 +2,10 @@
 
 #include "hft_backtest/Backtest.hpp"
 #include "BacktestQuota.hpp"
+#include "BacktestEngineView.hpp"
 
 #include "../Execution/Model/BacktestLatency.hpp"
+#include "../Execution/BacktestOrderEvidence.hpp"
 #include "../Input/Session/SessionLoader.hpp"
 
 #include "cxet/Api/Market/PublicMarketDataTypes.hpp"
@@ -13,7 +15,7 @@
 #include "trading_core/Contracts/Intents/PositionState.hpp"
 #include "trading_core/Contracts/Strategy/StrategyContract.hpp"
 #include "trading_core/Contracts/Strategy/StrategyDecisionTrace.hpp"
-#include "trading_core/Needed/FillPositionAccounting.hpp"
+#include "trading_core/Algorithm/Math/Accounting/FillPositionAccounting.hpp"
 
 #include "cxet/Canon/PositionAndExchange.hpp"
 #include "cxet/Canon/Subtypes.hpp"
@@ -81,7 +83,9 @@ constexpr std::uint8_t kRiskSnapshotReasonTraderRiskStop = 6u;
 constexpr std::uint8_t kTimelineKindDepth = 0u;
 constexpr std::uint8_t kTimelineKindTrade = 1u;
 constexpr std::uint8_t kTimelineKindBookTicker = 2u;
-constexpr std::uint8_t kTimelineKindCount = 3u;
+constexpr std::uint8_t kTimelineKindLifecycle = 3u;
+constexpr std::uint8_t kTimelineKindHealth = 4u;
+constexpr std::uint8_t kTimelineKindCount = 5u;
 constexpr std::uint8_t kRecordActionNone = 0u;
 constexpr std::uint8_t kRecordActionOrder = 1u;
 constexpr std::uint8_t kRecordActionCancel = 3u;
@@ -139,9 +143,11 @@ struct JsonOrder {
   bool service{false};
   bool warmup{false};
   bool serviceAutounwind{false};
+  std::uint32_t contextIndex{};
 };
 
 struct JsonFill {
+  // Appended in the serialized row; direct local IDs are context scoped.
   std::uint32_t legIndex{0u};
   std::uint64_t orderId{0};
   std::int64_t entryTsNs{0};
@@ -170,6 +176,7 @@ struct JsonFill {
   std::int64_t slippageE8{0};
   std::int64_t slippageBpsE8{0};
   std::int64_t executionBookConsumedPctE8{0};
+  std::uint32_t contextIndex{};
 };
 
 struct FillExecutionMetadata {
@@ -346,6 +353,9 @@ struct JsonRateLimitUsagePoint {
 };
 
 struct OpenOrder {
+  std::uint32_t contextIndex{};
+  std::uint64_t sourceGeneration{};
+  std::uint64_t executionBoundaryEpoch{};
   trading_core::StrategyOrderState state{};
   trading_core::ExecutionRouteHandle routeHandle{trading_core::kDefaultExecutionRouteHandle};
   std::size_t recordIndex{kNoRecordIndex};
@@ -377,6 +387,9 @@ struct PendingAction {
   std::uint64_t submitSequence{0u};
   Id targetClientIntentId{};
   Id commandClientIntentId{};
+  std::uint32_t contextIndex{};
+  std::uint64_t sourceGeneration{};
+  std::uint64_t executionBoundaryEpoch{};
 };
 
 struct ReconstructionSourceIdentity {
@@ -387,7 +400,23 @@ struct ReconstructionSourceIdentity {
   bool initialized{false};
 };
 
+struct SharedAccountState {
+  std::uint32_t quoteAssetId{};
+  std::int64_t initialBalanceE8{};
+  std::int64_t walletBalanceE8{};
+  std::int64_t positionEquityValueE8{};
+  std::int64_t observedWalletBalanceE8{};
+  std::int64_t observedPositionEquityValueE8{};
+  bool observedInitialized{};
+  std::int64_t venueReservedQuoteE8{};
+  std::int64_t observedReservedQuoteE8{};
+  std::int64_t lastPrivateDeliveryNs{};
+  std::uint64_t revision{1u};
+  BacktestQuota quotas{};
+};
 struct EngineState {
+  std::unique_ptr<SimulationOrderEvidenceOwner> simulationOrders{std::make_unique<SimulationOrderEvidenceOwner>()};
+  bool simulationEvidenceFailed{false};
   std::vector<JsonOrder> orders{};
   std::vector<JsonFill> fills{};
   std::vector<JsonEquityPoint> equityPoints{};
@@ -410,6 +439,10 @@ struct EngineState {
   trading_core::StrategyMarketSnapshot snapshot{};
   trading_core::StrategyCandleSnapshot candle{};
   trading_core::StrategyMarketSnapshot venueSnapshot{};
+  // Historical valuation only; never a ready quote or executable liquidity.
+  std::int64_t venueValuationBidE8{}, observedValuationBidE8{};
+  std::uint64_t venueValuationReceiveNs{}, observedValuationReceiveNs{};
+  std::int64_t venueAccountPositionValueE8{}, observedAccountPositionValueE8{};
   trading_core::LocalOrderBookState orderBook{};
   trading_core::LocalOrderBookState venueOrderBook{};
   ReplayDepthBook strategyDepthBook{};
@@ -449,8 +482,33 @@ struct EngineState {
   Symbol symbol{};
   std::vector<cxet::composite::UserDataEvent> userEvents{};
   std::vector<std::int64_t> userEventDeliveryTsNs{};
+  // Simulated producer correlation is retained even after the order slot clears.
+  std::vector<Id> userEventClientIntentIds{};
+  std::vector<std::uint64_t> userEventCommandIds{};
+  std::vector<std::uint64_t> userEventGenerations{};
+  std::vector<std::uint32_t> userEventContextIndices{};
+  std::vector<unsigned char> userEventConsumed{};
+  std::vector<unsigned char> userEventServiceFlags{};
+  std::size_t lastDeliveredUserEvent{std::numeric_limits<std::size_t>::max()};
+  std::uint32_t activeContextIndex{};
+  bool capturedSourceManaged{false};
+  bool capturedSourceMember{true};
+  std::uint64_t capturedSourceGeneration{};
+  std::uint64_t capturedDirectoryRevision{};
+  std::uint64_t executionBoundaryEpoch{};
+  std::uint16_t capturedExecutionRequiredChannels{};
+  std::uint16_t capturedActiveChannels{};
+  std::uint16_t capturedUnhealthyChannels{};
+  std::int64_t replayNotBeforeNs{};
   BacktestLatencyRuntime latency{};
   BacktestQuota quotas{};
+  SharedAccountState* sharedAccount{nullptr};
+  [[nodiscard]] BacktestQuota& quotaOwner() noexcept {
+    return sharedAccount ? sharedAccount->quotas : quotas;
+  }
+  [[nodiscard]] const BacktestQuota& quotaOwner() const noexcept {
+    return sharedAccount ? sharedAccount->quotas : quotas;
+  }
   std::uint64_t rateLimitRejectedOrders{0};
   std::uint64_t rateLimitRejectedCancels{0};
   std::int64_t firstRateLimitRejectTsNs{0};
@@ -460,7 +518,9 @@ struct EngineState {
   std::size_t deliveredUserEvents{0};
   std::uint64_t userEventSequence{0};
   std::uint64_t timerWakeEvents{0};
-  TimeNs lastOrderPathHotMono{};
+  TimeNs lastOrderPathCommandMono{}, lastOrderPathWarmupMono{}, lastOrderPathAckMono{};
+  Id warmupClientIntentId{};
+  std::uint32_t warmupContextIndex{};
   std::uint64_t nextServiceClientIntentRaw{0x8000000000000000ull};
   std::uint8_t lastWarmupSkipReason{0u};
   trading_core::StrategyProblemEvent pendingProblem{};
@@ -468,6 +528,7 @@ struct EngineState {
   bool rateLimitSnapshotRequested{false};
   bool warmupInFlight{false};
   bool serviceExposureOpen{false};
+  std::int64_t observedServiceNetQtyRaw{};
   std::uint64_t reduceOnlyOrders{0};
   std::uint64_t reduceOnlyFills{0};
   std::int64_t tickSizeE8{0};
@@ -479,6 +540,11 @@ struct EngineState {
   std::int64_t feesPaidE8{0};
   std::int64_t initialBalanceE8{0};
   std::int64_t walletBalanceE8{0};
+  std::int64_t observedWalletBalanceE8{0};
+  std::int64_t venueReservedQuoteE8{};
+  std::int64_t observedReservedQuoteE8{};
+  std::int64_t venueReservedBaseE8{};
+  std::int64_t observedReservedBaseE8{};
   std::int64_t makerFeeBpsE8{0};
   std::int64_t takerFeeBpsE8{0};
   std::int64_t lastRiskSnapshotTsNs{std::numeric_limits<std::int64_t>::min()};
@@ -547,7 +613,7 @@ struct TimelineEvent {
   std::uint16_t eventOrdinal{0u};
   std::int64_t ingestSeq{0};
   std::uint8_t kind{0};
-  std::uint8_t legIndex{0};
+  std::uint32_t legIndex{0};
   bool venueScheduleAdjusted{false};
   bool applicationAtomicRebase{false};
   // Captured liveness evidence without a new venue state. It is delivered on
@@ -561,7 +627,7 @@ ExchangeId exchangeFromText(const std::string& value) noexcept;
 canon::MarketType marketFromText(const std::string& value) noexcept;
 Side sideFromRow(std::int64_t raw) noexcept;
 
-cxet::composite::Trade toRuntime(const TradeRow& row) noexcept;
+[[nodiscard]] bool toRuntime(const TradeRow& row, cxet::composite::Trade& out) noexcept;
 cxet::composite::BookTicker toRuntime(const BookTickerRow& row) noexcept;
 bool buildTieredCandleHistory(const std::vector<CandleRow>& rows,
                               cxet::composite::TieredCandleHistory& out) noexcept;
@@ -575,6 +641,12 @@ void initializeAccounting(EngineState& engine, const BacktestRunRequest& request
     std::int64_t tsNs,
     std::int64_t feeBpsE8) noexcept;
 std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept;
+std::int64_t observedUnrealizedPnlE8(const EngineState& engine) noexcept;
+std::int64_t positionEquityValueE8(const EngineState& engine, bool observed) noexcept;
+void refreshAccountPositionValue(EngineState& engine, bool observed) noexcept;
+void recordSpotValuationMark(EngineState& engine, bool observed) noexcept;
+[[nodiscard]] bool spotCashDeltaE8(Side side, std::int64_t priceE8,
+    std::int64_t qtyE8, std::int64_t feeE8, std::int64_t& delta) noexcept;
 std::int64_t equityE8(const EngineState& engine) noexcept;
 void appendEquityPoint(EngineState& engine, std::int64_t tsNs);
 void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t reason);

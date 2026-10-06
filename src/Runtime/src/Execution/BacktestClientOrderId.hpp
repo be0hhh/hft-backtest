@@ -24,9 +24,10 @@ inline constexpr std::uint64_t kBacktestClientIntentIdWrap =
 [[nodiscard]] inline bool makeBacktestClientOrderId(
     ExchangeId exchange,
     Id clientIntentId,
-    SmallBuf& out) noexcept {
+    SmallBuf& out, bool normalizeLocalIntent = true) noexcept {
   out = SmallBuf{};
-  clientIntentId = normalizeBacktestClientIntentId(clientIntentId);
+  if (normalizeLocalIntent) clientIntentId = normalizeBacktestClientIntentId(clientIntentId);
+  else if (!clientIntentId.raw) return false;
   std::size_t pos = 0u;
   const char prefix =
       exchange.raw == canon::kExchangeIdGate.raw ? 't' : 'h';

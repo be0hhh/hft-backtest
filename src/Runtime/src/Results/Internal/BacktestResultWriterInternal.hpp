@@ -14,6 +14,7 @@
 #include <string_view>
 #include <system_error>
 #include <vector>
+#include <utility>
 
 #include "absl/container/flat_hash_map.h"
 
@@ -25,7 +26,7 @@ constexpr const char* kFillsRowSchema =
     "fill_reason,liquidity,order_qty_e8,cumulative_filled_qty_e8,remaining_qty_e8,avg_price_e8,"
     "book_level_qty_e8,book_visible_executable_qty_e8,book_consumed_pct_e8,queue_ahead_before_e8,queue_ahead_after_e8,"
     "chunk_index,chunk_count,execution_qty_e8,execution_avg_price_e8,reference_price_e8,slippage_e8,"
-    "slippage_bps_e8,execution_book_consumed_pct_e8]";
+    "slippage_bps_e8,execution_book_consumed_pct_e8,context_index]";
 
 constexpr const char* kRateLimitUsageRowSchema =
     "[ts_ns,leg_index,min_remaining_pct_e4,remaining,limit,bucket_kind,interval_ns,exhausted]";
@@ -103,9 +104,10 @@ struct OrderLifetimeRow {
   std::uint32_t legIndex{0u};
   std::uint8_t orderType{kRecordTypeLimit};
 };
+using OrderLifetimeKey = std::pair<std::uint64_t, std::uint64_t>;
 struct OrderLifetimeIndexes {
-  absl::flat_hash_map<std::uint64_t, const JsonFill*> fillByOrderId{};
-  absl::flat_hash_map<std::uint64_t, std::vector<const JsonOrder*>> commandsByTargetId{};
+  absl::flat_hash_map<OrderLifetimeKey, const JsonFill*> fillByOrderId{};
+  absl::flat_hash_map<OrderLifetimeKey, std::vector<const JsonOrder*>> commandsByTargetId{};
 };
 
 std::string_view trim(std::string_view value) noexcept;
@@ -138,12 +140,12 @@ void writeDiagnosticsObject(std::ostream& out,
 bool isEffectiveOrderStatus(std::uint8_t status) noexcept;
 bool isOpenOrderStatus(std::uint8_t status) noexcept;
 void buildOrderLifetimeIndexes(const EngineState& engine, OrderLifetimeIndexes& out);
-const JsonFill* lifetimeFill(const OrderLifetimeIndexes& indexes, std::uint64_t orderId) noexcept;
+const JsonFill* lifetimeFill(const OrderLifetimeIndexes& indexes, OrderLifetimeKey orderId) noexcept;
 std::int64_t lifetimeCommandEndTs(const OrderLifetimeIndexes& indexes,
-                                  std::uint64_t orderId,
+                                  OrderLifetimeKey orderId,
                                   std::int64_t startTsNs) noexcept;
 bool hasSameTimestampLifetimeReplaceEnd(const OrderLifetimeIndexes& indexes,
-                                        std::uint64_t orderId,
+                                        OrderLifetimeKey orderId,
                                         std::int64_t startTsNs) noexcept;
 std::vector<OrderLifetimeRow> materializeOrderLifetimes(const EngineState& engine);
 bool writeOrderLifetimes(const std::filesystem::path& path,

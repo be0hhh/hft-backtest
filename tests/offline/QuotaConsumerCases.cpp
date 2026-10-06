@@ -44,6 +44,39 @@ void submit(detail::EngineState& engine, std::uint64_t id, std::int64_t now) {
   detail::applyIntents(engine, io, now, 1000000, 1000000);
 }
 
+void symbolsOnOneVirtualAccountShareOnePermitLedger() {
+  auto first = std::make_unique<detail::EngineState>();
+  auto second = std::make_unique<detail::EngineState>();
+  detail::SharedAccountState account;
+  first->sharedAccount = second->sharedAccount = &account;
+  std::string error;
+  CXET_CHECK(applyRateLimitSchedule(*first, policy(), error));
+  submit(*first, 1u, 100);
+  submit(*second, 1u, 101);
+  CXET_CHECK(first->orders.back().status == detail::kRecordStatusPending);
+  CXET_CHECK(second->orders.back().status == detail::kRecordStatusRejected);
+  CXET_CHECK(second->rateLimitRejectedOrders == 1u);
+}
+
+void unsupportedIocDoesNotBecomeRestingOrder() {
+  auto engine = std::make_unique<detail::EngineState>();
+  std::string error;
+  CXET_CHECK(applyRateLimitSchedule(*engine, policy(), error));
+  std::array<trading_core::OrderIntent, 1> orders{order(1u)};
+  orders[0].limitTimeInForcePolicy = trading_core::LimitTimeInForcePolicy::Ioc;
+  trading_core::StrategyIo io{};
+  io.orderOut = {orders.data(), orders.size()};
+  io.orderCount = 1u;
+  detail::applyIntents(*engine, io, 100, 1000000, 1000000);
+  CXET_CHECK(engine->orders.size() == 1u);
+  CXET_CHECK(engine->orders[0].status == detail::kRecordStatusRejected);
+  CXET_CHECK(engine->pending.empty());
+  for (const auto& active : engine->open) CXET_CHECK(!active.state.valid);
+  // Rejection precedes quota reservation: the one allowed GTC still fits.
+  submit(*engine, 2u, 101);
+  CXET_CHECK(engine->orders.back().status == detail::kRecordStatusPending);
+}
+
 void depletedQuotaRefusesOrderAndCancel() {
   auto engine = std::make_unique<detail::EngineState>();
   std::string error;
@@ -114,6 +147,8 @@ void unsupportedReplaceRefusesWholeCycleWithoutQuotaCharge() {
 }
 
 constexpr cxet::testing::Case cases[]{
+    cxet::testing::Case{"symbols_on_one_virtual_account_share_one_permit_ledger", symbolsOnOneVirtualAccountShareOnePermitLedger},
+    cxet::testing::Case{"quota_unsupported_ioc_refuses_without_charge", unsupportedIocDoesNotBecomeRestingOrder},
     cxet::testing::Case{"quota_depleted_refuses_order_and_cancel", depletedQuotaRefusesOrderAndCancel},
     cxet::testing::Case{"quota_fixed_window_restores_at_boundary", fixedWindowRestoresQuotaExactlyAtBoundary},
     cxet::testing::Case{"quota_unsupported_replace_refuses_without_charge", unsupportedReplaceRefusesWholeCycleWithoutQuotaCharge},
