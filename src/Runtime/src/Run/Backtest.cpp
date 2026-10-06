@@ -81,8 +81,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   result.tradeMode = request.tradeMode;
   result.primaryLegIndex = request.hasPrimaryLegIndex ? request.primaryLegIndex : 0u;
   result.hasPrimaryLegIndex = request.hasPrimaryLegIndex;
-  result.rateLimitsEnabled = request.rateLimitsEnabled;
-  result.strictRateLimitRejects = request.strictRateLimitRejects;
+  result.rateLimitsEnabled = false;
+  result.strictRateLimitRejects = false;
   const bool binaryCorpus = usesBinaryCorpus(request);
   const bool recorderSessions =
       !request.sessionPath.empty() || !request.sessions.empty();
@@ -385,14 +385,16 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   engine.takerFeeBpsE8 = primaryFee.takerFeeBpsE8;
   {
     std::string rateLimitError;
-    if (!applyRateLimitSchedule(engine,
-                                resolveRateLimitSchedule(effectiveRequest, session.exchange, session.market),
-                                rateLimitError)) {
+    const auto policy=resolveRateLimitSchedule(effectiveRequest,session.exchange,session.market);
+    if (!applyRateLimitSchedule(engine,policy,rateLimitError)) {
       result.status = Status::InvalidArgument;
       result.error = std::move(rateLimitError);
       (void)writeEmptyArtifacts(artifacts);
       return result;
     }
+    result.rateLimitSchedules.push_back(policy);
+    result.rateLimitsEnabled=policy.enabled;
+    result.strictRateLimitRejects=request.strictRateLimitRejects && policy.enabled;
   }
   std::vector<detail::EngineState> legEngines(
       hasExplicitSessions ? sessions.size() : 0u);
@@ -432,14 +434,18 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
       legEngine.makerFeeBpsE8 = fee.makerFeeBpsE8;
       legEngine.takerFeeBpsE8 = fee.takerFeeBpsE8;
       std::string rateLimitError;
-      if (!applyRateLimitSchedule(legEngine,
-                                  resolveRateLimitSchedule(effectiveRequest, sessions[leg].exchange, sessions[leg].market),
-                                  rateLimitError)) {
+      const auto policy=resolveRateLimitSchedule(effectiveRequest,sessions[leg].exchange,sessions[leg].market);
+      if (!applyRateLimitSchedule(legEngine,policy,rateLimitError)) {
         result.status = Status::InvalidArgument;
         result.error = std::move(rateLimitError);
         (void)writeEmptyArtifacts(artifacts);
         return result;
       }
+      const auto present=std::find_if(result.rateLimitSchedules.begin(),result.rateLimitSchedules.end(),
+          [&](const auto& installed){return installed.exchange==policy.exchange && installed.market==policy.market;});
+      if(present==result.rateLimitSchedules.end()) result.rateLimitSchedules.push_back(policy);
+      result.rateLimitsEnabled=result.rateLimitsEnabled || policy.enabled;
+      result.strictRateLimitRejects=request.strictRateLimitRejects && result.rateLimitsEnabled;
     }
   }
   if (loadPlan.loadDepths) {

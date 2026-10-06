@@ -159,6 +159,14 @@ void runBinaryUniverse(BacktestRunResult& result, const BacktestRunRequest& requ
     const auto opened = stream.open(request.corpusPath, selections, plan, error, request.corpusSources.empty());
     if (!isOk(opened)) { reject(opened, error); return; }
     const auto& sources = stream.sessions();
+    // Catalog metadata is an initial directory snapshot. Hydration can change
+    // the quote asset before begin; validate the actual replay owners before
+    // constructing account state or aggregating their integer balances.
+    std::vector<UniverseContextSelection> hydratedContexts;
+    if(!discoverUniverseContexts(descriptor,config,sources,hydratedContexts,error)) {
+      reject(Status::ConfigMismatch,error);return;
+    }
+    selectedContexts=std::move(hydratedContexts);
     appendSessionWarnings(result, sources);
     const auto contextBytes = sizeof(UniverseState) + sizeof(MultiLegCycleScratch) +
         trading_core::kStrategyRuntimeMaxLegs * (sizeof(StrategyInstrumentSpec) + 2u * sizeof(std::size_t));
@@ -238,6 +246,10 @@ void runBinaryUniverse(BacktestRunResult& result, const BacktestRunRequest& requ
         initialBalance = trading_core::saturatingAddI64(initialBalance, balance);
         const auto policy = resolveRateLimitSchedule(request, source.exchange, source.market);
         if (!accounts.back()->quotas.configure(policy, error)) { reject(Status::InvalidArgument, error); return; }
+        result.rateLimitSchedules.push_back(policy);
+        result.rateLimitsEnabled=result.rateLimitsEnabled || policy.enabled;
+        result.strictRateLimitRejects=request.strictRateLimitRejects && result.rateLimitsEnabled;
+
       } else if (!request.legInitialBalancesE8.empty() && accounts[account]->initialBalanceE8 != balance) {
         reject(Status::InvalidArgument, "sources on one virtual account disagree on initial balance"); return;
       }

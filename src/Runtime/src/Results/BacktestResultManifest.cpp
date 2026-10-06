@@ -261,7 +261,16 @@ bool writeManifest(const std::filesystem::path& path,
       << ", " << q << "strict_failure" << q << ": " << (result.rateLimitStrictFailure ? "true" : "false")
       << ", " << q << "mode" << q << ": " << q << rateLimitModeName(result) << q
       << ", " << q << "rejected_commands" << q << ": " << manifestRejectedCommands
-      << "},\n";
+      << ", " << q << "venues" << q << ": [";
+  for(std::size_t i=0u;i<result.rateLimitSchedules.size();++i) {
+    const auto& policy=result.rateLimitSchedules[i];
+    if(i!=0u) out<<", ";
+    out<<"{"<<q<<"exchange"<<q<<": "<<quote(policy.exchange)
+       <<", "<<q<<"market"<<q<<": "<<quote(policy.market)
+       <<", "<<q<<"enabled"<<q<<": "<<(policy.enabled?"true":"false")
+       <<", "<<q<<"strict_rejects"<<q<<": "<<((policy.enabled && result.strictRateLimitRejects)?"true":"false")<<"}";
+  }
+  out<<"]},\n";
   out << "  " << q << "depth_execution" << q << ": ";
   writeDepthExecutionObject(out, result.depthExecution);
   out << ",\n";

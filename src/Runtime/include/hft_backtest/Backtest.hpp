@@ -269,7 +269,9 @@ struct BacktestRunResult {
   std::uint64_t rateLimitRejectedCommands{0};
   BacktestTradeMode tradeMode{BacktestTradeMode::AllLegs};
   std::uint32_t primaryLegIndex{0u};
-  bool rateLimitsEnabled{true};
+  // Installed replay policies, one entry per virtual venue account.
+  std::vector<BacktestRateLimitSchedule> rateLimitSchedules{};
+  bool rateLimitsEnabled{false};
   bool strictRateLimitRejects{false};
   bool rateLimitStrictFailure{false};
   bool hasPrimaryLegIndex{false};

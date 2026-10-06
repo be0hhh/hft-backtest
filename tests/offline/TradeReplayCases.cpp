@@ -201,7 +201,110 @@ struct BinaryTradeFixture {
   }
 };
 
+struct UniverseAuditFixture {
+  std::filesystem::path root=std::filesystem::current_path()/
+      ("backtest-universe-audit-"+std::to_string(::getpid())+"-"+
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  explicit UniverseAuditFixture(bool changeQuote,bool splitVenues=false) {
+    namespace corpus=hftrec::corpus;
+    std::array<corpus::BinaryMarketSource,2u> sources{};
+    for(std::size_t i=0u;i<sources.size();++i) {
+      auto& source=sources[i];source.sourceId=i+1u;source.canonicalSymbolId=i+7u;
+      source.initialSourceGeneration=11u;source.venueId=(changeQuote || splitVenues) && i?detail::exchangeFromText("bybit").raw:1u;source.marketRaw=2u;
+      source.marketKindRaw=1u;source.assetDomainRaw=1u;
+      source.economicBaseAssetId=i+1u;source.quoteAssetId=2u;
+      source.priceScale=source.quantityScale=8u;source.tickSizeRaw=source.stepSizeRaw=1;
+      source.canonicalStepSizeRaw=source.executionQuantityStepRaw=1;
+      source.quantityConversion.canonicalBaseMultiplier=source.quantityConversion.nativeBaseMultiplier=1u;
+      source.quantityConversion.kinds[0]=corpus::BinaryMarketQuantityKind::CanonicalBase;
+      source.directoryFlags=corpus::BinaryMarketDirectoryBookTicker|corpus::BinaryMarketDirectoryTickSize;
+      source.instrumentMetadataFlags=corpus::BinaryMarketInstrumentStepSize|
+          corpus::BinaryMarketInstrumentCanonicalStepSize|corpus::BinaryMarketInstrumentExecutionQuantityStep;
+      source.configuredChannelMask=source.availableChannelMask=source.traderReplayChannelMask=1u;
+      source.compatibility[0]=corpus::BinaryMarketCompatibility::ExactTraderReplay;
+      const auto text=[](auto& dst,std::string_view value) {std::copy(value.begin(),value.end(),dst.begin());};
+      text(source.venue,(changeQuote || splitVenues) && i?"bybit":"binance");source.venueBytes=(changeQuote || splitVenues) && i?5u:7u;text(source.market,"spot");source.marketBytes=4u;
+      text(source.canonicalSymbol,i?"ETH_USDT":"BTC_USDT");source.canonicalSymbolBytes=8u;
+      text(source.nativeSymbol,i?"ETHUSDT":"BTCUSDT");source.nativeSymbolBytes=7u;
+    }
+    corpus::BinaryMarketWriterConfig cfg{};cfg.root=root;cfg.sources=sources;cfg.producerEpoch=13u;
+    cfg.maximumBytes=128u*1024u;cfg.segmentTargetBytes=4096u;cfg.targetDurationNs=10'000u;
+    cfg.startedReceiveNs=cfg.startedMonotonicNs=100u;cfg.ringCapacity=2u;cfg.shardCount=1u;
+    corpus::BinaryMarketCorpusWriter writer;CXET_CHECK(writer.start(cfg)==hftrec::Status::Ok);
+    std::uint64_t sequence=1u;
+    if(changeQuote) {
+      corpus::BinaryMarketRecord row{};auto& h=row.header;
+      h.sourceId=2u;h.sourceGeneration=12u;h.sessionEpoch=17u;h.eventSequence=h.shardSequence=sequence++;
+      h.receiveRealtimeNs=h.receiveMonotonicNs=200u;h.channel=corpus::BinaryMarketChannel::SourceLifecycle;
+      h.flags=corpus::BinaryMarketRecordSourceLifecycle|corpus::BinaryMarketRecordTraderReplayCompatible|corpus::BinaryMarketRecordExchangeTimestampMissing;
+      h.payloadBytes=sizeof(corpus::BinaryMarketSourceLifecyclePayload);
+      auto& life=*corpus::binaryMarketPayload<corpus::BinaryMarketSourceLifecyclePayload>(&row);
+      life.source=sources[1];life.source.quoteAssetId=3u;life.source.initialSourceGeneration=12u;
+      life.directoryRevision=life.requestSequence=1u;life.previousSourceGeneration=11u;
+      life.channelMaskBefore=life.channelMaskAfter=1u;life.kind=corpus::BinaryMarketSourceLifecycleKind::DirectoryChanged;
+      life.affectedChannel=1u;CXET_CHECK(writer.append(row)==hftrec::Status::Ok);
+    }
+    for(std::size_t i=0u;i<sources.size();++i) {
+      corpus::BinaryMarketRecord row{};auto& h=row.header;
+      h.sourceId=i+1u;h.sourceGeneration=changeQuote && i?12u:11u;h.sessionEpoch=17u;
+      h.eventSequence=h.shardSequence=sequence++;h.frameSequence=i+1u;
+      h.receiveRealtimeNs=h.receiveMonotonicNs=400u+i;h.exchangeTimestampNs=399u+i;
+      h.flags=corpus::BinaryMarketRecordTraderReplayCompatible;h.payloadBytes=sizeof(corpus::BinaryMarketBookTickerPayload);
+      h.sourceFlags=corpus::BinaryMarketSourceBookTickerBidPresent|corpus::BinaryMarketSourceBookTickerAskPresent;
+      *corpus::binaryMarketPayload<corpus::BinaryMarketBookTickerPayload>(&row)={100'000'000,100'000'000,101'000'000,100'000'000};
+      CXET_CHECK(writer.append(row)==hftrec::Status::Ok);
+    }
+    CXET_CHECK(writer.finalize(corpus::BinaryMarketStopReason::Requested,10'000)==hftrec::Status::Ok);
+    std::ofstream config(root/"strategy.ini");
+    config<<"[strategy]\ntype=spread_maker1and2\ndistance_bps=10\ntrigger_bps=10\norder_qty=0.00000001\nrefresh_ms=1\n"
+          "[venue.binance_spot]\nsymbols="<<((changeQuote || splitVenues)?"BTC_USDT":"BTC_USDT,ETH_USDT")<<"\nrate_limits_enabled=false\n";
+    if(changeQuote || splitVenues) config<<"[venue.bybit_spot]\nsymbols=ETH_USDT\nrate_limits_enabled=false\n";
+  }
+  ~UniverseAuditFixture(){std::error_code error;std::filesystem::remove_all(root,error);}
+  hft_backtest::BacktestRunResult run(bool enableVenue=false,bool globalEnabled=true) const {
+    hft_backtest::BacktestRunRequest request{};request.corpusPath=root;request.configPath=root/"strategy.ini";
+    request.corpusBeginReceiveNs=300;request.corpusEndReceiveNs=10'000;request.writeArtifacts=true;
+    request.outputPath=root/"result";request.initialBalanceE8=100'000'000;
+    request.rateLimitsEnabled=globalEnabled;request.strictRateLimitRejects=true;
+    if(enableVenue) {
+      hft_backtest::BacktestRateLimitSchedule policy{};policy.exchange="binance";policy.market="spot";
+      hft_backtest::BacktestQuotaBucketConfig bucket{};bucket.kind=trading_core::RateLimitBucketKind::Orders;
+      bucket.limit=1000;bucket.intervalNs=1'000'000;policy.buckets.push_back(bucket);
+      for(const auto kind:{trading_core::RateLimitActionKind::LimitOrder,trading_core::RateLimitActionKind::CancelOrder}) {
+        trading_core::RateLimitActionConfig action{};action.action=kind;action.costCount=1u;
+        action.costs[0]={bucket.kind,1};policy.actions.push_back(action);
+      }
+      request.rateLimitSchedules.push_back(std::move(policy));
+    }
+    return hft_backtest::runBacktest(request);
+  }
+};
+
 const cxet::testing::Case cases[]{
+    cxet::testing::Case{"universe_hydrated_quote_currency_refuses_before_accounting", +[] {
+      UniverseAuditFixture fixture(true);const auto result=fixture.run();
+      CXET_CHECK(result.status==hft_backtest::Status::ConfigMismatch);
+      CXET_CHECK(result.error.find("quote")!=std::string::npos);
+      CXET_CHECK(result.legs.empty() && result.virtualAccounts==0u && result.universeSources==0u && result.orders==0u);
+    }},
+    cxet::testing::Case{"result_effective_disabled_quotas_do_not_claim_strict_enforcement", +[] {
+      for(const auto mode:{0u,1u,2u,3u}) {
+        const bool enabled=mode==1u || mode==2u;
+        UniverseAuditFixture fixture(false,mode==2u);const auto result=fixture.run(mode!=0u,mode!=3u);
+        CXET_CHECK(result.status==hft_backtest::Status::Ok);
+        CXET_CHECK(result.rateLimitsEnabled==enabled && result.strictRateLimitRejects==enabled);
+        CXET_CHECK(result.rateLimitSchedules.size()==(mode==2u?2u:1u));
+        CXET_CHECK(result.rateLimitSchedules[0].enabled==enabled);
+        if(mode==2u) CXET_CHECK(!result.rateLimitSchedules[1].enabled);
+        std::ifstream input(fixture.root/"result"/"manifest.json");
+        const std::string manifest((std::istreambuf_iterator<char>(input)),{});
+        CXET_CHECK(manifest.find("\"venues\"")!=std::string::npos);
+        CXET_CHECK(manifest.find(enabled?"\"enabled\": true":"\"enabled\": false")!=std::string::npos);
+        CXET_CHECK(manifest.find(enabled?"\"strict_rejects\": true":"\"strict_rejects\": false")!=std::string::npos);
+        if(mode==2u) CXET_CHECK(manifest.find("\"market\": \"spot\", \"enabled\": false, \"strict_rejects\": false")!=std::string::npos);
+      }
+    }},
+
     cxet::testing::Case{"universe_refuses_mixed_or_unknown_quote_currency_before_strategy", +[] {
       std::vector<detail::SessionData> sources(2u);
       for(std::size_t i=0u;i<sources.size();++i) {

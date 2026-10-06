@@ -104,12 +104,23 @@ distinct venues; `ExplicitGroup` consumes complete configured portfolios only.
 The descriptor's leg bound applies to each context. A context borrows permanent
 source owners, including when configured groups overlap.
 
+Common quote currency is validated again from the cursor's effective
+`sourcesAtBegin` metadata after interval hydration and before account creation.
+An initially common catalog cannot authorize aggregation when a preceding
+lifecycle transition changed one selected source's actual quote currency.
+
 One configured exchange/market venue is one virtual account. Its initial wallet
 is seeded once, every source fill updates that wallet once, and all sources on
 that account debit one permit ledger. Conflicting explicit source balances on
 one account fail preflight. Context-local IDs retain an exact simulated
 producer correlation; native client-order text supplies no strategy ID.
 Result fill rows append `context_index`, and lifetime joins use source/context/ID.
+The result and `rate_limits.venues` manifest entries report the schedules
+actually installed on those accounts. Aggregate `enabled` means at least one
+account enforces quotas; `strict_rejects` is false when every installed policy
+is disabled. Each venue records its own effective enablement and strict mode,
+including explicit request overlays and the global disable switch.
+
 
 Cold source, cursor, book and context storage is checked against a 3 GiB
 preparation envelope. This static preparation calculation is separate from RSS,
