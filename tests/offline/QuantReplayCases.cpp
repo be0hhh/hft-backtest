@@ -11,8 +11,8 @@
 #include "Input/Binary/BinaryCorpusStream.hpp"
 #include "Input/Binary/Internal/BinaryCorpusHelpers.hpp"
 #include "Strategy/Execution/BacktestStrategyIntentLowering.hpp"
-#include "strategy/StatArbPairwiseTaker/Descriptor.hpp"
-#include "strategy/SpreadMaker1and2/Descriptor.hpp"
+#include "strategy/hft-trader/StatArbPairwiseTaker/Descriptor.hpp"
+#include "strategy/hft-trader/SpreadMaker1and2/Descriptor.hpp"
 #include "hftrec/CorpusContract/BinaryMarketCorpusWriter.hpp"
 #include "hftrec/CorpusContract/BinaryMarketCorpusReader.hpp"
 
