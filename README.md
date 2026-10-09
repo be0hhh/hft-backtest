@@ -57,7 +57,7 @@ secret fail explicitly before checkout and do not provide a passing CI result.
 Run and sweep artifacts contain financial/simulation results without stage,
 wall/CPU or depth-read profiling. Simulated execution latency, replay timestamps,
 fills, equity, drawdown, progress and bounded sweep worker scheduling remain.
-The public Backtest ABI is version 6; Recorder checks that numeric guard before
+The public Backtest ABI is version 7; Recorder and the CLI check that numeric guard before
 invoking the runtime. New `run.result` artifacts use schema 5; `fills.csv` adds
 `context_index` after the existing columns. Recorder can display older schema 4
 financial summaries read-only.

@@ -95,6 +95,9 @@ trading_core::StrategyOrderEvidenceView simulationOrderEvidenceView(const Engine
   view.binding = owner.binding; view.owner = ownerFor(engine); view.store = &*owner.store;
   view.epoch = owner.store->epoch(); view.hashPrefix = static_cast<std::uint64_t>(engine.activeContextIndex) + 1u;
   view.expectedGeneration = 1u; view.contextIndex = engine.activeContextIndex;
+  // Direct rows borrow exactly the retained identity vector, with the default
+  // row stride; no corpus-supplied count or stride is copied into this view.
+  if (!trading_core::strategy::validOrderEvidenceStorage(view)) return {};
   return view;
 }
 bool installSimulationOrderIntent(EngineState& engine, const trading_core::OrderIntent& intent) noexcept {

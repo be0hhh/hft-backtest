@@ -281,6 +281,11 @@ struct UniverseAuditFixture {
 };
 
 const cxet::testing::Case cases[]{
+    cxet::testing::Case{"backtest_api_guard_rejects_old_result_layout",+[] {
+      CXET_CHECK(hft_backtest::kBacktestApiVersion==7u);
+      CXET_CHECK(hft_backtest::hft_backtest_api_version()==hft_backtest::kBacktestApiVersion);
+      CXET_CHECK(hft_backtest::hft_backtest_api_version()!=6u);
+    }},
     cxet::testing::Case{"universe_hydrated_quote_currency_refuses_before_accounting", +[] {
       UniverseAuditFixture fixture(true);const auto result=fixture.run();
       CXET_CHECK(result.status==hft_backtest::Status::ConfigMismatch);

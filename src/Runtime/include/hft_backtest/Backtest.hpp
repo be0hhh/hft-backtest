@@ -13,7 +13,7 @@
 
 namespace hft_backtest {
 
-inline constexpr std::uint32_t kBacktestApiVersion = 6u;
+inline constexpr std::uint32_t kBacktestApiVersion = 7u;
 
 extern "C" HFT_BACKTEST_API std::uint32_t hft_backtest_api_version() noexcept;
 
