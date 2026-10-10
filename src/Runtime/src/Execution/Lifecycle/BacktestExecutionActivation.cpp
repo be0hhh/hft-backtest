@@ -482,7 +482,7 @@ bool fillOrderQty(EngineState& engine,
     if (!reserveSpotVenueOrder(engine, unwind) ||
         !spotVenueFillAffordable(engine, unwind, unwindPrice, fillQty, engine.takerFeeBpsE8)) {
       updateSpotVenueReservation(engine, unwind, 0);
-      pushUserEvent(engine, makeRejectedOrderEvent(engine, unwind, tsNs), tsNs,
+      pushUserEvent(engine, execution_detail::makeRejectedOrderEvent(engine, unwind, tsNs), tsNs,
           unwind.state.clientIntentId, unwind.contextIndex, true);
       engine.simulationEvidenceFailed = true;
       if (finalFill) {
@@ -491,7 +491,7 @@ bool fillOrderQty(EngineState& engine,
       }
       return true;
     }
-    auto unwindAck = makeCanceledOrderEvent(engine, unwind, tsNs);
+    auto unwindAck = execution_detail::makeCanceledOrderEvent(engine, unwind, tsNs);
     unwindAck.orderStatus = canon::OrderStatus::Open;
     pushUserEvent(engine, unwindAck, tsNs, unwind.state.clientIntentId, unwind.contextIndex, true);
     const trading_core::FillPositionAccountingResult unwindAccounting =
@@ -503,7 +503,7 @@ bool fillOrderQty(EngineState& engine,
                        engine.takerFeeBpsE8);
     if (!unwindAccounting.applied) {
       updateSpotVenueReservation(engine, unwind, 0);
-      pushUserEvent(engine, makeRejectedOrderEvent(engine, unwind, tsNs), tsNs,
+      pushUserEvent(engine, execution_detail::makeRejectedOrderEvent(engine, unwind, tsNs), tsNs,
           unwind.state.clientIntentId, unwind.contextIndex, true);
       engine.simulationEvidenceFailed = true;
       if (finalFill) {

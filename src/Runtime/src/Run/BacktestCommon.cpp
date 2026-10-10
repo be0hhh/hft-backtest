@@ -1,4 +1,5 @@
 #include "../Engine/BacktestEngine.hpp"
+#include "cxet/Canon/ExchangeRegistry.hpp"
 
 #include <algorithm>
 #include <new>
@@ -174,16 +175,11 @@ std::string quote(std::string_view value) {
 }
 
 ExchangeId exchangeFromText(const std::string& value) noexcept {
-  if (value == "binance") return canon::kExchangeIdBinance;
-  if (value == "bybit") return canon::kExchangeIdBybit;
-  if (value == "kucoin") return canon::kExchangeIdKucoin;
-  if (value == "gate") return canon::kExchangeIdGate;
-  if (value == "bitget") return canon::kExchangeIdBitget;
-  if (value == "aster") return canon::kExchangeIdAster;
-  if (value == "okx") return canon::kExchangeIdOkx;
-  if (value == "mexc") return canon::kExchangeIdMexc;
-  if (value == "finam") return canon::kExchangeIdFinam;
-  return canon::kExchangeIdUnknown;
+  const auto* exchange = canon::exchangeRegistryFindByName(value.c_str());
+  // Match the complete owning string; the C-string lookup alone admits a
+  // valid prefix before an embedded NUL.
+  return exchange && value == exchange->canonicalName
+      ? exchange->id : canon::kExchangeIdUnknown;
 }
 
 canon::MarketType marketFromText(const std::string& value) noexcept {

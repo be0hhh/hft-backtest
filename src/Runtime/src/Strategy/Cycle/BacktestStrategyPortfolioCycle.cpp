@@ -130,7 +130,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   ctx.orderPathWarmups.routes = scratch.warmupViews.data();
   ctx.orderPathWarmups.count = legCount;
   if (userEvent && eventLegIndex < legInstruments.size()) {
-    recordExecutionQualityFill(engines[0], *userEvent, eventLegIndex, tsNs, legInstruments[eventLegIndex]);
+    recordExecutionQualityFill(engines[0], ctx, eventLegIndex, tsNs, legInstruments[eventLegIndex]);
   }
   if (userEvent && userEvent->orderProblem != canon::OrderProblem::None && eventLegIndex < engines.size()) {
     engines[eventLegIndex].pendingProblem = trading_core::StrategyProblemEvent{};

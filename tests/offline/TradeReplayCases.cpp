@@ -1,8 +1,10 @@
 #include "OfflineCase.hpp"
 #include "Engine/BacktestEngine.hpp"
+#include "Engine/BacktestEngineSetup.hpp"
 #include "Engine/BacktestEngineView.hpp"
 #include "Accounting/BacktestResultAggregation.hpp"
 #include "Strategy/BacktestStrategyRuntime.hpp"
+#include "Strategy/Diagnostics/BacktestStrategyTrace.hpp"
 #include "Strategy/Execution/BacktestStrategyIntentLowering.hpp"
 #include "Strategy/Internal/BacktestStrategyRuntimeHelpers.hpp"
 #include "Execution/Internal/BacktestExecutionHelpers.hpp"
@@ -331,6 +333,7 @@ const cxet::testing::Case cases[]{
       namespace corpus=hftrec::corpus;
       auto engine=std::make_unique<detail::EngineState>();
       const auto bbo=corpus::binaryMarketChannelBit(corpus::BinaryMarketChannel::BookTicker);
+      engine->capturedSourceManaged=true;
       engine->capturedSourceMember=true;engine->capturedSourceGeneration=11u;
       engine->capturedExecutionRequiredChannels=engine->capturedActiveChannels=bbo;
       engine->snapshot.hasBookTicker=trading_core::kAlgoFlagTrue;
@@ -575,6 +578,9 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"overlapping_context_local_ids_do_not_adopt_orders_or_stale_actions", +[] {
       auto engine = std::make_unique<detail::EngineState>();
+      hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+      std::string quotaError;
+      CXET_CHECK(hft_backtest::applyRateLimitSchedule(*engine, schedule, quotaError));
       trading_core::OrderIntent intent{};
       intent.clientIntentId.raw = 7u; intent.orderType = canon::OrderType::Limit;
       intent.side = Side::Buy(); intent.qty.raw = 4; intent.price.raw = 100;
@@ -694,6 +700,9 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"simulated_event_identity_survives_terminal_slot_and_native_text", +[] {
       auto engine = std::make_unique<detail::EngineState>();
+      hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+      std::string quotaError;
+      CXET_CHECK(hft_backtest::applyRateLimitSchedule(*engine, schedule, quotaError));
       trading_core::OrderIntent order;
       order.clientIntentId.raw = 1'000'000'000'007u;
       order.orderType=canon::OrderType::Limit;order.side=Side::Buy();order.qty.raw=1;order.price.raw=100;
@@ -701,11 +710,21 @@ const cxet::testing::Case cases[]{
       CXET_CHECK(detail::execution_detail::submitOrderIntent(*engine,order,10,20));
       detail::applyDueActions(*engine,20);
       CXET_CHECK(engine->userEvents.size()==1u);
+      const auto& ack = engine->userEvents[0];
+      CXET_CHECK(ack.quantityUnit == cxet::contract::Unit::BaseQuantity &&
+          ack.quantityDenomination == cxet::contract::QuantityDenomination::Canonical);
+      CXET_CHECK(cxet::composite::userDataFieldPresent(ack, cxet::composite::UserDataField::QuantityUnit) &&
+          cxet::composite::userDataFieldPresent(ack, cxet::composite::UserDataField::QuantityDenomination));
       CXET_CHECK(detail::deliverSimulationOrderEvent(*engine,0u,engine->userEventDeliveryTsNs[0]));
       trading_core::CancelIntent cancel;cancel.clientIntentId.raw=2u;cancel.targetClientIntentId=order.clientIntentId;
       CXET_CHECK(detail::execution_detail::submitCancelIntent(*engine,cancel,30,40));
       detail::applyDueActions(*engine,40);
       CXET_CHECK(engine->userEvents.size()==2u);
+      const auto& canceled = engine->userEvents[1];
+      CXET_CHECK(canceled.quantityUnit == cxet::contract::Unit::BaseQuantity &&
+          canceled.quantityDenomination == cxet::contract::QuantityDenomination::Canonical);
+      CXET_CHECK(cxet::composite::userDataFieldPresent(canceled, cxet::composite::UserDataField::QuantityUnit) &&
+          cxet::composite::userDataFieldPresent(canceled, cxet::composite::UserDataField::QuantityDenomination));
       CXET_CHECK(detail::deliverSimulationOrderEvent(*engine,1u,engine->userEventDeliveryTsNs[1]));
       const auto event=engine->userEvents[1];
       trading_core::StrategyContext context{};
@@ -717,11 +736,20 @@ const cxet::testing::Case cases[]{
       trading_core::strategy::RuntimeClientOrderId admitted{};
       CXET_CHECK(trading_core::strategy::admittedStrategyEventIdentity(context, admitted));
       CXET_CHECK(admitted.clientIntentId.raw == order.clientIntentId.raw && admitted.generation == 1u);
+      engine->executionQuality.emplace_back();
+      auto& quality=engine->executionQuality.back();
+      quality.legCount=1u;quality.legs[0].clientIntentId=order.clientIntentId.raw;
+      quality.statusRaw=static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Uncertain);
+      hft_backtest::recordExecutionQualityFill(*engine,context,0u,40,{});
+      CXET_CHECK(quality.statusRaw==static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Rejected));
+      quality.statusRaw=static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Uncertain);
       auto foreign = event;
       foreign.eventId.raw += 1u;
       context.userEvent = &foreign;
       hft_backtest::bindBacktestUserEventIdentity(context, *engine);
       CXET_CHECK(!trading_core::strategy::admittedStrategyEventIdentity(context, admitted));
+      hft_backtest::recordExecutionQualityFill(*engine,context,0u,40,{});
+      CXET_CHECK(quality.statusRaw==static_cast<std::uint8_t>(trading_core::StrategyExecutionStatus::Uncertain));
     }},
     cxet::testing::Case{"binary_stream_retains_only_current_transaction_and_exchange_time", +[] {
       BinaryTradeFixture fixture(2u, 199u, 7u);

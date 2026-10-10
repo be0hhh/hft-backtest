@@ -108,7 +108,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   ctx.orderPathWarmups.routes = scratch.warmupViews.data();
   ctx.orderPathWarmups.count = 1u;
   if (userEvent) {
-    recordExecutionQualityFill(engine, *userEvent, 0u, tsNs, instrument);
+    recordExecutionQualityFill(engine, ctx, 0u, tsNs, instrument);
   }
   if (userEvent && userEvent->orderProblem != canon::OrderProblem::None) {
     engine.pendingProblem = trading_core::StrategyProblemEvent{};

@@ -367,12 +367,13 @@ void finishExecutionQualityAction(detail::JsonExecutionQualityAction& row) noexc
 
 void recordExecutionQualityFill(
     detail::EngineState& ledger,
-    const cxet::composite::UserDataEvent& event,
+    const trading_core::StrategyContext& context,
     std::uint32_t legIndex,
     std::int64_t deliveryTsNs,
     const trading_core::StrategyInstrumentSpec& instrument) noexcept {
   Id clientIntentId{};
-  if (!trading_core::strategy::clientIntentId(event, clientIntentId) || clientIntentId.raw == 0u) return;
+  if (!trading_core::strategy::clientIntentId(context, clientIntentId) || clientIntentId.raw == 0u) return;
+  const auto& event=*context.userEvent;
   if (trading_core::strategy::isUserOrderRejected(event) || trading_core::strategy::isUserOrderCanceled(event)) {
     for (auto it = ledger.executionQuality.rbegin(); it != ledger.executionQuality.rend(); ++it) {
       for (std::uint8_t leg = 0u; leg < it->legCount; ++leg) {

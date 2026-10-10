@@ -56,7 +56,7 @@ void recordExecutionQualityActions(
     const trading_core::StrategyExecutionTraceBatch& batch);
 void recordExecutionQualityFill(
     detail::EngineState& ledger,
-    const cxet::composite::UserDataEvent& event,
+    const trading_core::StrategyContext& context,
     std::uint32_t legIndex,
     std::int64_t deliveryTsNs,
     const trading_core::StrategyInstrumentSpec& instrument) noexcept;

@@ -1,5 +1,6 @@
 #include "OfflineCase.hpp"
 #include "Engine/BacktestEngine.hpp"
+#include "Engine/BacktestEngineSetup.hpp"
 #include "Execution/Internal/BacktestExecutionHelpers.hpp"
 #include "Execution/BacktestOrderEvidence.hpp"
 #include "Strategy/BacktestStrategyRuntime.hpp"
@@ -15,9 +16,11 @@
 #include "strategy/hft-trader/SpreadMaker1and2/Descriptor.hpp"
 #include "hftrec/CorpusContract/BinaryMarketCorpusWriter.hpp"
 #include "hftrec/CorpusContract/BinaryMarketCorpusReader.hpp"
+#include "cxet/Canon/ExchangeRegistry.hpp"
 
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -54,6 +57,9 @@ struct SpotFixture {
   std::unique_ptr<detail::EngineState> engine(std::uint32_t source, canon::MarketType market = canon::kMarketTypeSpot) {
     auto out = std::make_unique<detail::EngineState>(); out->legIndex = source; out->market = market;
     out->activeContextIndex = 1u; out->sharedAccount = &account;
+    hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+    std::string quotaError;
+    CXET_CHECK(hft_backtest::applyRateLimitSchedule(*out, schedule, quotaError));
     out->exchange = detail::exchangeFromText("binance"); out->symbol.copyFrom(source ? "ETH_USDT" : "BTC_USDT");
     hft_backtest::BacktestRunRequest request{}; request.initialBalanceE8 = source ? 0 : account.initialBalanceE8;
     detail::initializeAccounting(*out, request);
@@ -176,6 +182,7 @@ struct QuantFixture {
       header.receiveMonotonicNs = header.receiveRealtimeNs = 250u;
       header.channel = corpus::BinaryMarketChannel::Trade; header.sourceFlags = 0u;
       header.payloadBytes = sizeof(corpus::BinaryMarketTradePayload);
+      record.payload = {};
       *corpus::binaryMarketPayload<corpus::BinaryMarketTradePayload>(&record) = {10'000'000'000, quantity.qtyRaw, 1u, {}};
       CXET_CHECK(writer.append(record) == hftrec::Status::Ok);
       record = {}; auto& depthHeader = record.header;
@@ -395,6 +402,54 @@ const cxet::testing::Case cases[]{
       const auto expectedCash = 40 * SpotFixture::q - engine->feesPaidE8;
       CXET_CHECK(engine->feesPaidE8 > 0 && fixture.account.walletBalanceE8 == expectedCash);
       CXET_CHECK(hft_backtest::accountStateFromEngine(*engine).walletBalanceE8 == 100 * SpotFixture::q);
+      CXET_CHECK(engine->userEvents.size() == 2u);
+      // Admit the ACK as an explicit canonical input so the fill counterexample
+      // reaches accounting independently of the simulated producer's markers.
+      auto& ack = engine->userEvents[0];
+      ack.quantityUnit = cxet::contract::Unit::BaseQuantity;
+      ack.quantityDenomination = cxet::contract::QuantityDenomination::Canonical;
+      cxet::composite::markUserDataFieldPresent(ack, cxet::composite::UserDataField::QuantityUnit);
+      cxet::composite::markUserDataFieldPresent(ack, cxet::composite::UserDataField::QuantityDenomination);
+      CXET_CHECK(detail::deliverSimulationOrderEvent(*engine, 0u, engine->userEventDeliveryTsNs[0]));
+      auto& fill = engine->userEvents[1];
+      const auto producedFill = fill;
+      auto canonicalFill = fill;
+      canonicalFill.quantityUnit = cxet::contract::Unit::BaseQuantity;
+      canonicalFill.quantityDenomination = cxet::contract::QuantityDenomination::Canonical;
+      cxet::composite::markUserDataFieldPresent(canonicalFill, cxet::composite::UserDataField::QuantityUnit);
+      cxet::composite::markUserDataFieldPresent(canonicalFill, cxet::composite::UserDataField::QuantityDenomination);
+      const auto* record = trading_core::strategy::canonicalOrderEvidence(
+          detail::simulationOrderEvidenceView(*engine), Id{210u}, 1u);
+      CXET_CHECK(record && record->venueObserved && !record->terminal() && record->cumulativeQtyE8 == 0);
+      const auto wallet = fixture.account.observedWalletBalanceE8;
+      const auto reserved = fixture.account.observedReservedQuoteE8;
+      const auto accountRevision = fixture.account.revision;
+      const auto contextRevision = engine->contextRevision;
+      const auto replayTime = engine->lastReplayMonotonicNs;
+      for (unsigned variant = 0u; variant < 8u; ++variant) {
+        fill = canonicalFill;
+        switch (variant) {
+          case 0u: fill.quantityDenomination = cxet::contract::QuantityDenomination::Native; break;
+          case 1u: fill.quantityDenomination = cxet::contract::QuantityDenomination::Unknown; break;
+          case 2u: fill.quantityUnit = cxet::contract::Unit::ContractQuantity; break;
+          case 3u: fill.quantityUnit = cxet::contract::Unit::LotQuantity; break;
+          case 4u: fill.fieldPresenceMask &= ~cxet::composite::userDataFieldMaskBit(cxet::composite::UserDataField::QuantityUnit); break;
+          case 5u: fill.fieldPresenceMask &= ~cxet::composite::userDataFieldMaskBit(cxet::composite::UserDataField::QuantityDenomination); break;
+          case 6u: fill.fieldPresenceMask &= ~cxet::composite::userDataFieldMaskBit(cxet::composite::UserDataField::Qty); break;
+          case 7u: fill.quantityUnit = cxet::contract::Unit::None; break;
+        }
+        CXET_CHECK(!detail::deliverSimulationOrderEvent(*engine, 1u, engine->userEventDeliveryTsNs[1]));
+        CXET_CHECK(record->cumulativeQtyE8 == 0 && !record->terminal());
+        CXET_CHECK(engine->position.netQty.raw == 0 && engine->deliveredUserEvents == 1u && !engine->userEventConsumed[1]);
+        CXET_CHECK(fixture.account.observedWalletBalanceE8 == wallet &&
+            fixture.account.observedReservedQuoteE8 == reserved && fixture.account.revision == accountRevision);
+        CXET_CHECK(engine->contextRevision == contextRevision && engine->lastReplayMonotonicNs == replayTime);
+      }
+      fill = producedFill;
+      CXET_CHECK(fill.quantityUnit == cxet::contract::Unit::BaseQuantity &&
+          fill.quantityDenomination == cxet::contract::QuantityDenomination::Canonical);
+      CXET_CHECK(cxet::composite::userDataFieldPresent(fill, cxet::composite::UserDataField::QuantityUnit) &&
+          cxet::composite::userDataFieldPresent(fill, cxet::composite::UserDataField::QuantityDenomination));
       SpotFixture::deliverAll(*engine); CXET_CHECK(hft_backtest::accountStateFromEngine(*engine).walletBalanceE8 == expectedCash);
     }},
     cxet::testing::Case{"linear_futures_keep_pnl_wallet_and_allow_short_inventory_model", +[] {
@@ -421,17 +476,29 @@ const cxet::testing::Case cases[]{
     cxet::testing::Case{"legacy_multiple_sessions_refuse_unknown_common_quote_before_balance_aggregation", +[] {
       QuantFixture fixture(0, true);
       hft_backtest::BacktestRunRequest request{}; request.configPath = fixture.root / "strategy.ini";
-      request.sessions = {fixture.root / "legacy_a", fixture.root / "legacy_b"};
+      request.sessions = {{fixture.root / "legacy_a", {}, {}},
+                          {fixture.root / "legacy_b", {}, {}}};
       request.initialBalanceE8 = 100'000'000; request.writeArtifacts = false;
       const auto result = hft_backtest::runBacktest(request);
       CXET_CHECK(result.status == hft_backtest::Status::Unsupported && result.error.find("quote") != std::string::npos);
       CXET_CHECK(result.initialBalanceE8 == 0 && result.orders == 0u && result.fills == 0u && result.inputCoverage.strategyCycles == 0u);
     }},
     cxet::testing::Case{"linear_swap_accepts_exact_recorded_native_base_quantity_authority", +[] {
-      QuantityFixtureConfig config; config.marketKind = 2u; config.marketRaw = 6u; config.venue = "bingx";
+      for (const auto& exchange : canon::exchangeRegistryEntries())
+        CXET_CHECK(detail::exchangeFromText(exchange.canonicalName).raw == exchange.id.raw);
+      CXET_CHECK(detail::exchangeFromText("bingx").raw == canon::kExchangeIdBingx.raw);
+      CXET_CHECK(detail::exchangeFromText("Bingx").raw == canon::kExchangeIdUnknown.raw);
+      CXET_CHECK(detail::exchangeFromText(std::string{"bingx\0suffix", 12u}).raw == canon::kExchangeIdUnknown.raw);
+      QuantityFixtureConfig config; config.marketKind = 2u;
+      config.marketRaw = canon::kMarketTypeFutures.raw; config.venue = "bingx";
       config.conversion.kinds.fill(corpus::BinaryMarketQuantityKind::NativeBase);
       QuantFixture fixture(100'000'000, true, 1u, config);
       const auto result = fixture.run();
+      if (result.status != hft_backtest::Status::Ok || result.orders == 0u || result.inputCoverage.strategyCycles == 0u)
+        std::fprintf(stderr, "linear swap replay: status=%u error=%s orders=%llu cycles=%llu\n",
+            static_cast<unsigned>(result.status), result.error.c_str(),
+            static_cast<unsigned long long>(result.orders),
+            static_cast<unsigned long long>(result.inputCoverage.strategyCycles));
       CXET_CHECK(result.status == hft_backtest::Status::Ok && result.orders != 0u && result.inputCoverage.strategyCycles != 0u);
     }},
     cxet::testing::Case{"quantity_authority_change_refuses_instead_of_reinterpreting_retained_state", +[] {
@@ -460,11 +527,16 @@ const cxet::testing::Case cases[]{
         config.conversion.nativeContractBaseQtyRaw = contract ? 50'000'000 : 0;
         config.qtyRaw = contract ? 2'400'000'000 : 1'200'000'000;
         QuantFixture fixture(0, true, 1u, config);
-        detail::SessionLoadPlan plan; plan.requireBookTickers = plan.requireTrades = plan.requireDepths = true;
+        detail::SessionLoadPlan plan; plan.loadDepths = true;
+        plan.requireBookTickers = plan.requireTrades = plan.requireDepths = true;
         const std::array<hft_backtest::BacktestCorpusSourceRequest, 1> requests{
             hft_backtest::BacktestCorpusSourceRequest{std::string(config.venue), "futures", "BTC_USDT", 100, 10'000}};
         detail::BinaryCorpusStream stream; std::string error; std::vector<detail::TimelineEvent> events; bool available = false;
-        CXET_CHECK(stream.open(fixture.root, requests, plan, error) == hft_backtest::Status::Ok);
+        const auto openStatus = stream.open(fixture.root, requests, plan, error);
+        if (openStatus != hft_backtest::Status::Ok)
+          std::fprintf(stderr, "quantity replay open: contract=%d status=%u error=%s\n",
+              static_cast<int>(contract), static_cast<unsigned>(openStatus), error.c_str());
+        CXET_CHECK(openStatus == hft_backtest::Status::Ok);
         CXET_CHECK(stream.next(events, available, error) == hft_backtest::Status::Ok && available);
         CXET_CHECK(stream.sessions()[0].bookTickers[0].bidQtyE8 == 600'000'000 && stream.sessions()[0].bookTickers[0].askQtyE8 == 600'000'000);
         CXET_CHECK(stream.next(events, available, error) == hft_backtest::Status::Ok && available);
@@ -546,6 +618,9 @@ const cxet::testing::Case cases[]{
       for (std::size_t i = 0u; i < secondSymbol.size(); ++i) sibling->symbol.data[i] = secondSymbol[i];
       detail::SharedAccountState account{}; account.initialBalanceE8 = account.walletBalanceE8 = 1'000'000'000;
       engine->sharedAccount = sibling->sharedAccount = &account;
+      hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+      std::string quotaError;
+      CXET_CHECK(hft_backtest::applyRateLimitSchedule(*engine, schedule, quotaError));
       hft_backtest::BacktestRunRequest request{}; request.initialBalanceE8 = account.initialBalanceE8; request.takerFeeBpsE8 = 100'000'000;
       detail::initializeAccounting(*engine, request); detail::initializeAccounting(*sibling, request);
       engine->activeContextIndex = 1u;
@@ -559,11 +634,23 @@ const cxet::testing::Case cases[]{
       CXET_CHECK(detail::execution_detail::submitOrderIntent(*engine, intent, 10, 20)); detail::applyDueActions(*engine, 20);
       CXET_CHECK(engine->netQtyRaw == intent.qty.raw && account.walletBalanceE8 < account.initialBalanceE8);
       struct Projection { std::int64_t qty{}, wallet{}; } projection;
-      auto descriptor = trading_core::kSpreadMaker1And2StrategyDescriptor;
-      descriptor.captureState = nullptr; descriptor.rollbackCapacityCycle = nullptr; descriptor.restoreAfterOrderFailure = nullptr;
+      trading_core::StrategyDescriptor descriptor;
+      descriptor.name = "private_account_projection";
+      descriptor.primaryStream = cxet::api::market::PublicMarketDataStream::BookTicker;
+      descriptor.streamCount = 1u;
+      descriptor.streams[0] = cxet::api::market::PublicMarketDataStream::BookTicker;
+      descriptor.domainMask = trading_core::StrategyDomainMask::All;
+      descriptor.minLegs = descriptor.maxLegs = 1u;
+      descriptor.stateDiscipline = trading_core::StrategyStateDiscipline::Snapshot;
+      descriptor.footprint = trading_core::strategyRuntimeFootprint<Projection>(0u, 0u, 0u, 0u, 0u);
       descriptor.runCycle = +[](void* state, trading_core::StrategyContext& ctx) noexcept {
         auto& out = *static_cast<Projection*>(state); out.qty = ctx.positionState.netQty.raw; out.wallet = ctx.accountState.walletBalanceE8; return true;
       };
+      descriptor.captureState = +[](const void* state, trading_core::StrategyStateSnapshot& out) noexcept {
+        const auto& captured = *static_cast<const Projection*>(state);
+        out = {}; out.lastQty.raw = captured.qty; out.auxQty0.raw = captured.wallet;
+      };
+      CXET_CHECK(hft_backtest::strategy_intent_lowering::footprintSupported(descriptor));
       hft_backtest::SingleLegCycleScratch scratch{}; trading_core::StrategyInstrumentSpec instrument{};
       trading_core::SymbolShardConfig shard{}; trading_core::ShardControlState control{};
       CXET_CHECK(hft_backtest::runCycle(descriptor, {}, &projection, *engine, instrument, scratch, shard, control, 500, request, nullptr));
@@ -578,6 +665,9 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"order_snapshot_keeps_private_pending_ack_and_terminal_boundaries", +[] {
       auto engine = std::make_unique<detail::EngineState>(); engine->activeContextIndex = 1u;
+      hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+      std::string quotaError;
+      CXET_CHECK(hft_backtest::applyRateLimitSchedule(*engine, schedule, quotaError));
       trading_core::OrderIntent intent{}; intent.clientIntentId.raw = 92u; intent.orderType = canon::OrderType::Limit;
       intent.side = Side::Buy(); intent.qty.raw = 4; intent.price.raw = 100;
       CXET_CHECK(detail::execution_detail::submitOrderIntent(*engine, intent, 10, 20)); detail::applyDueActions(*engine, 20);
@@ -595,6 +685,9 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"paused_private_head_advances_without_strategy_callback", +[] {
       auto engine = std::make_unique<detail::EngineState>(); engine->activeContextIndex = 1u;
+      hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+      std::string quotaError;
+      CXET_CHECK(hft_backtest::applyRateLimitSchedule(*engine, schedule, quotaError));
       trading_core::OrderIntent intent{}; intent.clientIntentId.raw = 93u; intent.orderType = canon::OrderType::Limit;
       intent.side = Side::Buy(); intent.qty.raw = 4; intent.price.raw = 100;
       CXET_CHECK(detail::execution_detail::submitOrderIntent(*engine, intent, 10, 20));
@@ -602,9 +695,21 @@ const cxet::testing::Case cases[]{
       CXET_CHECK(detail::execution_detail::submitOrderIntent(*engine, intent, 10, 20)); detail::applyDueActions(*engine, 20);
       engine->activeContextIndex = 1u; engine->capturedSourceManaged = true; engine->capturedSourceMember = false;
       struct Probe { std::size_t callbacks{}; } probe;
-      auto descriptor = trading_core::kSpreadMaker1And2StrategyDescriptor;
-      descriptor.captureState = nullptr; descriptor.rollbackCapacityCycle = nullptr; descriptor.restoreAfterOrderFailure = nullptr;
+      trading_core::StrategyDescriptor descriptor;
+      descriptor.name = "paused_private_callback_probe";
+      descriptor.primaryStream = cxet::api::market::PublicMarketDataStream::BookTicker;
+      descriptor.streamCount = 1u;
+      descriptor.streams[0] = cxet::api::market::PublicMarketDataStream::BookTicker;
+      descriptor.domainMask = trading_core::StrategyDomainMask::All;
+      descriptor.minLegs = descriptor.maxLegs = 1u;
+      descriptor.stateDiscipline = trading_core::StrategyStateDiscipline::Snapshot;
+      descriptor.footprint = trading_core::strategyRuntimeFootprint<Probe>(0u, 0u, 0u, 0u, 0u);
       descriptor.runCycle = +[](void* state, trading_core::StrategyContext&) noexcept { ++static_cast<Probe*>(state)->callbacks; return true; };
+      descriptor.captureState = +[](const void* state, trading_core::StrategyStateSnapshot& out) noexcept {
+        const auto& captured = *static_cast<const Probe*>(state);
+        out = {}; out.cycles = captured.callbacks;
+      };
+      CXET_CHECK(hft_backtest::strategy_intent_lowering::footprintSupported(descriptor));
       hft_backtest::SingleLegCycleScratch scratch{}; trading_core::StrategyInstrumentSpec instrument{};
       trading_core::SymbolShardConfig shard{}; trading_core::ShardControlState control{}; hft_backtest::BacktestRunRequest request{};
       CXET_CHECK(hft_backtest::runUntil(descriptor, {}, &probe, *engine, instrument, scratch, shard, control, 100, request));
@@ -615,6 +720,9 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"warmup_cancel_retains_order_context_and_service_namespace", +[] {
       auto engine = std::make_unique<detail::EngineState>(); engine->activeContextIndex = 1u;
+      hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+      std::string quotaError;
+      CXET_CHECK(hft_backtest::applyRateLimitSchedule(*engine, schedule, quotaError));
       trading_core::OrderIntent intent{}; intent.clientIntentId.raw = 61u;
       intent.orderType = canon::OrderType::Limit; intent.side = Side::Buy(); intent.qty.raw = 4; intent.price.raw = 100;
       CXET_CHECK(detail::execution_detail::submitOrderIntent(*engine, intent, 10, 20, true, 0u, true));
@@ -639,6 +747,9 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"private_delivery_refuses_foreign_identity_and_source_head_overtake", +[] {
       auto engine = std::make_unique<detail::EngineState>(); engine->activeContextIndex = 1u;
+      hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+      std::string quotaError;
+      CXET_CHECK(hft_backtest::applyRateLimitSchedule(*engine, schedule, quotaError));
       CXET_CHECK(detail::prepareSimulationOrderEvidence(*engine));
       trading_core::OrderIntent intent{}; intent.clientIntentId.raw = 51u;
       intent.orderType = canon::OrderType::Limit; intent.side = Side::Buy(); intent.qty.raw = 4; intent.price.raw = 100;
@@ -686,6 +797,9 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"service_feedback_updates_canonical_store_without_strategy_delivery", +[] {
       auto engine = std::make_unique<detail::EngineState>(); engine->activeContextIndex = 1u;
+      hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+      std::string quotaError;
+      CXET_CHECK(hft_backtest::applyRateLimitSchedule(*engine, schedule, quotaError));
       CXET_CHECK(detail::prepareSimulationOrderEvidence(*engine));
       trading_core::OrderIntent intent; intent.clientIntentId.raw = 31u; intent.service = true;
       intent.orderType = canon::OrderType::Limit; intent.side = Side::Buy(); intent.qty.raw = 4; intent.price.raw = 100;
@@ -703,6 +817,9 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"simulated_cancel_terminal_evidence_releases_spread_quote_only_at_private_delivery", +[] {
       auto engine = std::make_unique<detail::EngineState>();
+      hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+      std::string quotaError;
+      CXET_CHECK(hft_backtest::applyRateLimitSchedule(*engine, schedule, quotaError));
       engine->activeContextIndex = 1u;
       CXET_CHECK(detail::prepareSimulationOrderEvidence(*engine));
       detail::BacktestLatencyConfig latency; latency.userData = {1u, 0u};
@@ -740,6 +857,9 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"simulated_evidence_refuses_foreign_context_source_owner_and_generation", +[] {
       auto engine = std::make_unique<detail::EngineState>();
+      hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
+      std::string quotaError;
+      CXET_CHECK(hft_backtest::applyRateLimitSchedule(*engine, schedule, quotaError));
       auto foreign = std::make_unique<detail::EngineState>(); foreign->legIndex = 1u;
       engine->activeContextIndex = foreign->activeContextIndex = 1u;
       CXET_CHECK(detail::prepareSimulationOrderEvidence(*engine) && detail::prepareSimulationOrderEvidence(*foreign));
