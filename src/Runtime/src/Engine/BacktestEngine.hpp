@@ -458,6 +458,8 @@ struct EngineState {
   std::string depthFallbackReason{};
   trading_core::BboReconstructionState bboReconstruction{};
   trading_core::BboReconstructionState venueBboReconstruction{};
+  bool reconstructionTradeRebasePending{false};
+  bool venueReconstructionTradeRebasePending{false};
   ReconstructionSourceIdentity reconstructionBookTickerIdentity{};
   ReconstructionSourceIdentity reconstructionTradeIdentity{};
   ReconstructionSourceIdentity venueReconstructionBookTickerIdentity{};

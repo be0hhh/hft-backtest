@@ -14,6 +14,10 @@ Status prepareBacktestStrategyInstrument(const detail::InstrumentMetadata& metad
     return Status::Unsupported;
   }
   trading_core::StrategyInstrumentSpec candidate{};
+  // Older captures without typed currency/FX retain unknown valuation.
+  // A symbol spelling or corpus-local asset ID is not conversion authority.
+  candidate.quoteCurrency = metadata.quoteCurrency;
+  candidate.quoteToPositionLimitE8 = metadata.quoteToPositionLimitE8;
   candidate.tickSizeRaw = metadata.tickSizeE8;
   candidate.stepSizeRaw = metadata.lotSizeE8;
   candidate.executionQuantityStepRaw = metadata.executionQuantityStepE8;

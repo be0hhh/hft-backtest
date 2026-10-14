@@ -4,6 +4,7 @@
 #include "Engine/BacktestEngineView.hpp"
 #include "Accounting/BacktestResultAggregation.hpp"
 #include "Strategy/BacktestStrategyRuntime.hpp"
+#include "Strategy/Inputs/BacktestStrategyInputFreshness.hpp"
 #include "Strategy/Diagnostics/BacktestStrategyTrace.hpp"
 #include "Strategy/Execution/BacktestStrategyIntentLowering.hpp"
 #include "Strategy/Internal/BacktestStrategyRuntimeHelpers.hpp"
@@ -385,6 +386,18 @@ const cxet::testing::Case cases[]{
       const auto trade = corpus::binaryMarketChannelBit(corpus::BinaryMarketChannel::Trade);
       engine->capturedExecutionRequiredChannels = engine->capturedActiveChannels = trade;
       engine->snapshot.hasTrade = trading_core::kAlgoFlagTrue; engine->snapshot.lastTrade.ts.raw = 100u;
+      CXET_CHECK(trading_core::configureBboReconstruction(engine->bboReconstruction,Price{1}));
+      cxet::composite::BookTicker quote{};quote.ts.raw=90u;
+      quote.bid.px.raw=100;quote.ask.px.raw=105;quote.bid.qty.raw=quote.ask.qty.raw=10;
+      CXET_CHECK(trading_core::applyBboReconstructionBookTicker(engine->bboReconstruction,quote,
+          trading_core::BboReconstructionTimestampOrigin::Exchange));
+      cxet::composite::Trade seller{};seller.ts.raw=100u;
+      CXET_CHECK(seller.setValues(Price{104},Amount{1},cxet::composite::TradeInitiatorSide::Seller));
+      CXET_CHECK(trading_core::applyBboReconstructionKnownInitiatorTrade(engine->bboReconstruction,seller,
+          trading_core::BboReconstructionTimestampOrigin::Exchange));
+      engine->venueBboReconstruction=engine->bboReconstruction;
+      for (auto* snapshot:{&engine->snapshot,&engine->venueSnapshot})
+        trading_core::copyReconstructedBboSnapshot(*snapshot,trading_core::bboReconstructionView(engine->bboReconstruction),TimeNs{100});
       engine->pending.push_back({}); engine->pending[0].sourceGeneration = 11u;
       engine->open[0].state.valid = true; engine->open[0].sourceGeneration = 11u;
       engine->netQtyRaw = 7;
@@ -397,6 +410,8 @@ const cxet::testing::Case cases[]{
       std::string error;
       CXET_CHECK(hft_backtest::run_detail::applyCapturedSourceHealth(*engine, row, 200, error));
       CXET_CHECK(engine->capturedUnhealthyChannels == trade && engine->snapshot.hasTrade.raw == 0u);
+      CXET_CHECK(engine->snapshot.reconstructedBookTicker.bid.px.raw==104 &&
+          engine->snapshot.reconstructedBookTickerRecvMono.raw==100 && engine->reconstructionTradeRebasePending);
       CXET_CHECK(engine->capturedDirectoryRevision == 0u && engine->executionBoundaryEpoch == 1u);
       CXET_CHECK(hft_backtest::strategy_runtime_detail::nextPendingTs(*engine) == std::numeric_limits<std::int64_t>::max());
       detail::applyDueActions(*engine, 200);
@@ -404,6 +419,8 @@ const cxet::testing::Case cases[]{
       row.unhealthy = false; row.record.header.sourceFlags = 0u;
       CXET_CHECK(hft_backtest::run_detail::applyCapturedSourceHealth(*engine, row, 300, error));
       CXET_CHECK(engine->capturedUnhealthyChannels == 0u && engine->snapshot.hasTrade.raw == 0u);
+      CXET_CHECK(engine->venueSnapshot.reconstructedBookTicker.bid.px.raw==104 &&
+          engine->venueSnapshot.reconstructedBookTickerRecvMono.raw==100 && engine->venueReconstructionTradeRebasePending);
       CXET_CHECK(engine->executionBoundaryEpoch == 2u && engine->replayNotBeforeNs == 300);
       CXET_CHECK(engine->pending.size() == 1u && engine->open[0].state.valid && engine->netQtyRaw == 7);
       CXET_CHECK(unaffected->snapshot.hasTrade.raw == 1u && unaffected->executionBoundaryEpoch == 0u);
@@ -772,6 +789,47 @@ const cxet::testing::Case cases[]{
       const auto& descriptor = trading_core::kDeliverySumSignalStrategyDescriptor;
       CXET_CHECK(trading_core::strategyDescriptorContractValid(descriptor));
       CXET_CHECK(!hft_backtest::strategy_intent_lowering::footprintSupported(descriptor));
+    }},
+    cxet::testing::Case{"reconstruction_freshness_uses_accepted_trade_and_refuses_old_quote", +[] {
+      auto engine = std::make_unique<detail::EngineState>();
+      CXET_CHECK(trading_core::configureBboReconstruction(engine->bboReconstruction, Price{1}));
+      detail::SessionData session{};
+      detail::BookTickerRow quote{};
+      quote.bidPriceE8=100; quote.askPriceE8=105;
+      quote.bidQtyE8=quote.askQtyE8=10; quote.tsNs=100;
+      session.bookTickers.push_back(quote);
+      detail::TradeRow trade{};
+      trade.priceE8=104; trade.qtyE8=1; trade.side=0; trade.tsNs=200;
+      session.trades.push_back(trade);
+      detail::TimelineEvent event{};
+      event.kind=detail::kTimelineKindBookTicker;
+      event.tsNs=event.deliveryTsNs=100;
+      hft_backtest::StrategyInstrumentSpec instrument{};
+      hft_backtest::applyMarketEventToSnapshots(*engine,session,event,Symbol{},instrument,true);
+      event.kind=detail::kTimelineKindTrade;
+      event.tsNs=event.deliveryTsNs=200;
+      hft_backtest::applyMarketEventToSnapshots(*engine,session,event,Symbol{},instrument,true);
+      CXET_CHECK(engine->snapshot.reconstructedBookTickerRecvMono.raw==200u);
+      hft_backtest::BacktestStrategyInputPolicy policy{};
+      policy.requiredStreamReadyMask=cxet::api::market::publicMarketDataStreamReadyBit(
+          cxet::api::market::PublicMarketDataStream::BookTicker);
+      policy.maxAgeNs=50u;
+      const detail::ConstEngineView engines{engine.get(),1u};
+      CXET_CHECK(hft_backtest::backtestSourceFreshLegMask(policy,engines,1u,225)==1u);
+      const auto revision=engine->contextRevision;
+      session.bookTickers[0].tsNs=150;
+      event.kind=detail::kTimelineKindBookTicker;
+      event.tsNs=150; event.deliveryTsNs=240;
+      for (const bool freshnessOnly : {false,true}) {
+        session.bookTickers[0].freshnessOnly=freshnessOnly;
+        hft_backtest::applyMarketEventToSnapshots(*engine,session,event,Symbol{},instrument,true);
+        CXET_CHECK(engine->snapshot.lastBookTickerRecvMono.raw==100u &&
+            engine->snapshot.reconstructedBookTickerRecvMono.raw==200u &&
+            engine->contextRevision==revision);
+        CXET_CHECK(detail::strategySourceDeliveryTimestamp(*engine,
+            cxet::api::market::PublicMarketDataStream::BookTicker)==100);
+      }
+      CXET_CHECK(hft_backtest::backtestSourceFreshLegMask(policy,engines,1u,251)==0u);
     }},
     cxet::testing::Case{"replay_depth_refresh_does_not_reapply_older_reconstructed_bbo", +[] {
       for (const bool strategyVisible : {false, true}) {

@@ -12,6 +12,8 @@ void resetCapturedChannels(detail::EngineState& engine, std::uint16_t channels) 
   const bool resetBbo = touched(corpus::BinaryMarketChannel::BookTicker);
   const bool resetDepth = touched(corpus::BinaryMarketChannel::Depth);
   if (resetTrade) {
+    engine.reconstructionTradeRebasePending = true;
+    engine.venueReconstructionTradeRebasePending = true;
     for (auto* snapshot : {&engine.snapshot, &engine.venueSnapshot}) {
       snapshot->lastTrade = {};
       snapshot->lastTradeIdentityShape = cxet::api::market::PublicMarketNativeIdentityShape::None;
@@ -28,11 +30,13 @@ void resetCapturedChannels(detail::EngineState& engine, std::uint16_t channels) 
     engine.venueReconstructionBookTickerIdentity = {};
     detail::setStrategySourceDeliveryTimestamp(engine, cxet::api::market::PublicMarketDataStream::BookTicker, 0);
   }
-  if (resetTrade || resetBbo) {
+  if (resetBbo) {
     trading_core::resetBboReconstruction(engine.bboReconstruction);
     trading_core::resetBboReconstruction(engine.venueBboReconstruction);
     trading_core::copyReconstructedBboSnapshot(engine.snapshot, trading_core::bboReconstructionView(engine.bboReconstruction));
     trading_core::copyReconstructedBboSnapshot(engine.venueSnapshot, trading_core::bboReconstructionView(engine.venueBboReconstruction));
+    engine.reconstructionTradeRebasePending = false;
+    engine.venueReconstructionTradeRebasePending = false;
   }
   if (resetDepth) {
     engine.strategyDepthBook.reset();

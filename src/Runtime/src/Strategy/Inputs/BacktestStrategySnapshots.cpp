@@ -67,26 +67,6 @@ void publishBacktestReconstructedBbo(
   overlayBacktestReconstructedBbo(snapshot, orderBook, view);
 }
 
-void refreshCapturedBookTicker(
-    trading_core::StrategyMarketSnapshot& snapshot,
-    const detail::TimelineEvent& event) noexcept {
-  TimeNs receiveMonotonic{};
-  receiveMonotonic.raw = static_cast<std::uint64_t>(
-      event.deliveryTsNs > 0 ? event.deliveryTsNs : 0);
-  TimeNs receiveRealtime{};
-  receiveRealtime.raw = static_cast<std::uint64_t>(
-      event.deliveryRealtimeNs > 0 ? event.deliveryRealtimeNs : 0);
-  if (snapshot.hasBookTicker.raw ==
-      trading_core::kAlgoFlagTrue.raw) {
-    snapshot.lastBookTickerRecvMono = receiveMonotonic;
-    snapshot.lastBookTickerRecvUtc = receiveRealtime;
-  }
-  if (snapshot.hasReconstructedBbo.raw ==
-      trading_core::kAlgoFlagTrue.raw) {
-    snapshot.reconstructedBookTickerRecvMono = receiveMonotonic;
-  }
-}
-
 [[nodiscard]] bool applyCapturedBookTicker(
     trading_core::StrategyMarketSnapshot& snapshot,
     trading_core::BboReconstructionState& bbo,
@@ -167,7 +147,6 @@ using strategy_intent_lowering::transactionAdmission;
 using strategy_runtime_detail::applyCapturedBookTicker;
 using strategy_runtime_detail::publishBacktestReconstructedBbo;
 using strategy_runtime_detail::reconstructionTimestampOrigin;
-using strategy_runtime_detail::refreshCapturedBookTicker;
 
 void MultiLegCycleScratch::reset(std::size_t count) noexcept {
   legCount = count;
@@ -231,6 +210,7 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   trading_core::StrategyMarketSnapshot& snapshot = strategyVisible ? engine.snapshot : engine.venueSnapshot;
   trading_core::LocalOrderBookState& orderBook = strategyVisible ? engine.orderBook : engine.venueOrderBook;
   trading_core::BboReconstructionState& bbo = strategyVisible ? engine.bboReconstruction : engine.venueBboReconstruction;
+  bool& tradeRebasePending = strategyVisible ? engine.reconstructionTradeRebasePending : engine.venueReconstructionTradeRebasePending;
   detail::ReconstructionSourceIdentity* identity = nullptr;
   detail::ReconstructionSourceIdentity* counterpart = nullptr;
   if (event.kind == detail::kTimelineKindBookTicker) {
@@ -264,13 +244,18 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
           left.sessionEpoch == right.sessionEpoch &&
           left.sourceId == right.sourceId;
     };
+    const bool sourceChanged = identity->initialized &&
+        (identity->producerEpoch != nextIdentity.producerEpoch || identity->sourceGeneration != nextIdentity.sourceGeneration ||
+         identity->sourceId != nextIdentity.sourceId);
     const bool changed = identity->initialized &&
         !sameIdentity(*identity, nextIdentity);
     const bool counterpartAlreadyCurrent =
         counterpart && counterpart->initialized &&
         sameIdentity(*counterpart, nextIdentity);
     *identity = nextIdentity;
-    if (changed && !counterpartAlreadyCurrent) {
+    if (changed && !counterpartAlreadyCurrent && event.kind == detail::kTimelineKindTrade && !sourceChanged) {
+      tradeRebasePending = true;
+    } else if (changed && !counterpartAlreadyCurrent) {
       trading_core::resetBboReconstruction(bbo);
       trading_core::clearBookTickerSnapshot(snapshot);
       trading_core::copyReconstructedBboSnapshot(
@@ -321,7 +306,7 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     if (!trading_core::copyTradeSnapshot(snapshot, trade,
             session.trades[event.index].nativeIdentity)) return;
     const bool reconstructionApplied =
-        trading_core::applyBboReconstructionKnownInitiatorTrade(
+        !tradeRebasePending && trading_core::applyBboReconstructionKnownInitiatorTrade(
         bbo, trade,
         reconstructionTimestampOrigin(row.arrival, row.tsNs));
     if (reconstructionApplied) {
@@ -334,7 +319,10 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     const auto& row = session.bookTickers[event.index];
     if (row.freshnessOnly) {
       if (strategyVisible) {
-        refreshCapturedBookTicker(snapshot, event);
+        const auto ticker=detail::toRuntime(row);
+        if (!applyCapturedBookTicker(snapshot,bbo,row,event,replayReceiveMonotonicNs,ticker)) return;
+        tradeRebasePending=false;
+        publishBacktestReconstructedBbo(snapshot,orderBook,bbo,replayReceiveMonotonicNs);
         changed = true;
       }
     } else {
@@ -342,10 +330,10 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
       const bool reconstructionApplied = applyCapturedBookTicker(
           snapshot, bbo, row, event,
           replayReceiveMonotonicNs, ticker);
-      if (reconstructionApplied) {
-        publishBacktestReconstructedBbo(
-            snapshot, orderBook, bbo, replayReceiveMonotonicNs);
-      }
+      if (!reconstructionApplied) return;
+      tradeRebasePending=false;
+      publishBacktestReconstructedBbo(
+          snapshot, orderBook, bbo, replayReceiveMonotonicNs);
       trading_core::bindOrderBookSnapshot(snapshot, orderBook);
       if (!strategyVisible) {
         detail::tryFillOnTop(engine, executionTsNs, true);

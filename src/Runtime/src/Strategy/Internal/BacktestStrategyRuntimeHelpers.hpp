@@ -89,9 +89,6 @@ void publishBacktestReconstructedBbo(
     trading_core::LocalOrderBookState& orderBook,
     const trading_core::BboReconstructionState& bbo,
     std::uint64_t receiveMonotonicNs) noexcept;
-void refreshCapturedBookTicker(
-    trading_core::StrategyMarketSnapshot& snapshot,
-    const detail::TimelineEvent& event) noexcept;
 [[nodiscard]] bool applyCapturedBookTicker(
     trading_core::StrategyMarketSnapshot& snapshot,
     trading_core::BboReconstructionState& bbo,

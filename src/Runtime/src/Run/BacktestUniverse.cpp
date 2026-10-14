@@ -1,4 +1,5 @@
 #include "BacktestUniverse.hpp"
+#include "cxet/Primitives/Buf/CStringPrimitives.hpp"
 #include "Internal/BacktestRunContext.hpp"
 #include "Internal/BacktestRunHelpers.hpp"
 #include "../Input/Binary/BinaryCorpusStream.hpp"
@@ -484,6 +485,9 @@ void runBinaryUniverse(BacktestRunResult& result, const BacktestRunRequest& requ
               candidate.executionQuantityStepRaw != instrument.executionQuantityStepRaw ||
               candidate.contractBaseQtyRaw != instrument.contractBaseQtyRaw ||
               candidate.priceBasisQtyRaw != instrument.priceBasisQtyRaw ||
+              cxet::bytescan::hftStrncmp(candidate.quoteCurrency.data, instrument.quoteCurrency.data,
+                  cxet::composite::AccountCurrencyCode::capacity) != 0 ||
+              candidate.quoteToPositionLimitE8 != instrument.quoteToPositionLimitE8 ||
               candidate.expiryUtcNs != instrument.expiryUtcNs) {
             reject(Status::Unsupported, "strategy has no canonical instrument rebind for changed captured metadata"); break;
           }

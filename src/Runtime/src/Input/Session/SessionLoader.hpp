@@ -12,6 +12,7 @@
 #include "hftrec/CorpusContract/BinaryMarketCorpusFormat.hpp"
 #include "cxet/Market/Depth.hpp"
 #include "cxet/Api/Market/PublicMarketDataTypes.hpp"
+#include "cxet/Primitives/Composite/AccountTotalSummary.hpp"
 
 namespace hft_backtest::detail {
 
@@ -91,6 +92,8 @@ struct InstrumentMetadata {
   std::int64_t contractBaseQtyE8{0};
   std::int64_t priceBasisQtyE8{0};
   std::int64_t expiryUtcNs{0};
+  cxet::composite::AccountCurrencyCode quoteCurrency{};
+  std::int64_t quoteToPositionLimitE8{};
 };
 
 struct SessionLoadPlan {

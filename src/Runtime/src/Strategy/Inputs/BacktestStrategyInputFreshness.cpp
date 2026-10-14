@@ -78,8 +78,11 @@ std::uint64_t backtestSourceFreshLegMask(
            cxet::api::market::publicMarketDataStreamReadyBit(stream)) == 0u) {
         continue;
       }
-      const TimeNs recvMono = backtestMonoFromTs(
-          detail::strategySourceDeliveryTimestamp(engines[i], stream));
+      const TimeNs recvMono =
+          stream == cxet::api::market::PublicMarketDataStream::BookTicker
+          ? (engines[i].snapshot.hasReconstructedBbo.raw == trading_core::kAlgoFlagTrue.raw
+                 ? engines[i].snapshot.reconstructedBookTickerRecvMono : TimeNs{})
+          : backtestMonoFromTs(detail::strategySourceDeliveryTimestamp(engines[i], stream));
       if (!trading_core::strategy::strategyInputSourceTimestampFresh(
               recvMono, nowMono, inputPolicy.maxAgeNs)) {
         legFresh = false;

@@ -3,7 +3,7 @@ cxet_add_offline_suite(hft_backtest_offline_quota OWNER hft-backtest EXPECTED 5
   LIBRARIES hft_backtest::core hftrec::corpus_contract
   INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../src/Runtime/src"
   LABELS quota-consumer)
-cxet_add_offline_suite(hft_backtest_offline_trade OWNER hft-backtest EXPECTED 29
+cxet_add_offline_suite(hft_backtest_offline_trade OWNER hft-backtest EXPECTED 30
   SOURCES TradeReplayCases.cpp
   LIBRARIES hft_backtest::core hftrec::corpus_contract trading_core::strategy
   INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../src/Runtime/src"
