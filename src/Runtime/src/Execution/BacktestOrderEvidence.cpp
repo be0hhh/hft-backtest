@@ -80,7 +80,7 @@ bool prepareSimulationOrderEvidence(EngineState& engine) noexcept {
   if (owner.ready) return owner.binding == binding;
   for (const auto& order : engine.open) if (order.state.valid) return false;
   owner.binding = binding;
-  owner.store.emplace(owner.records, binding);
+  owner.store.emplace(owner.records, owner.index, binding);
   // This is a newly created virtual venue with no commands or venue orders.
   // The exact empty model cut provides no real/private account authority.
   if (owner.store->reconcile(1u, 0u, {}) != execution::StateResult::Applied) return false;
@@ -120,8 +120,9 @@ bool installSimulationOrderIntent(EngineState& engine, const trading_core::Order
   auto& owner = *engine.simulationOrders;
   if (owner.store->install(request) != execution::StateResult::Applied) return false;
   const auto* record = owner.store->find(request.key());
-  if (!record) return false;
-  owner.identities[index] = {intent.clientIntentId, 1u, command, record, engine.activeContextIndex};
+  const auto recordGeneration = owner.store->recordGeneration(record);
+  if (!recordGeneration) return false;
+  owner.identities[index] = {intent.clientIntentId, 1u, command, record, engine.activeContextIndex, recordGeneration};
   auto& local = owner.localStates[index];
   local.clientIntentId = local.desiredClientIntentId = intent.clientIntentId;
   local.quoteSlotId = intent.quoteSlotId; local.side = intent.side; local.orderType = intent.orderType;

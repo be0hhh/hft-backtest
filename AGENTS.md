@@ -20,9 +20,9 @@ trading-core and hft-recorder session corpora.
 - Keep recorder as the owner of captured corpus files and UI launch/display.
 - Backtest owns replay execution, fills, accounting, latency simulation, sweeps, metrics, and result JSON.
 - Build from WSL/Linux only through the CXET root source graph. Link public CXET,
-  trading-core and `hftrec::corpus_contract` targets; never import an HFT Trader
-  runtime `.so`, copy HFT Trader runtime sources, or stage a sibling SDK.
-- Backtest must remain independent of live HFT Trader and Trader session,
+  trading-core and `hftrec::corpus_contract` targets; never import a live runtime
+  `.so`, copy live runtime sources, or stage a sibling SDK.
+- Backtest must remain independent of live Parser and Trader session,
   readiness, reconnect and terminal-order owners.
 - Keep hot replay state integer-scaled and deterministic. No floating point in execution/accounting code.
 

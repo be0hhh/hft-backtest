@@ -18,6 +18,7 @@ struct SpotOrderReservation {
 };
 struct SimulationOrderEvidenceOwner {
   std::array<trading_core::execution::OrderRecord, kSimulationOrderEvidenceCapacity> records{};
+  std::array<trading_core::execution::OrderIndexSlot, kSimulationOrderEvidenceCapacity> index{};
   std::array<trading_core::StrategyOrderEvidence, kSimulationOrderEvidenceCapacity> identities{};
   std::array<trading_core::StrategyOrderState, kSimulationOrderEvidenceCapacity> localStates{};
   std::array<unsigned char, kSimulationOrderEvidenceCapacity> serviceFlags{};

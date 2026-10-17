@@ -115,7 +115,8 @@ def parse_profile(path: pathlib.Path, root: pathlib.Path) -> Profile:
         relative = path.relative_to(root).as_posix()
     except ValueError as error:
         raise fail(path, 0, "profile is outside the declared strategy root") from error
-    profile = Profile(file_name=f"strategy_profiles/{relative}")
+    # Consumers resolve this name against trading-core/StrategyProfiles.
+    profile = Profile(file_name=relative)
     section = ""
     seen_params: set[str] = set()
 
