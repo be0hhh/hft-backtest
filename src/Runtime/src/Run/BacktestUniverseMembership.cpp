@@ -39,6 +39,7 @@ void resetCapturedChannels(detail::EngineState& engine, std::uint16_t channels) 
     engine.venueReconstructionTradeRebasePending = false;
   }
   if (resetDepth) {
+    engine.executionLiquidity.reset();
     engine.strategyDepthBook.reset();
     engine.venueDepthBook.reset();
     const auto resetProjection = [](trading_core::LocalOrderBookState& book) {

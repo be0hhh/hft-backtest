@@ -1,3 +1,4 @@
+#include "capital/Risk/PortfolioRisk.hpp"
 #include "hft_backtest/Backtest.hpp"
 
 #include "../Engine/BacktestEngine.hpp"
@@ -16,7 +17,6 @@
 #include "trading_core/Contracts/Control/ControlState.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
 #include "trading_core/Contracts/Strategy/StrategyContract.hpp"
-#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
 #include "trading_core/Strategy/GeneratedStrategyRegistry.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
@@ -127,12 +127,12 @@ bool tripTraderRiskStop(BacktestRunContext& context, std::int64_t tsNs, bool for
     if (engine.riskStopped) return true;
     riskAccounts[0] = accountStateFromEngine(engine);
   }
-  if (!trading_core::acquirePortfolioRiskEvaluationSlot(
+  if (!capital::risk::acquirePortfolioRiskEvaluationSlot(
           traderRiskState, riskNow, forceRiskCheck)) {
     return false;
   }
-  const trading_core::PortfolioRiskEvaluation eval =
-      trading_core::evaluatePortfolioRisk(
+  const capital::risk::PortfolioRiskEvaluation eval =
+      capital::risk::evaluatePortfolioRisk(
           traderRiskState, riskAccounts.data(), riskAccountCount, riskNow);
   if (!eval.breached) return false;
   if (hasExplicitSessions) {

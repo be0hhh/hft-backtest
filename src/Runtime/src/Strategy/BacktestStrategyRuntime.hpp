@@ -1,5 +1,6 @@
 #pragma once
 
+#include "capital/AccountState/AccountState.hpp"
 #include "hft_backtest/Backtest.hpp"
 
 #include "../Config/Strategy/BacktestStrategyConfig.hpp"
@@ -56,7 +57,7 @@ struct MultiLegCycleScratch {
   std::array<trading_core::StrategyOrderStateView, trading_core::kStrategyRuntimeMaxLegs> orderViews{};
   std::array<trading_core::StrategyOrderPathWarmupView, trading_core::kStrategyRuntimeMaxLegs> warmupViews{};
   std::array<trading_core::StrategyPositionState, trading_core::kStrategyRuntimeMaxLegs> positions{};
-  std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs> accounts{};
+  std::array<capital::accounting::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs> accounts{};
   std::array<StrategyInstrumentSpec, trading_core::kStrategyRuntimeMaxLegs> instruments{};
   std::array<canon::MarketType, trading_core::kStrategyRuntimeMaxLegs> markets{};
   std::array<std::uint64_t, trading_core::kStrategyRuntimeMaxLegs> revisions{};
@@ -73,12 +74,12 @@ struct MultiLegCycleScratch {
 void bindBacktestUserEventIdentity(trading_core::StrategyContext& context,
     const detail::EngineState& engine) noexcept;
 
-[[nodiscard]] trading_core::StrategyAccountState accountStateFromEngine(
+[[nodiscard]] capital::accounting::StrategyAccountState accountStateFromEngine(
     const detail::EngineState& engine) noexcept;
 [[nodiscard]] std::size_t boundedRiskLegCount(std::size_t count) noexcept;
 void refreshRiskAccountsFromEngines(
     detail::ConstEngineView engines,
-    std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs>& out) noexcept;
+    std::array<capital::accounting::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs>& out) noexcept;
 void resolveRiskVenuesForSessions(
     const BacktestStrategyConfig& cfg,
     const std::vector<detail::SessionData>& sessions,

@@ -1,3 +1,5 @@
+#include "capital/Risk/PortfolioRisk.hpp"
+#include "capital/AccountState/AccountState.hpp"
 #include "BacktestUniverse.hpp"
 #include "cxet/Primitives/Buf/CStringPrimitives.hpp"
 #include "Internal/BacktestRunContext.hpp"
@@ -140,7 +142,8 @@ void runBinaryUniverse(BacktestRunResult& result, const BacktestRunRequest& requ
         reject(Status::IoError, "failed to plan universe source storage"); return;
       }
       sourceBytes += prototype->orderBook.storageBytes() +
-          prototype->venueOrderBook.storageBytes() + prototype->topExecutionOverlayScratch.storageBytes();
+          prototype->venueOrderBook.storageBytes() +
+          prototype->executionLiquidity.storageBytes();
       if (plan.loadDepths) {
         const std::array<std::uint32_t, 1> capacities{cxet::market::kMaximumDepthLevelsPerSide};
         cxet::runtime::market::LocalOrderBookMemoryPlan coreBookPlan;
@@ -315,8 +318,8 @@ void runBinaryUniverse(BacktestRunResult& result, const BacktestRunRequest& requ
       }
       contexts.push_back(std::move(context));
     }
-    std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs> riskAccounts;
-    std::array<trading_core::PortfolioRiskLegConfig, trading_core::kStrategyRuntimeMaxLegs> riskConfigs;
+    std::array<capital::accounting::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs> riskAccounts;
+    std::array<capital::risk::PortfolioRiskLegConfig, trading_core::kStrategyRuntimeMaxLegs> riskConfigs;
     const auto refreshAccounts = [&] {
       for (auto& engine : engines) {
         detail::refreshAccountPositionValue(engine, false);
@@ -328,7 +331,7 @@ void runBinaryUniverse(BacktestRunResult& result, const BacktestRunRequest& requ
     refreshAccounts();
     for (std::size_t a = 0; a < accounts.size(); ++a)
       riskConfigs[a] = makeBacktestPortfolioRiskLegConfig(configuredVenue(config, sources[accountSources[a]]));
-    auto risk = trading_core::makePortfolioRiskState(makeBacktestPortfolioRiskConfig(config.risk),
+    auto risk = capital::risk::makePortfolioRiskState(makeBacktestPortfolioRiskConfig(config.risk),
         riskAccounts.data(), accounts.size(), riskConfigs.data());
     const auto selectContext = [&](std::size_t i) {
       auto& context = *contexts[i];
@@ -554,7 +557,7 @@ void runBinaryUniverse(BacktestRunResult& result, const BacktestRunRequest& requ
         break;
       }
       refreshAccounts();
-      const auto evaluation = trading_core::evaluatePortfolioRisk(risk,
+      const auto evaluation = capital::risk::evaluatePortfolioRisk(risk,
           riskAccounts.data(), accounts.size(), timeNsFromI64(now));
       if (evaluation.breached) {
         for (auto& engine : engines) {

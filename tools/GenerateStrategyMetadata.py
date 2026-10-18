@@ -321,10 +321,10 @@ def main() -> int:
     parser.add_argument("--profile-root", required=True, type=pathlib.Path)
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument("--required-strategy", action="append", default=[])
-    parser.add_argument("profiles", nargs="+", type=pathlib.Path)
+    parser.add_argument("profiles", nargs="*", type=pathlib.Path)
     args = parser.parse_args()
 
-    root = args.profile_root.resolve(strict=True)
+    root = args.profile_root.resolve()
     paths = sorted({path.resolve(strict=True) for path in args.profiles})
     if len(paths) > MAX_PROFILES:
         raise ProfileError(f"profile count exceeds {MAX_PROFILES}")
@@ -344,6 +344,9 @@ def main() -> int:
             f"missing canonical profile for registered strategy {missing_types[0]!r}"
         )
 
+    # A canonical profile alone does not certify a replay adapter. CMake owns
+    # the explicit supported adapter set; an empty set is a valid catalogue.
+    profiles = [profile for profile in profiles if profile.strategy_type in required_types]
     content = generate(profiles)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")

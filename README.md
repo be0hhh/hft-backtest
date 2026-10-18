@@ -99,11 +99,29 @@ facts advance observed cash, inventory and terminal releases only at modeled
 private delivery. Shared-account private delivery preserves venue event order
 across sources even when latency samples tie; payload timestamps are unchanged.
 
+Depth execution consumes finite recorded liquidity across orders until the
+affected price level is refreshed; unrelated updates do not replenish consumed
+levels. Recorded trades consume existing depth; trade-through makes better
+levels unavailable. Finite execution uses authoritative depth without cached
+BBO overlays. An accepted empty depth book remains finite. Resting maker
+orders fill only from eligible recorded trades, sharing
+each trade's finite quantity across orders. Partial-fill private reports carry
+the cumulative executed quantity and weighted average execution price.
+
+BBO execution is explicitly optimistic: without execution depth, including
+`BboNoDepth` and depth-failure fallback, eligible ordinary Market, marketable
+Limit and triggered Stop orders fill their full remaining quantity at the best
+price regardless of displayed quantity. It does not model
+market impact or finite top liquidity. Actual BBO fills are counted and produce
+a result warning; a declared-depth failure retains its separate diagnostic even
+if no fallback fill occurs. Depth execution remains quantity-limited.
+
 Spot equity includes marked positive base inventory. During a source pause it
 uses the last genuine bid received on each actual/observed plane as a historical
 valuation; this cache supplies no quote readiness or fill liquidity. Service
-unwind on Spot and linear Futures/Swaps requires a genuine opposite venue price and sufficient visible quantity;
-missing liquidity retains exposure and refuses continuation. Aggregate wallet
+unwind on Spot and linear Futures/Swaps retains its stricter requirement for a
+genuine opposite venue price and sufficient visible quantity; missing liquidity
+retains exposure and refuses continuation. Aggregate wallet
 results sum actual source cash contributions with each account seeded once.
 
 Warmup command timestamps describe local sends. ACK timestamps and warmup
@@ -111,6 +129,9 @@ settlement become visible only on correlated private delivery. Service exposure
 tracks only delivered tagged warmup/unwind fills, separately from ordinary
 strategy inventory. PnL curves include actual per-source unrealized marks; final
 aggregate snapshots sum quote-denominated PnL without a cross-symbol price.
+Drawdown starts at the initial zero-PnL baseline, including a loss in the first
+observation. Portfolio metrics synchronize legs by timestamp using each leg's
+latest observation at that timestamp, with zero before its first observation.
 
 The bounded canonical simulation evidence owner retains at most 1024 orders per
 source, including terminals, and refuses exhaustion without eviction. These

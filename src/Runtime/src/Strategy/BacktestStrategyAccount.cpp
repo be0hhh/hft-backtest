@@ -1,3 +1,4 @@
+#include "capital/AccountState/AccountState.hpp"
 #include "trading_core/Algorithm/Math/Integer/Saturating.hpp"
 #include "BacktestStrategyRuntime.hpp"
 
@@ -76,8 +77,8 @@ using strategy_runtime_detail::venueByName;
 using strategy_runtime_detail::venueForSession;
 using strategy_runtime_detail::venueMatchesSession;
 
-trading_core::StrategyAccountState accountStateFromEngine(const detail::EngineState& engine) noexcept {
-  trading_core::StrategyAccountState out{};
+capital::accounting::StrategyAccountState accountStateFromEngine(const detail::EngineState& engine) noexcept {
+  capital::accounting::StrategyAccountState out{};
   out.initialBalanceE8 = engine.sharedAccount ? engine.sharedAccount->initialBalanceE8 : engine.initialBalanceE8;
   out.walletBalanceE8 = engine.sharedAccount ? (engine.sharedAccount->observedInitialized
       ? engine.sharedAccount->observedWalletBalanceE8 : engine.sharedAccount->initialBalanceE8) : engine.observedWalletBalanceE8;
@@ -104,8 +105,8 @@ std::size_t boundedRiskLegCount(std::size_t count) noexcept {
 
 void refreshRiskAccountsFromEngines(
     detail::ConstEngineView engines,
-    std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs>& out) noexcept {
-  out.fill(trading_core::StrategyAccountState{});
+    std::array<capital::accounting::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs>& out) noexcept {
+  out.fill(capital::accounting::StrategyAccountState{});
   const std::size_t count = boundedRiskLegCount(engines.size());
   for (std::size_t i = 0u; i < count; ++i) out[i] = accountStateFromEngine(engines[i]);
 }

@@ -12,6 +12,7 @@ endif()
 
 foreach(required_target IN ITEMS
     cxet::cxet_lib
+    capital::finance
     trading_core::algorithm
     trading_core::execution
     trading_core_math
@@ -62,20 +63,9 @@ file(GLOB_RECURSE HFT_BACKTEST_STRATEGY_PROFILES CONFIGURE_DEPENDS
   LIST_DIRECTORIES false
   "${CMAKE_CURRENT_LIST_DIR}/../trading-core/StrategyProfiles/*.ini")
 list(SORT HFT_BACKTEST_STRATEGY_PROFILES)
-if(NOT HFT_BACKTEST_STRATEGY_PROFILES)
-  message(FATAL_ERROR
-    "hft-backtest integration is invalid: trading-core has no canonical strategy profiles")
-endif()
-get_target_property(HFT_BACKTEST_REQUIRED_STRATEGY_NAMES
-  trading_core_strategy TRADING_CORE_REGISTERED_STRATEGY_NAMES)
-if(NOT HFT_BACKTEST_REQUIRED_STRATEGY_NAMES OR
-   HFT_BACKTEST_REQUIRED_STRATEGY_NAMES MATCHES "-NOTFOUND$")
-  message(FATAL_ERROR
-    "hft-backtest integration is invalid: trading-core registered no canonical strategies")
-endif()
-# Signal-only descriptors have no executable Backtest cycle or profile template;
-# StrategyMetadata.cpp applies the same exclusion to the runtime catalog.
-list(REMOVE_ITEM HFT_BACKTEST_REQUIRED_STRATEGY_NAMES delivery_sum_signal)
+# Replay support is selected explicitly at this boundary. Neither remaining
+# Delivery nor Finam descriptor has a supported replay adapter/profile.
+set(HFT_BACKTEST_REQUIRED_STRATEGY_NAMES)
 set(HFT_BACKTEST_REQUIRED_STRATEGY_ARGS)
 foreach(required_strategy IN LISTS HFT_BACKTEST_REQUIRED_STRATEGY_NAMES)
   list(APPEND HFT_BACKTEST_REQUIRED_STRATEGY_ARGS
@@ -123,6 +113,7 @@ add_library(hft_backtest_core STATIC
   src/Runtime/src/Execution/BacktestOrderEvidence.cpp
   src/Runtime/src/Execution/Model/BacktestExecutionDepth.cpp
   src/Runtime/src/Execution/Model/BacktestFillModel.cpp
+  src/Runtime/src/Execution/Model/BacktestLiquidity.cpp
   src/Runtime/src/Execution/Model/BacktestLatency.cpp
   src/Runtime/src/Input/Binary/BinaryCorpusLoader.cpp
   src/Runtime/src/Input/Binary/BinaryCorpusStream.cpp
@@ -178,6 +169,7 @@ target_link_libraries(hft_backtest_core
   PUBLIC
     cxet::cxet_lib
     trading_core_math
+    capital::finance
     trading_core::algorithm
     trading_core::execution
   PRIVATE

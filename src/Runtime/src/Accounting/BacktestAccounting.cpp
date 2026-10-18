@@ -1,3 +1,4 @@
+#include "capital/Accounting/FillPositionAccounting.hpp"
 #include "trading_core/Algorithm/Math/Integer/Saturating.hpp"
 #include "../Engine/BacktestEngine.hpp"
 
@@ -6,19 +7,6 @@
 #include "trading_core/Algorithm/Math/PriceQuantity/NotionalQty.hpp"
 
 namespace hft_backtest::detail {
-
-bool spotCashDeltaE8(Side side, std::int64_t priceE8, std::int64_t qtyE8,
-    std::int64_t feeE8, std::int64_t& delta) noexcept {
-  if (priceE8 <= 0 || qtyE8 <= 0 || feeE8 < 0) return false;
-  const auto principal = trading_core::quoteNotionalE8(priceE8, qtyE8);
-  if (principal == std::numeric_limits<std::int64_t>::max()) return false;
-  if (side.raw == Side::Buy().raw) {
-    if (principal > std::numeric_limits<std::int64_t>::max() - feeE8) return false;
-    delta = -(principal + feeE8); return true;
-  }
-  if (side.raw != Side::Sell().raw || feeE8 > principal) return false;
-  delta = principal - feeE8; return true;
-}
 
 void initializeAccounting(EngineState& engine, const BacktestRunRequest& request) noexcept {
   if (!prepareSimulationOrderEvidence(engine)) engine.simulationEvidenceFailed = true;
@@ -38,7 +26,7 @@ void initializeAccounting(EngineState& engine, const BacktestRunRequest& request
   bumpContextRevision(engine);
 }
 
-trading_core::FillPositionAccountingResult updatePosition(
+capital::accounting::FillPositionAccountingResult updatePosition(
     EngineState& engine,
     Side side,
     std::int64_t priceE8,
@@ -46,9 +34,9 @@ trading_core::FillPositionAccountingResult updatePosition(
     std::int64_t tsNs,
     std::int64_t feeBpsE8) noexcept {
   (void)tsNs;
-  const trading_core::FillPositionAccountingResult result =
-      trading_core::applyFillPositionAccounting(
-          trading_core::FillPositionAccountingState{engine.netQtyRaw,
+  const capital::accounting::FillPositionAccountingResult result =
+      capital::accounting::applyFillPositionAccounting(
+          capital::accounting::FillPositionAccountingState{engine.netQtyRaw,
                                                      engine.entryPriceE8},
           side,
           priceE8,
@@ -59,7 +47,7 @@ trading_core::FillPositionAccountingResult updatePosition(
   auto walletDelta = result.netRealizedPnlE8;
   if (engine.market.raw == canon::kMarketTypeSpot.raw) {
     const auto cash = engine.sharedAccount ? engine.sharedAccount->walletBalanceE8 : engine.walletBalanceE8;
-    if (result.position.netQtyRaw < 0 || !spotCashDeltaE8(side, priceE8, qtyE8, result.feeE8, walletDelta) ||
+    if (result.position.netQtyRaw < 0 || !capital::accounting::spotCashDeltaE8(side, priceE8, qtyE8, result.feeE8, walletDelta) ||
         (walletDelta < 0 && cash < -walletDelta)) return {};
   }
 
@@ -89,8 +77,8 @@ std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
   const cxet::composite::BookTicker& top = effectiveBookTicker(engine.venueSnapshot);
   const auto bid = engine.market.raw == canon::kMarketTypeSpot.raw && top.bid.px.raw <= 0
       ? engine.venueValuationBidE8 : top.bid.px.raw;
-  return trading_core::markToMarketPnlE8(
-      trading_core::FillPositionAccountingState{engine.netQtyRaw,
+  return capital::accounting::markToMarketPnlE8(
+      capital::accounting::FillPositionAccountingState{engine.netQtyRaw,
                                                  engine.entryPriceE8},
       bid,
       top.ask.px.raw);
@@ -100,7 +88,7 @@ std::int64_t observedUnrealizedPnlE8(const EngineState& engine) noexcept {
   const auto& top = effectiveBookTicker(engine.snapshot);
   const auto bid = engine.market.raw == canon::kMarketTypeSpot.raw && top.bid.px.raw <= 0
       ? engine.observedValuationBidE8 : top.bid.px.raw;
-  return trading_core::markToMarketPnlE8(
+  return capital::accounting::markToMarketPnlE8(
       {engine.position.netQty.raw, engine.position.entryPrice.raw}, bid, top.ask.px.raw);
 }
 
@@ -116,7 +104,7 @@ std::int64_t positionEquityValueE8(const EngineState& engine, bool observed) noe
   const auto qty = observed ? engine.position.netQty.raw : engine.netQtyRaw;
   const auto price = top.bid.px.raw > 0 ? top.bid.px.raw :
       (observed ? engine.observedValuationBidE8 : engine.venueValuationBidE8);
-  return trading_core::quoteNotionalE8(price, qty > 0 ? qty : 0);
+  return capital::accounting::quoteNotionalE8(price, qty > 0 ? qty : 0);
 }
 
 void refreshAccountPositionValue(EngineState& engine, bool observed) noexcept {

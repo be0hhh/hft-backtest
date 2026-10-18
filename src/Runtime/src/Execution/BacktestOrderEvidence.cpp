@@ -1,3 +1,4 @@
+#include "capital/Accounting/FillPositionAccounting.hpp"
 #include "BacktestOrderEvidence.hpp"
 #include "../Engine/BacktestEngine.hpp"
 #include "BacktestClientOrderId.hpp"
@@ -44,8 +45,8 @@ std::int64_t reservedQuote(const EngineState& engine, bool observed) noexcept {
 bool quoteCost(std::int64_t price, std::int64_t qty, std::int64_t feeRate, std::int64_t& out) noexcept {
   if (!qty) { out = 0; return true; }
   if (qty < 0 || price <= 0) return false;
-  const auto principal = trading_core::quoteNotionalE8(price, qty);
-  const auto fee = trading_core::fillFeeE8(price, qty, feeRate);
+  const auto principal = capital::accounting::quoteNotionalE8(price, qty);
+  const auto fee = capital::accounting::fillFeeE8(price, qty, feeRate);
   if (principal == std::numeric_limits<std::int64_t>::max() ||
       principal > std::numeric_limits<std::int64_t>::max() - fee) return false;
   out = principal + fee; return true;
@@ -230,7 +231,7 @@ bool spotVenueFillAffordable(const EngineState& engine, const OpenOrder& order,
   if (index == kSimulationOrderEvidenceCapacity || qty <= 0) return false;
   const auto& row = engine.simulationOrders->spotReservations[index];
   std::int64_t cashDelta{};
-  if (!spotCashDeltaE8(order.state.side, price, qty, trading_core::fillFeeE8(price, qty, feeRate), cashDelta)) return false;
+  if (!capital::accounting::spotCashDeltaE8(order.state.side, price, qty, capital::accounting::fillFeeE8(price, qty, feeRate), cashDelta)) return false;
   if (order.state.side.raw == Side::Buy().raw) {
     const auto cash = engine.sharedAccount ? engine.sharedAccount->walletBalanceE8 : engine.walletBalanceE8;
     const auto otherHeld = reservedQuote(engine, false) - row.venueQuoteE8;
@@ -239,6 +240,29 @@ bool spotVenueFillAffordable(const EngineState& engine, const OpenOrder& order,
   const auto otherHeld = engine.venueReservedBaseE8 - row.venueBaseE8;
   return otherHeld >= 0 && otherHeld <= engine.netQtyRaw && qty <= engine.netQtyRaw - otherHeld;
 }
+bool spotVenueFillPlanAffordable(const EngineState& engine, const OpenOrder& order,
+    const AggressiveFillPlan& plan, std::int64_t feeRate) noexcept {
+  if (engine.market.raw != canon::kMarketTypeSpot.raw) return true;
+  const auto index = evidenceSlot(engine, order.state.clientIntentId, false, order.contextIndex);
+  if (index == kSimulationOrderEvidenceCapacity) return false;
+  const auto& row = engine.simulationOrders->spotReservations[index];
+  const auto cash = engine.sharedAccount ? engine.sharedAccount->walletBalanceE8 : engine.walletBalanceE8;
+  const auto otherQuote = reservedQuote(engine, false) - row.venueQuoteE8;
+  const auto otherBase = engine.venueReservedBaseE8 - row.venueBaseE8;
+  if (otherQuote < 0 || otherQuote > cash || otherBase < 0 || otherBase > engine.netQtyRaw) return false;
+  if (order.state.side.raw == Side::Sell().raw && plan.filledQtyE8 > engine.netQtyRaw - otherBase) return false;
+  __int128 totalDebit = 0;
+  for (std::size_t i = 0u; i < plan.count; ++i) {
+    const auto& chunk = plan.chunks[i];
+    std::int64_t delta{};
+    if (!capital::accounting::spotCashDeltaE8(order.state.side, chunk.priceE8, chunk.qtyE8,
+          capital::accounting::fillFeeE8(chunk.priceE8, chunk.qtyE8, feeRate), delta)) return false;
+    if (delta < 0) totalDebit -= static_cast<__int128>(delta);
+    if (totalDebit > cash - otherQuote) return false;
+  }
+  return true;
+}
+
 void updateSpotVenueReservation(EngineState& engine, const OpenOrder& order, std::int64_t remaining) noexcept {
   if (engine.market.raw != canon::kMarketTypeSpot.raw) return;
   const auto index = evidenceSlot(engine, order.state.clientIntentId, false, order.contextIndex);
@@ -281,7 +305,7 @@ bool deliverSimulationOrderEvent(EngineState& engine, std::size_t index, std::in
       const bool serviceFill = (owner.serviceFlags[identitySlot] &
           (kSimulationWarmupOrder | kSimulationWarmupUnwindOrder)) != 0u;
       auto observedServiceQty = engine.observedServiceNetQtyRaw;
-      trading_core::FillPositionAccountingResult projected{};
+      capital::accounting::FillPositionAccountingResult projected{};
       auto walletDelta = event.realizedPnl.raw;
       const auto fillDelta = event.filledQty.raw > record->cumulativeQtyE8
           ? event.filledQty.raw - record->cumulativeQtyE8 : 0;
@@ -298,12 +322,12 @@ bool deliverSimulationOrderEvent(EngineState& engine, std::size_t index, std::in
               (delta < 0 && observedServiceQty < std::numeric_limits<std::int64_t>::min() - delta)) return false;
           observedServiceQty += delta;
         }
-        projected = trading_core::applyFillPositionAccounting(
+        projected = capital::accounting::applyFillPositionAccounting(
             {engine.position.netQty.raw, engine.position.entryPrice.raw}, event.side, event.lastPrice.raw, fillDelta, 0);
         if (!projected.applied || trading_core::saturatingAddI64(projected.grossRealizedPnlE8, -event.fee.raw) != event.realizedPnl.raw) return false;
         if (engine.market.raw == canon::kMarketTypeSpot.raw) {
           const auto cash = engine.sharedAccount ? engine.sharedAccount->observedWalletBalanceE8 : engine.observedWalletBalanceE8;
-          if (projected.position.netQtyRaw < 0 || !spotCashDeltaE8(event.side, event.lastPrice.raw, fillDelta, event.fee.raw, walletDelta) ||
+          if (projected.position.netQtyRaw < 0 || !capital::accounting::spotCashDeltaE8(event.side, event.lastPrice.raw, fillDelta, event.fee.raw, walletDelta) ||
               (walletDelta < 0 && cash < -walletDelta)) return false;
         }
       }

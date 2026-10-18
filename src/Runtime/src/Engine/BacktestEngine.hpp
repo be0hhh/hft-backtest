@@ -5,6 +5,7 @@
 #include "BacktestEngineView.hpp"
 
 #include "../Execution/Model/BacktestLatency.hpp"
+#include "../Execution/Model/BacktestLiquidity.hpp"
 #include "../Execution/BacktestOrderEvidence.hpp"
 #include "../Input/Session/SessionLoader.hpp"
 
@@ -15,7 +16,7 @@
 #include "trading_core/Contracts/Intents/PositionState.hpp"
 #include "trading_core/Contracts/Strategy/StrategyContract.hpp"
 #include "trading_core/Contracts/Strategy/StrategyDecisionTrace.hpp"
-#include "trading_core/Algorithm/Math/Accounting/FillPositionAccounting.hpp"
+#include "capital/Accounting/FillPositionAccounting.hpp"
 
 #include "cxet/Canon/PositionAndExchange.hpp"
 #include "cxet/Canon/Subtypes.hpp"
@@ -39,6 +40,9 @@
 namespace hft_backtest::detail {
 
 class ExecutionDepthProvider;
+
+[[nodiscard]] bool refreshReplayDepthProjection(trading_core::LocalOrderBookState& out,
+    const cxet::api::market::PublicMarketOrderBookView& source, const Symbol& symbol) noexcept;
 
 // Replay owns corpus conversion and scheduling; CXET alone reconstructs depth.
 // Full normalized levels are distinct from the bounded strategy measurements.
@@ -180,6 +184,8 @@ struct JsonFill {
 };
 
 struct FillExecutionMetadata {
+  // Provider cursor uses the venue schedule, independently of fill delivery.
+  std::int64_t depthCursorTsNs{0};
   std::uint8_t fillReason{kFillReasonUnknown};
   std::int64_t avgPriceE8{0};
   std::int64_t bookLevelQtyE8{0};
@@ -362,8 +368,10 @@ struct OpenOrder {
   std::int64_t createdTsNs{0};
   std::int64_t activeTsNs{0};
   std::int64_t filledQtyRaw{0};
+  __int128 filledNotionalRaw{0};
+  std::uint64_t activationSequence{0u};
   std::int64_t queueAheadQtyRaw{0};
-  std::int64_t lastAggressiveBookTsNs{0};
+  bool aggressiveEvaluated{false};
   bool active{false};
   bool reduceOnly{false};
   bool postOnly{false};
@@ -434,6 +442,7 @@ struct EngineState {
   std::string strategyIndicatorUnit{};
   std::vector<PendingAction> pending{};
   std::uint64_t nextPendingSubmitSequence{1u};
+  std::uint64_t nextActivationSequence{1u};
   std::array<OpenOrder, kMaxOrderStates> open{};
   trading_core::StrategyPositionState position{};
   trading_core::StrategyMarketSnapshot snapshot{};
@@ -447,8 +456,8 @@ struct EngineState {
   trading_core::LocalOrderBookState venueOrderBook{};
   ReplayDepthBook strategyDepthBook{};
   ReplayDepthBook venueDepthBook{};
+  ExecutionLiquidity executionLiquidity{};
   bool depthReplayFailed{false};
-  trading_core::LocalOrderBookState topExecutionOverlayScratch{};
   std::vector<AggressiveFillPlan> topExecutionFillPlanScratch{};
   ExecutionDepthProvider* executionDepthProvider{nullptr};
   bool venueOrderBookExecutionEnabled{false};
@@ -635,7 +644,7 @@ bool buildTieredCandleHistory(const std::vector<CandleRow>& rows,
                               cxet::composite::TieredCandleHistory& out) noexcept;
 
 void initializeAccounting(EngineState& engine, const BacktestRunRequest& request) noexcept;
-[[nodiscard]] trading_core::FillPositionAccountingResult updatePosition(
+[[nodiscard]] capital::accounting::FillPositionAccountingResult updatePosition(
     EngineState& engine,
     Side side,
     std::int64_t priceE8,
@@ -647,8 +656,7 @@ std::int64_t observedUnrealizedPnlE8(const EngineState& engine) noexcept;
 std::int64_t positionEquityValueE8(const EngineState& engine, bool observed) noexcept;
 void refreshAccountPositionValue(EngineState& engine, bool observed) noexcept;
 void recordSpotValuationMark(EngineState& engine, bool observed) noexcept;
-[[nodiscard]] bool spotCashDeltaE8(Side side, std::int64_t priceE8,
-    std::int64_t qtyE8, std::int64_t feeE8, std::int64_t& delta) noexcept;
+
 std::int64_t equityE8(const EngineState& engine) noexcept;
 void appendEquityPoint(EngineState& engine, std::int64_t tsNs);
 void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t reason);
@@ -679,10 +687,12 @@ bool fillOrderQty(EngineState& engine,
                   const FillExecutionMetadata& metadata);
 void tryFillOnTop(EngineState& engine,
                   std::int64_t venueTsNs,
-                  bool venueBookTickerUpdate);
+                  bool venueBookTickerUpdate,
+                  std::int64_t depthCursorTsNs = 0);
 void tryFillOnTrade(EngineState& engine,
                     const cxet::composite::Trade& trade,
-                    std::int64_t venueTsNs);
+                    std::int64_t venueTsNs,
+                    std::int64_t depthCursorTsNs = 0);
 void applyDueActions(EngineState& engine, std::int64_t tsNs);
 void applyDueActionsBefore(EngineState& engine, std::int64_t tsNs);
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs);

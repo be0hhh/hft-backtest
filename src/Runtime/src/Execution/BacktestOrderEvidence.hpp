@@ -8,6 +8,7 @@
 namespace hft_backtest::detail {
 struct EngineState;
 struct OpenOrder;
+struct AggressiveFillPlan;
 inline constexpr std::size_t kSimulationOrderEvidenceCapacity = 1024u;
 inline constexpr unsigned char kSimulationServiceOrder = 1u;
 inline constexpr unsigned char kSimulationWarmupOrder = 2u;
@@ -40,5 +41,7 @@ struct SimulationOrderEvidenceOwner {
 [[nodiscard]] bool reserveSpotVenueOrder(EngineState&, const OpenOrder&) noexcept;
 [[nodiscard]] bool spotVenueFillAffordable(const EngineState&, const OpenOrder&,
     std::int64_t priceE8, std::int64_t qtyE8, std::int64_t feeBpsE8) noexcept;
+[[nodiscard]] bool spotVenueFillPlanAffordable(const EngineState&, const OpenOrder&,
+    const AggressiveFillPlan&, std::int64_t feeBpsE8) noexcept;
 void updateSpotVenueReservation(EngineState&, const OpenOrder&, std::int64_t remainingQtyE8) noexcept;
 }

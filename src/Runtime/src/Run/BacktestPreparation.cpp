@@ -16,7 +16,7 @@
 #include "trading_core/Contracts/Control/ControlState.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
 #include "trading_core/Contracts/Strategy/StrategyContract.hpp"
-#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
+#include "capital/Risk/PortfolioRisk.hpp"
 #include "trading_core/Strategy/GeneratedStrategyRegistry.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
@@ -203,15 +203,13 @@ bool prepareEngineOrderBookStorage(detail::EngineState& target,
     CountVal executionDepth{};
     executionDepth.raw = static_cast<std::uint32_t>(
         rawdata::kMaxOrderbookLevels);
-    if (!target.venueOrderBook.reserveLevelsPerSide(
-            executionDepth) ||
-        !target.topExecutionOverlayScratch
-             .reserveLevelsPerSide(executionDepth)) {
+    if (!target.venueOrderBook.reserveLevelsPerSide(executionDepth)) {
       return false;
     }
     target.venueOrderBook.config.maxStoredLevelsPerSide =
         executionDepth;
-    if (!target.venueDepthBook.prepare()) return false;
+    if (!target.venueDepthBook.prepare() ||
+        !target.executionLiquidity.prepare(executionDepth.raw)) return false;
   }
   return true;
 }

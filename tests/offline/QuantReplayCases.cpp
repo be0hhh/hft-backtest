@@ -6,14 +6,15 @@
 #include "Strategy/BacktestStrategyRuntime.hpp"
 #include "Run/BacktestUniverse.hpp"
 #include "Accounting/BacktestResultAggregation.hpp"
+#include "Accounting/BacktestMetrics.hpp"
 #include "Strategy/Inputs/BacktestStrategyWarmup.hpp"
 #include "Strategy/Internal/BacktestStrategyRuntimeHelpers.hpp"
 #include "trading_core/Strategy/Orders/OrderDecisionCursor.hpp"
 #include "Input/Binary/BinaryCorpusStream.hpp"
+#include "Input/Binary/BinaryCorpusLoader.hpp"
+#include "Strategy/Inputs/BacktestStrategyInstrument.hpp"
 #include "Input/Binary/Internal/BinaryCorpusHelpers.hpp"
 #include "Strategy/Execution/BacktestStrategyIntentLowering.hpp"
-#include "strategy/hft-trader/StatArbPairwiseTaker/Descriptor.hpp"
-#include "strategy/hft-trader/SpreadMaker1and2/Descriptor.hpp"
 #include "hftrec/CorpusContract/BinaryMarketCorpusWriter.hpp"
 #include "hftrec/CorpusContract/BinaryMarketCorpusReader.hpp"
 #include "cxet/Canon/ExchangeRegistry.hpp"
@@ -92,6 +93,7 @@ struct QuantFixture {
   std::filesystem::path root = std::filesystem::current_path() /
       ("backtest-quant-fixture-" + std::to_string(::getpid()) + "-" +
        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::string venueName, marketName;
   explicit QuantFixture(std::int64_t priceBasis = 0, bool executionAuthority = false,
                         std::uint8_t assetDomain = 1u, QuantityFixtureConfig quantity = {}) {
     std::vector<corpus::BinaryMarketSource> sources(quantity.wholeUniverseSources ? 3u : 1u);
@@ -133,6 +135,7 @@ struct QuantFixture {
     const auto marketText = source.marketRaw == 2u ? std::string_view{"spot"} :
         source.marketRaw == 6u ? std::string_view{"swap"} : source.marketRaw == 5u ? std::string_view{"inverse"} : std::string_view{"futures"};
     text(source.market, marketText); source.marketBytes = marketText.size();
+    venueName = quantity.venue; marketName = marketText;
     text(source.canonicalSymbol, "BTC_USDT"); source.canonicalSymbolBytes = 8u;
     text(source.nativeSymbol, "BTCUSDT"); source.nativeSymbolBytes = 7u;
     if (quantity.wholeUniverseSources) {
@@ -219,23 +222,124 @@ struct QuantFixture {
       CXET_CHECK(writer.append(record) == hftrec::Status::Ok);
     }
     CXET_CHECK(writer.finalize(corpus::BinaryMarketStopReason::Requested, 10'000) == hftrec::Status::Ok);
-    std::ofstream ini(root / "strategy.ini");
-    ini << "[strategy]\ntype=spread_maker1and2\ndistance_bps=10\ntrigger_bps=10\n"
-        "order_qty=0.00000012\nrefresh_ms=1\n"
-        "[venue." << quantity.venue << '_' << marketText << "]\nsymbols=BTC_USDT\nrate_limits_enabled=false\n";
   }
   ~QuantFixture() { std::error_code error; std::filesystem::remove_all(root, error); }
-  hft_backtest::BacktestRunResult run() const {
-    hft_backtest::BacktestRunRequest request;
-    request.corpusPath = root; request.configPath = root / "strategy.ini";
-    request.corpusBeginReceiveNs = 100; request.corpusEndReceiveNs = 10'000;
-    request.initialBalanceE8 = 100'000'000; request.rateLimitsEnabled = false;
-    request.writeArtifacts = false;
-    return hft_backtest::runBacktest(request);
+  struct Loaded {
+    hft_backtest::Status status{};
+    std::string error;
+    detail::SessionData session;
+  };
+  Loaded load(std::string symbol = "BTC_USDT") const {
+    Loaded result;
+    detail::SessionLoadPlan plan; plan.loadTrades = false; plan.requireBookTickers = true;
+    result.status = detail::loadBinaryMarketCorpus(root,
+        {venueName, marketName, std::move(symbol), 100, 10'000}, plan, result.session, result.error);
+    return result;
   }
 };
 
 const cxet::testing::Case cases[]{
+    cxet::testing::Case{"drawdown_empty_single_and_portfolio_keep_zero_baseline", +[] {
+      auto engine = std::make_unique<detail::EngineState>();
+      const auto single = detail::calculateExcursionMetrics(*engine);
+      CXET_CHECK(single.maxDrawdownE8 == 0 && single.mfeE8 == 0 && single.maeE8 == 0);
+      const auto empty = detail::calculatePortfolioExcursionMetrics({});
+      CXET_CHECK(empty.maxDrawdownE8 == 0 && empty.mfeE8 == 0 && empty.maeE8 == 0);
+      const std::vector<detail::EngineState> engines(2u);
+      const auto portfolio = detail::calculatePortfolioExcursionMetrics(engines);
+      CXET_CHECK(portfolio.maxDrawdownE8 == 0 && portfolio.mfeE8 == 0 && portfolio.maeE8 == 0);
+    }},
+    cxet::testing::Case{"drawdown_first_loss_counts_from_zero_on_equity_and_risk_paths", +[] {
+      for (const bool risk : {false, true}) {
+        auto engine = std::make_unique<detail::EngineState>();
+        for (const auto pnl : {-7, -2, 4, -3}) {
+          if (risk) {
+            detail::JsonRiskSnapshot row{}; row.netTotalPnlE8 = pnl;
+            engine->riskSnapshots.push_back(row);
+          } else {
+            detail::JsonEquityPoint row{}; row.netTotalPnlE8 = pnl;
+            engine->equityPoints.push_back(row);
+          }
+        }
+        hft_backtest::BacktestRunResult result{};
+        hft_backtest::populateResultPnl(result, *engine);
+        CXET_CHECK(result.maxDrawdownE8 == 7 && result.mfeE8 == 4 && result.maeE8 == -7);
+      }
+    }},
+    cxet::testing::Case{"drawdown_extreme_first_loss_saturates_without_signed_negation", +[] {
+      auto engine = std::make_unique<detail::EngineState>();
+      detail::JsonRiskSnapshot row{}; row.netTotalPnlE8 = std::numeric_limits<std::int64_t>::min();
+      engine->riskSnapshots.push_back(row);
+      const auto metrics = detail::calculateExcursionMetrics(*engine);
+      CXET_CHECK(metrics.maxDrawdownE8 == std::numeric_limits<std::int64_t>::max());
+      CXET_CHECK(metrics.mfeE8 == 0 && metrics.maeE8 == std::numeric_limits<std::int64_t>::min());
+    }},
+    cxet::testing::Case{"portfolio_drawdown_uses_zero_baseline_and_latest_same_timestamp_leg_rows", +[] {
+      for (const bool risk : {false, true}) {
+        std::vector<detail::EngineState> engines(2u);
+        const auto append = [&](std::size_t leg, std::int64_t ts, std::int64_t pnl) {
+          if (risk) {
+            detail::JsonRiskSnapshot row{}; row.tsNs = ts; row.netTotalPnlE8 = pnl;
+            engines[leg].riskSnapshots.push_back(row);
+          } else {
+            detail::JsonEquityPoint row{}; row.tsNs = ts; row.netTotalPnlE8 = pnl;
+            engines[leg].equityPoints.push_back(row);
+          }
+        };
+        append(0u, 10, -100); append(0u, 10, -7); append(1u, 10, 2);
+        append(0u, 20, 8); append(1u, 20, -2);
+        append(1u, 30, -10);
+        hft_backtest::BacktestRunResult result{};
+        hft_backtest::populatePortfolioResultPnl(result, {}, engines, 0);
+        CXET_CHECK(result.maxDrawdownE8 == 8 && result.mfeE8 == 6 && result.maeE8 == -5);
+        // The first synchronized point alone must include the initial loss.
+        if (risk) {
+          engines[0].riskSnapshots.resize(2u); engines[1].riskSnapshots.resize(1u);
+        } else {
+          engines[0].equityPoints.resize(2u); engines[1].equityPoints.resize(1u);
+        }
+        const auto first = detail::calculatePortfolioExcursionMetrics(engines);
+        CXET_CHECK(first.maxDrawdownE8 == 5 && first.mfeE8 == 0 && first.maeE8 == -5);
+      }
+    }},
+    cxet::testing::Case{"bbo_optimism_warning_requires_actual_fills_including_no_depth_mode", +[] {
+      auto engine = std::make_unique<detail::EngineState>();
+      engine->depthExecutionMode = hft_backtest::BacktestDepthExecutionMode::BboNoDepth;
+      hft_backtest::BacktestRunResult result{};
+      hft_backtest::appendDepthExecutionWarnings(result, *engine);
+      CXET_CHECK(result.warnings.empty());
+      engine->depthFallbackFills = 1u;
+      hft_backtest::appendDepthExecutionWarnings(result, *engine);
+      CXET_CHECK(result.warnings.size() == 1u);
+      CXET_CHECK(result.warnings[0].find("optimistic BBO") != std::string::npos);
+      CXET_CHECK(result.warnings[0].find("without displayed quantity limits") != std::string::npos);
+      hft_backtest::appendDepthExecutionWarnings(result, *engine);
+      CXET_CHECK(result.warnings.size() == 1u);
+    }},
+    cxet::testing::Case{"depth_failure_diagnostic_survives_without_fills_and_keeps_reason", +[] {
+      auto engine = std::make_unique<detail::EngineState>();
+      engine->depthExecutionMode = hft_backtest::BacktestDepthExecutionMode::BboFallback;
+      engine->depthFallbackReason = "missing execution row";
+      hft_backtest::BacktestRunResult result{};
+      hft_backtest::appendDepthExecutionWarnings(result, *engine);
+      CXET_CHECK(result.warnings.size() == 1u);
+      CXET_CHECK(result.warnings[0].find("declared execution depth failed") != std::string::npos);
+      CXET_CHECK(result.warnings[0].find(engine->depthFallbackReason) != std::string::npos);
+      CXET_CHECK(result.warnings[0].find("optimistic BBO") == std::string::npos);
+      engine->depthFallbackFills = 2u;
+      hft_backtest::appendDepthExecutionWarnings(result, *engine);
+      CXET_CHECK(result.warnings.size() == 2u && result.warnings[1].find("optimistic BBO") != std::string::npos);
+    }},
+    cxet::testing::Case{"portfolio_bbo_warning_identifies_only_legs_with_actual_top_fills", +[] {
+      auto aggregate = std::make_unique<detail::EngineState>();
+      std::vector<detail::EngineState> legs(2u);
+      legs[0].depthExecutionMode = hft_backtest::BacktestDepthExecutionMode::BboNoDepth;
+      legs[1].depthExecutionMode = hft_backtest::BacktestDepthExecutionMode::Depth;
+      legs[1].depthFallbackFills = 1u;
+      hft_backtest::BacktestRunResult result{};
+      hft_backtest::appendDepthExecutionWarnings(result, *aggregate, &legs);
+      CXET_CHECK(result.warnings.size() == 1u && result.warnings[0].find("leg 1: optimistic BBO") == 0u);
+    }},
     cxet::testing::Case{"service_unwind_without_genuine_opposite_price_retains_spot_and_futures_exposure", +[] {
       for (const auto market : {canon::kMarketTypeSpot, canon::kMarketTypeFutures}) {
         SpotFixture fixture; auto engine = fixture.engine(0u, market);
@@ -281,13 +385,12 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"whole_market_available_recorded_only_required_source_is_not_a_quiet_pause", +[] {
       QuantityFixtureConfig config; config.wholeUniverseSources = config.recordedOnlyRequiredSource = true;
-      QuantFixture fixture(0, true, 1u, config); const auto result = fixture.run();
+      QuantFixture fixture(0, true, 1u, config); const auto result = fixture.load("LTC_USDT");
       CXET_CHECK(result.status == hft_backtest::Status::Unsupported && result.error.find("replay") != std::string::npos);
-      CXET_CHECK(result.orders == 0u && result.inputCoverage.strategyCycles == 0u);
     }},
     cxet::testing::Case{"whole_market_nonhealth_required_row_without_replay_compatibility_refuses", +[] {
       QuantityFixtureConfig config; config.wholeUniverseSources = config.noncompatibleRequiredRow = true;
-      QuantFixture fixture(0, true, 1u, config); const auto result = fixture.run();
+      QuantFixture fixture(0, true, 1u, config); const auto result = fixture.load("LTC_USDT");
       CXET_CHECK(result.status == hft_backtest::Status::Unsupported && result.error.find("replay") != std::string::npos);
     }},
     cxet::testing::Case{"shared_account_private_credit_precedes_later_debit_across_reversed_source_indices", +[] {
@@ -458,30 +561,19 @@ const cxet::testing::Case cases[]{
       CXET_CHECK(engine->netQtyRaw == -SpotFixture::q && fixture.account.walletBalanceE8 == 100 * SpotFixture::q);
       SpotFixture::deliverAll(*engine); CXET_CHECK(engine->position.netQty.raw == -SpotFixture::q);
     }},
-    cxet::testing::Case{"whole_market_expands_new_symbol_and_pauses_quiet_configured_source", +[] {
+    cxet::testing::Case{"whole_market_corpus_loads_configured_and_added_symbols", +[] {
       QuantityFixtureConfig config; config.wholeUniverseSources = true;
-      QuantFixture fixture(0, true, 1u, config); const auto result = fixture.run();
-      CXET_CHECK(result.status == hft_backtest::Status::Ok);
-      CXET_CHECK(result.universeSources == 3u && result.universeContexts == 3u && result.virtualAccounts == 1u);
-      CXET_CHECK(result.events == 2u && result.inputCoverage.strategyCycles != 0u && result.orders != 0u);
+      QuantFixture fixture(0, true, 1u, config);
+      const auto first = fixture.load(), added = fixture.load("ETH_USDT");
+      CXET_CHECK(first.status == hft_backtest::Status::Ok && added.status == hft_backtest::Status::Ok);
+      CXET_CHECK(first.session.symbol == "BTC_USDT" && added.session.symbol == "ETH_USDT");
+      CXET_CHECK(first.session.bookTickers.size() == 1u && added.session.bookTickers.size() == 1u);
     }},
     cxet::testing::Case{"legacy_single_session_cannot_infer_market_quantity_unit_from_order_grid", +[] {
-      QuantFixture fixture(0, true);
-      hft_backtest::BacktestRunRequest request{}; request.configPath = fixture.root / "strategy.ini";
-      request.sessionPath = fixture.root / "legacy"; request.initialBalanceE8 = 100'000'000; request.writeArtifacts = false;
-      const auto result = hft_backtest::runBacktest(request);
-      CXET_CHECK(result.status == hft_backtest::Status::Unsupported && result.error.find("quantity") != std::string::npos);
-      CXET_CHECK(result.orders == 0u && result.inputCoverage.strategyCycles == 0u);
-    }},
-    cxet::testing::Case{"legacy_multiple_sessions_refuse_unknown_common_quote_before_balance_aggregation", +[] {
-      QuantFixture fixture(0, true);
-      hft_backtest::BacktestRunRequest request{}; request.configPath = fixture.root / "strategy.ini";
-      request.sessions = {{fixture.root / "legacy_a", {}, {}},
-                          {fixture.root / "legacy_b", {}, {}}};
-      request.initialBalanceE8 = 100'000'000; request.writeArtifacts = false;
-      const auto result = hft_backtest::runBacktest(request);
-      CXET_CHECK(result.status == hft_backtest::Status::Unsupported && result.error.find("quote") != std::string::npos);
-      CXET_CHECK(result.initialBalanceE8 == 0 && result.orders == 0u && result.fills == 0u && result.inputCoverage.strategyCycles == 0u);
+      detail::InstrumentMetadata metadata{}; metadata.lotSizeE8 = 100; metadata.tickSizeE8 = 1;
+      trading_core::StrategyInstrumentSpec instrument{}; std::string error;
+      CXET_CHECK(hft_backtest::prepareBacktestStrategyInstrument(metadata, instrument, error) == hft_backtest::Status::Unsupported);
+      CXET_CHECK(error.find("execution quantity") != std::string::npos);
     }},
     cxet::testing::Case{"linear_swap_accepts_exact_recorded_native_base_quantity_authority", +[] {
       for (const auto& exchange : canon::exchangeRegistryEntries())
@@ -492,14 +584,9 @@ const cxet::testing::Case cases[]{
       QuantityFixtureConfig config; config.marketKind = 2u;
       config.marketRaw = canon::kMarketTypeFutures.raw; config.venue = "bingx";
       config.conversion.kinds.fill(corpus::BinaryMarketQuantityKind::NativeBase);
-      QuantFixture fixture(100'000'000, true, 1u, config);
-      const auto result = fixture.run();
-      if (result.status != hft_backtest::Status::Ok || result.orders == 0u || result.inputCoverage.strategyCycles == 0u)
-        std::fprintf(stderr, "linear swap replay: status=%u error=%s orders=%llu cycles=%llu\n",
-            static_cast<unsigned>(result.status), result.error.c_str(),
-            static_cast<unsigned long long>(result.orders),
-            static_cast<unsigned long long>(result.inputCoverage.strategyCycles));
-      CXET_CHECK(result.status == hft_backtest::Status::Ok && result.orders != 0u && result.inputCoverage.strategyCycles != 0u);
+      QuantFixture fixture(100'000'000, true, 1u, config); const auto result = fixture.load();
+      CXET_CHECK(result.status == hft_backtest::Status::Ok);
+      CXET_CHECK(result.session.bookTickers.size() == 1u && result.session.bookTickers[0].bidQtyE8 == config.qtyRaw);
     }},
     cxet::testing::Case{"quantity_authority_change_refuses_instead_of_reinterpreting_retained_state", +[] {
       QuantityFixtureConfig config; config.conversion.kinds.fill(corpus::BinaryMarketQuantityKind::NativeBase);
@@ -512,11 +599,6 @@ const cxet::testing::Case cases[]{
       CXET_CHECK(stream.next(events, available, error) == hft_backtest::Status::Ok && available);
       CXET_CHECK(stream.next(events, available, error) == hft_backtest::Status::Unsupported && !available);
       CXET_CHECK(error.find("quantity") != std::string::npos);
-    }},
-    cxet::testing::Case{"inverse_market_remains_unsupported_with_known_quantity_factors", +[] {
-      QuantityFixtureConfig config; config.marketKind = 2u; config.marketRaw = 5u;
-      QuantFixture fixture(0, true, 1u, config); const auto result = fixture.run();
-      CXET_CHECK(result.status == hft_backtest::Status::Unsupported && result.orders == 0u && result.inputCoverage.strategyCycles == 0u);
     }},
     cxet::testing::Case{"different_venue_base_and_contract_channels_project_equal_canonical_quantities", +[] {
       for (const bool contract : {false, true}) {
@@ -549,7 +631,7 @@ const cxet::testing::Case cases[]{
         corpus::BinaryMarketSelection selected;
         CXET_CHECK(corpus::BinaryMarketCorpusReader{}.select(native, selected, error) == hftrec::Status::Ok);
         CXET_CHECK(corpus::binaryMarketPayload<corpus::BinaryMarketBookTickerPayload>(&selected.records[0])->bidQtyRaw == config.qtyRaw);
-        CXET_CHECK(fixture.run().status == hft_backtest::Status::Ok);
+
       }
     }},
     cxet::testing::Case{"canonical_spot_quantities_are_not_packaged_twice", +[] {
@@ -574,9 +656,8 @@ const cxet::testing::Case cases[]{
     }},
     cxet::testing::Case{"unknown_selected_lane_quantity_authority_refuses_before_strategy_admission", +[] {
       QuantityFixtureConfig config; config.conversion = {};
-      QuantFixture fixture(0, true, 1u, config); const auto result = fixture.run();
-      CXET_CHECK(result.status == hft_backtest::Status::Unsupported && result.error.find("market quantity") != std::string::npos);
-      CXET_CHECK(result.orders == 0u && result.inputCoverage.strategyCycles == 0u);
+      QuantFixture fixture(0, true, 1u, config); const auto result = fixture.load();
+      CXET_CHECK(result.status == hft_backtest::Status::Unsupported && result.error.find("quantity") != std::string::npos);
     }},
     cxet::testing::Case{"quantity_projection_refuses_invalid_kind_missing_factors_and_contract_authority", +[] {
       corpus::BinaryMarketSource source{}; source.quantityScale = 8u;
@@ -738,13 +819,6 @@ const cxet::testing::Case cases[]{
       const auto* record = trading_core::strategy::canonicalOrderEvidence(detail::simulationOrderEvidenceView(*engine), intent.clientIntentId, 1u);
       CXET_CHECK(record && record->terminal());
     }},
-    cxet::testing::Case{"tradfi_spot_native_market_quantity_refuses_despite_execution_grid", +[] {
-      QuantFixture fixture(0, true, 2u);
-      const auto result = fixture.run();
-      CXET_CHECK(result.status == hft_backtest::Status::Unsupported);
-      CXET_CHECK(result.error.find("market quantity") != std::string::npos);
-      CXET_CHECK(result.orders == 0u && result.fills == 0u && result.inputCoverage.strategyCycles == 0u);
-    }},
     cxet::testing::Case{"private_delivery_refuses_foreign_identity_and_source_head_overtake", +[] {
       auto engine = std::make_unique<detail::EngineState>(); engine->activeContextIndex = 1u;
       hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
@@ -815,7 +889,7 @@ const cxet::testing::Case cases[]{
       hft_backtest::bindBacktestUserEventIdentity(ctx, *engine);
       CXET_CHECK(ctx.userEventGeneration == 0u && ctx.userEventClientIntentId.raw == 0u);
     }},
-    cxet::testing::Case{"simulated_cancel_terminal_evidence_releases_spread_quote_only_at_private_delivery", +[] {
+    cxet::testing::Case{"simulated_cancel_terminal_evidence_is_final_only_at_private_delivery", +[] {
       auto engine = std::make_unique<detail::EngineState>();
       hft_backtest::BacktestRateLimitSchedule schedule; schedule.enabled = false;
       std::string quotaError;
@@ -840,20 +914,9 @@ const cxet::testing::Case cases[]{
       CXET_CHECK(detail::execution_detail::submitCancelIntent(*engine, cancel, 1030, 1040));
       detail::applyDueActions(*engine, 1040);
       CXET_CHECK(engine->userEvents.size() == 2u && !placed->terminal());
-      trading_core::strategy::SpreadMaker1And2Strategy maker;
-      maker.state.previousBidClientId = intent.clientIntentId;
-      trading_core::StrategyContext ctx; ctx.hasUserEvent = true; ctx.userEvent = &engine->userEvents[1];
-      ctx.userEventAdmittedSemanticMask = cxet::composite::userDataSemanticBit(cxet::composite::UserDataSemantic::OrderTransition);
-      ctx.defaultExecutionRoute.raw = 1u; ctx.marketData.count = 1u;
-      view = detail::simulationOrderEvidenceView(*engine);
-      ctx.state.orders.executionLegs = &view; ctx.state.orders.executionLegCount = 1u;
-      hft_backtest::bindBacktestUserEventIdentity(ctx, *engine);
-      maker.updateCloseTrackingFromUserEvent(ctx);
-      CXET_CHECK(maker.state.previousBidClientId.raw == 41u);
+      CXET_CHECK(!placed->terminal());
       CXET_CHECK(detail::deliverSimulationOrderEvent(*engine, 1u, engine->userEventDeliveryTsNs[1]));
-      hft_backtest::bindBacktestUserEventIdentity(ctx, *engine);
-      maker.updateCloseTrackingFromUserEvent(ctx);
-      CXET_CHECK(placed->terminal() && maker.state.previousBidClientId.raw == 0u);
+      CXET_CHECK(placed->terminal());
     }},
     cxet::testing::Case{"simulated_evidence_refuses_foreign_context_source_owner_and_generation", +[] {
       auto engine = std::make_unique<detail::EngineState>();
@@ -886,29 +949,23 @@ const cxet::testing::Case cases[]{
       CXET_CHECK(stream.open(fixture.root, requests, plan, error) == hft_backtest::Status::Ok);
       CXET_CHECK(stream.sessions()[0].instrument.lotSizeE8 == 2);
       CXET_CHECK(stream.sessions()[0].instrument.executionQuantityStepE8 == 4);
-      const auto result = fixture.run();
-      CXET_CHECK(result.status == hft_backtest::Status::Ok);
-      CXET_CHECK(result.orders != 0u && result.inputCoverage.strategyCycles != 0u);
+      trading_core::StrategyInstrumentSpec instrument{};
+      CXET_CHECK(hft_backtest::prepareBacktestStrategyInstrument(stream.sessions()[0].instrument, instrument, error) == hft_backtest::Status::Ok);
+      CXET_CHECK(instrument.stepSizeRaw == 2 && instrument.executionQuantityStepRaw == 4);
     }},
     cxet::testing::Case{"native_lot_without_execution_quantity_authority_refuses_before_strategy_init", +[] {
-      QuantFixture fixture;
-      const auto result = fixture.run();
-      CXET_CHECK(result.status == hft_backtest::Status::Unsupported);
-      CXET_CHECK(result.error.find("execution quantity") != std::string::npos);
-      CXET_CHECK(result.orders == 0u && result.fills == 0u && result.inputCoverage.strategyCycles == 0u);
+      QuantFixture fixture; const auto result = fixture.load();
+      CXET_CHECK(result.status == hft_backtest::Status::Ok);
+      trading_core::StrategyInstrumentSpec instrument{}; std::string error;
+      CXET_CHECK(hft_backtest::prepareBacktestStrategyInstrument(result.session.instrument, instrument, error) == hft_backtest::Status::Unsupported);
+      CXET_CHECK(error.find("execution quantity") != std::string::npos);
     }},
     cxet::testing::Case{"nonunit_native_price_basis_refuses_e8_accounting_before_admission", +[] {
-      QuantFixture fixture(200'000'000, true);
-      const auto result = fixture.run();
-      CXET_CHECK(result.status == hft_backtest::Status::Unsupported);
-      CXET_CHECK(result.error.find("price basis") != std::string::npos);
-      CXET_CHECK(result.orders == 0u && result.fills == 0u && result.inputCoverage.strategyCycles == 0u);
-    }},
-    cxet::testing::Case{"pairwise_taker_requires_genuine_canonical_execution_evidence", +[] {
-      CXET_CHECK(!hft_backtest::strategy_intent_lowering::footprintSupported(
-          trading_core::kStatArbPairwiseTakerStrategyDescriptor));
-      CXET_CHECK(hft_backtest::strategy_intent_lowering::footprintSupported(
-          trading_core::kSpreadMaker1And2StrategyDescriptor));
+      QuantFixture fixture(200'000'000, true); const auto result = fixture.load();
+      CXET_CHECK(result.status == hft_backtest::Status::Ok);
+      trading_core::StrategyInstrumentSpec instrument{}; std::string error;
+      CXET_CHECK(hft_backtest::prepareBacktestStrategyInstrument(result.session.instrument, instrument, error) == hft_backtest::Status::Unsupported);
+      CXET_CHECK(error.find("price basis") != std::string::npos);
     }},
     cxet::testing::Case{"user_data_jitter_keeps_source_order_and_deterministic_ties", +[] {
       auto first = std::make_unique<detail::EngineState>();

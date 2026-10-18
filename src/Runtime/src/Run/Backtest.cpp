@@ -1,3 +1,6 @@
+#include "capital/Risk/PortfolioRisk.hpp"
+#include "capital/AccountState/AccountState.hpp"
+#include "hft_backtest/StrategyMetadata.hpp"
 #include "hft_backtest/Backtest.hpp"
 
 #include "../Engine/BacktestEngine.hpp"
@@ -21,7 +24,6 @@
 #include "trading_core/Contracts/Control/ControlState.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
 #include "trading_core/Contracts/Strategy/StrategyContract.hpp"
-#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
 #include "trading_core/Strategy/GeneratedStrategyRegistry.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
@@ -153,6 +155,12 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
           request.configPath.string().c_str(), cfg, error)) {
     result.status = Status::InvalidArgument;
     result.error = error;
+    (void)writeEmptyArtifacts(artifacts);
+    return result;
+  }
+  if (findStrategyMetadata(cfg.strategyType) == nullptr) {
+    result.status = Status::Unsupported;
+    result.error = "strategy has no supported Backtest replay adapter/profile";
     (void)writeEmptyArtifacts(artifacts);
     return result;
   }
@@ -560,9 +568,9 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     detail::appendEquityPoint(engine, replayStartTsNs);
     detail::appendRiskSnapshot(engine, replayStartTsNs, detail::kRiskSnapshotReasonStart);
   }
-  std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs> riskAccounts{};
+  std::array<capital::accounting::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs> riskAccounts{};
   std::array<const BacktestStrategyVenueConfig*, trading_core::kStrategyRuntimeMaxLegs> riskVenues{};
-  std::array<trading_core::PortfolioRiskLegConfig,
+  std::array<capital::risk::PortfolioRiskLegConfig,
              trading_core::kStrategyRuntimeMaxLegs> riskLegConfigs{};
   const std::size_t riskAccountCount = hasExplicitSessions ? boundedRiskLegCount(legEngines.size()) : 1u;
   if (hasExplicitSessions) {
@@ -575,8 +583,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   for (std::size_t i = 0u; i < riskAccountCount; ++i) {
     riskLegConfigs[i] = makeBacktestPortfolioRiskLegConfig(riskVenues[i]);
   }
-  trading_core::PortfolioRiskState traderRiskState =
-      trading_core::makePortfolioRiskState(
+  capital::risk::PortfolioRiskState traderRiskState =
+      capital::risk::makePortfolioRiskState(
           makeBacktestPortfolioRiskConfig(cfg.risk), riskAccounts.data(),
           riskAccountCount, riskLegConfigs.data());
 

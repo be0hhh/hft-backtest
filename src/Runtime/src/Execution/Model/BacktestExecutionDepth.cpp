@@ -295,7 +295,8 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
       initialBook.capacityLevelsPerSide().raw != 0u) {
     bookCapacity = initialBook.capacityLevelsPerSide();
   }
-  if (!book_.reserveLevelsPerSide(bookCapacity) ||
+  if (!liquidity_.prepare(bookCapacity.raw) ||
+      !book_.reserveLevelsPerSide(bookCapacity) ||
       (initialBook.initialized.raw ==
            trading_core::kAlgoFlagTrue.raw &&
        !book_.copyFromBounded(initialBook))) {
@@ -479,7 +480,8 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
 }
 
 bool ExecutionDepthProvider::ready() const noexcept {
-  return available_ && trading_core::orderBook(book_).initialized();
+  return available_ && (trading_core::orderBook(book_).initialized() ||
+      (impl_ && impl_->depthBook.view().ready));
 }
 
 bool depthScheduleLess(const CursorDepthRow& lhs,
@@ -563,22 +565,32 @@ bool applyDepthRow(trading_core::LocalOrderBookState& book,
                    const Symbol& symbol,
                    const trading_core::LocalOrderBookConfig& config,
                    const CursorDepthRow& row,
-                   ReplayDepthBook& depthBook) noexcept {
+                   ReplayDepthBook& depthBook,
+                   ExecutionLiquidity& liquidity) noexcept {
+  const hftrec::replay::EventArrival previousArrival = depthBook.arrival();
+  const bool identityChanged = previousArrival.producerEpoch != 0u &&
+      (previousArrival.producerEpoch != row.arrival.producerEpoch ||
+       previousArrival.sourceId != row.arrival.sourceId ||
+       previousArrival.sourceGeneration != row.arrival.sourceGeneration ||
+       previousArrival.sessionEpoch != row.arrival.sessionEpoch);
   if (!depthBook.apply({row.levels.data(), row.levels.size()}, row.exchangeTsNs,
                        row.arrival, false)) return false;
   book.config = config;
   if (book.config.maxStoredLevelsPerSide.raw == 0u)
     book.config.maxStoredLevelsPerSide = book.capacityLevelsPerSide();
   const auto source = depthBook.view();
-  (void)trading_core::refreshAuthoritativeOrderBook(book, source, symbol);
-  return source.ready;
+  if (!refreshReplayDepthProjection(book, source, symbol)) return false;
+  liquidity.publish({row.levels.data(), row.levels.size()}, identityChanged);
+  return true;
 }
 
 bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
   if (!available_ || impl_ == nullptr) return false;
   if (tsNs <= 0) return ready();
   if (cache_ && impl_->sourceRows == 0u && !impl_->pendingValid) {
-    (void)cache_->restore(tsNs, *impl_, book_);
+    // Checkpoints contain market state only. A newly opened provider has no
+    // executed orders to carry across its initial checkpoint restore.
+    if (cache_->restore(tsNs, *impl_, book_)) liquidity_.reset();
   }
   if (impl_->eof ||
       (impl_->pendingValid && impl_->pending.scheduleTsNs > tsNs))
@@ -591,7 +603,8 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
                          symbol_,
                          config_,
                          impl_->pending,
-                         impl_->depthBook)) {
+                         impl_->depthBook,
+                         liquidity_)) {
         available_ = false;
         failed_ = true;
         failureReason_ = "apply_failed";
@@ -635,7 +648,8 @@ bool ExecutionDepthProvider::advanceTo(std::int64_t tsNs) noexcept {
                        symbol_,
                        config_,
                        impl_->scratch,
-                       impl_->depthBook)) {
+                       impl_->depthBook,
+                       liquidity_)) {
       available_ = false;
       failed_ = true;
       failureReason_ = "apply_failed";

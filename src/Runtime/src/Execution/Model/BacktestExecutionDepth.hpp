@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../Engine/BacktestEngine.hpp"
+#include "BacktestLiquidity.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -36,6 +37,7 @@ class ExecutionDepthProvider {
   [[nodiscard]] bool advanceTo(std::int64_t tsNs) noexcept;
 
   [[nodiscard]] const trading_core::LocalOrderBookState& book() const noexcept { return book_; }
+  [[nodiscard]] ExecutionLiquidity& liquidity() noexcept { return liquidity_; }
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::uint64_t rowsRead() const noexcept { return rowsRead_; }
   [[nodiscard]] bool failed() const noexcept { return failed_; }
@@ -44,6 +46,7 @@ class ExecutionDepthProvider {
  private:
   ExecutionDepthProviderImpl* impl_{nullptr};
   trading_core::LocalOrderBookState book_{};
+  ExecutionLiquidity liquidity_{};
   Symbol symbol_{};
   trading_core::LocalOrderBookConfig config_{};
   std::uint64_t rowsRead_{0};

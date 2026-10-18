@@ -1,5 +1,8 @@
 #include "BacktestFillModel.hpp"
+#include "BacktestExecutionDepth.hpp"
+#include "../Internal/BacktestExecutionHelpers.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 
@@ -44,31 +47,6 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
   return false;
 }
 
-[[nodiscard]] bool makerBboTouchesOrder(const OpenOrder& order,
-                                        const cxet::composite::BookTicker& top,
-                                        std::int64_t& oppositeQtyE8) noexcept {
-  oppositeQtyE8 = 0;
-  if (order.state.side.raw == Side::Sell().raw) {
-    if (top.bid.px.raw <= 0 || top.bid.px.raw < order.state.price.raw) return false;
-    oppositeQtyE8 = top.bid.qty.raw;
-    return oppositeQtyE8 > 0;
-  }
-  if (order.state.side.raw == Side::Buy().raw) {
-    if (top.ask.px.raw <= 0 || top.ask.px.raw > order.state.price.raw) return false;
-    oppositeQtyE8 = top.ask.qty.raw;
-    return oppositeQtyE8 > 0;
-  }
-  return false;
-}
-
-[[nodiscard]] bool passiveBboTouchEligible(const OpenOrder& order,
-                                           std::int64_t venueTsNs) noexcept {
-  if (order.state.orderType != canon::OrderType::Limit) return false;
-  if (order.postOnly) return true;
-  if (order.lastAggressiveBookTsNs != 0 || order.filledQtyRaw > 0) return true;
-  return venueTsNs > order.activeTsNs;
-}
-
 [[nodiscard]] trading_core::BookSide passiveBookSide(const OpenOrder& order) noexcept {
   return order.state.side.raw == Side::Buy().raw ? trading_core::BookSide::Bid
                                                  : trading_core::BookSide::Ask;
@@ -96,7 +74,6 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
 [[nodiscard]] std::int64_t visibleQtyAtPassivePrice(const EngineState& engine,
                                                     const OpenOrder& order,
                                                     const trading_core::LocalOrderBookState& book) noexcept {
-  (void)engine;
   if (order.state.price.raw <= 0) return 0;
   const trading_core::LocalOrderBookView view = trading_core::orderBook(book);
   const trading_core::BookSide bookSide = passiveBookSide(order);
@@ -105,7 +82,8 @@ constexpr std::int64_t kPct100E8 = 100ll * 100000000ll;
   for (std::uint32_t i = 0u; i < side->activeCount.raw; ++i) {
     trading_core::LocalOrderBookLevel level{};
     if (!view.readLevel(bookSide, Index{i}, level)) return 0;
-    if (level.px.raw == order.state.price.raw) return level.qty.raw > 0 ? level.qty.raw : 0;
+    if (level.px.raw == order.state.price.raw)
+      return depthLiquidity(engine).available(bookSide, level.px.raw, level.qty.raw);
   }
   return 0;
 }
@@ -197,7 +175,8 @@ bool triggeredStopFokLimitOrder(const OpenOrder& order) noexcept {
 }
 
 void initializePassiveQueue(OpenOrder& order, const EngineState& engine) noexcept {
-  initializePassiveQueue(order, engine, engine.venueOrderBook);
+  initializePassiveQueue(order, engine, engine.executionDepthProvider
+      ? engine.executionDepthProvider->book() : engine.venueOrderBook);
 }
 
 void initializePassiveQueue(OpenOrder& order,
@@ -205,6 +184,19 @@ void initializePassiveQueue(OpenOrder& order,
                             const trading_core::LocalOrderBookState& book) noexcept {
   if (!order.state.valid || !order.active || order.state.orderType != canon::OrderType::Limit) return;
   if (order.queueInitialized) return;
+  // Each price has one external queue. Own orders are ordered separately and
+  // never each charge the same external liquidity against a trade.
+  for (const OpenOrder& peer : engine.open) {
+    if (&peer != &order && peer.state.valid && peer.active && peer.queueInitialized &&
+        peer.state.orderType == canon::OrderType::Limit &&
+        peer.state.side.raw == order.state.side.raw && peer.state.price.raw == order.state.price.raw &&
+        peer.sourceGeneration == order.sourceGeneration &&
+        peer.executionBoundaryEpoch == order.executionBoundaryEpoch) {
+      order.queueAheadQtyRaw = peer.queueAheadQtyRaw;
+      order.queueInitialized = true;
+      return;
+    }
+  }
   order.queueAheadQtyRaw = visibleQtyAtPassivePrice(engine, order, book);
   order.queueInitialized = true;
 }
@@ -230,7 +222,7 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
       (order.state.orderType == canon::OrderType::Stop && order.stopTriggered);
   const bool limitOrder = order.state.orderType == canon::OrderType::Limit;
   if (!marketOrder && !limitOrder) return false;
-  if (limitOrder && order.lastAggressiveBookTsNs != 0) return false;
+  if (limitOrder && order.aggressiveEvaluated) return false;
 
   const trading_core::LocalOrderBookView view = trading_core::orderBook(book);
   const trading_core::BookSide bookSide = aggressiveBookSide(order);
@@ -251,11 +243,13 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
     if (!view.readLevel(bookSide, Index{i}, level)) return false;
     if (level.px.raw <= 0 || level.qty.raw <= 0) continue;
     if (!levelExecutableByLimit(order, level.px.raw)) break;
-    if (visibleExecutableQty > std::numeric_limits<std::int64_t>::max() - level.qty.raw) {
+    const std::int64_t available = depthLiquidity(engine).available(bookSide, level.px.raw, level.qty.raw);
+    if (visibleExecutableQty > std::numeric_limits<std::int64_t>::max() - available) {
       visibleExecutableQty = std::numeric_limits<std::int64_t>::max();
       break;
     }
-    visibleExecutableQty += level.qty.raw;
+    // Sum only liquidity still available to this simulation.
+    visibleExecutableQty += available;
   }
 
   if (visibleExecutableQty <= 0) {
@@ -271,7 +265,8 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
     if (!view.readLevel(bookSide, Index{i}, level)) return false;
     if (level.px.raw <= 0 || level.qty.raw <= 0) continue;
     if (!levelExecutableByLimit(order, level.px.raw)) break;
-    const std::int64_t fillQty = level.qty.raw < remaining ? level.qty.raw : remaining;
+    const std::int64_t available = depthLiquidity(engine).available(bookSide, level.px.raw, level.qty.raw);
+    const std::int64_t fillQty = available < remaining ? available : remaining;
     if (fillQty <= 0) continue;
     remaining -= fillQty;
     out.filledQtyE8 += fillQty;
@@ -280,7 +275,7 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
         level.px.raw,
         fillQty,
         cumulativeAvgPrice(notionalSum, out.filledQtyE8),
-        level.qty.raw,
+        available,
         visibleExecutableQty,
         consumedPctE8(out.filledQtyE8, visibleExecutableQty),
     };
@@ -292,55 +287,94 @@ bool buildAggressiveBookFillPlan(const EngineState& engine,
   return out.filledQtyE8 > 0 || marketOrder;
 }
 
-PassiveQueueTradeFill consumePassiveQueueForTrade(EngineState& engine,
-                                                  OpenOrder& order,
-                                                  const cxet::composite::Trade& trade) noexcept {
-  PassiveQueueTradeFill out{};
-  if (!order.state.valid || !order.active || order.state.orderType != canon::OrderType::Limit) return out;
-  if (!order.queueInitialized) {
-    order.queueAheadQtyRaw = 0;
-    order.queueInitialized = true;
-  }
-  out.queueAheadBeforeE8 = order.queueAheadQtyRaw;
-  out.queueAheadAfterE8 = order.queueAheadQtyRaw;
-  if (trade.qty().raw <= 0 || !makerTradeCrossesOrder(engine, order, trade)) return out;
-  if (trade.qty().raw <= order.queueAheadQtyRaw) {
-    order.queueAheadQtyRaw -= trade.qty().raw;
-    out.queueAheadAfterE8 = order.queueAheadQtyRaw;
-    return out;
-  }
-  out.requestedQtyE8 = trade.qty().raw - order.queueAheadQtyRaw;
-  order.queueAheadQtyRaw = 0;
-  out.queueAheadAfterE8 = 0;
-  return out;
+ExecutionLiquidity& depthLiquidity(EngineState& engine) noexcept {
+  return engine.executionDepthProvider ? engine.executionDepthProvider->liquidity()
+                                       : engine.executionLiquidity;
 }
 
-PassiveBboTouchFill consumePassiveQueueForBboTouch(EngineState& engine,
-                                                   OpenOrder& order,
-                                                   const cxet::composite::BookTicker& top,
-                                                   std::int64_t tsNs) noexcept {
-  PassiveBboTouchFill out{};
-  if (!order.state.valid || !order.active || order.state.orderType != canon::OrderType::Limit) return out;
-  if (tsNs <= 0 || !passiveBboTouchEligible(order, tsNs)) {
-    return out;
+const ExecutionLiquidity& depthLiquidity(const EngineState& engine) noexcept {
+  return engine.executionDepthProvider ? engine.executionDepthProvider->liquidity()
+                                       : engine.executionLiquidity;
+}
+
+void tryFillOnTrade(EngineState& engine, const cxet::composite::Trade& trade,
+                    std::int64_t venueTsNs, std::int64_t depthCursorTsNs) {
+  if (engine.liquidated || engine.riskStopped || engine.simulationEvidenceFailed || trade.qty().raw <= 0) return;
+  const bool buyer = trade.initiatorSide() == cxet::composite::TradeInitiatorSide::Buyer;
+  const bool seller = trade.initiatorSide() == cxet::composite::TradeInitiatorSide::Seller;
+  if (!buyer && !seller) return;
+  const auto cursorTs = depthCursorTsNs > 0 ? depthCursorTsNs : venueTsNs;
+  const auto* book = execution_detail::executionDepthBook(engine, cursorTs);
+  std::array<OpenOrder*, kMaxOrderStates> candidates{};
+  std::size_t count = 0u;
+  for (OpenOrder& order : engine.open) {
+    if (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
+        order.sourceGeneration != engine.capturedSourceGeneration ||
+        order.executionBoundaryEpoch != engine.executionBoundaryEpoch)) continue;
+    if (!order.state.valid || !order.active || order.activeTsNs > venueTsNs ||
+        order.state.orderType != canon::OrderType::Limit ||
+        !makerTradeCrossesOrder(engine, order, trade)) continue;
+    initializePassiveQueue(order, engine);
+    candidates[count++] = &order;
   }
-  if (!order.queueInitialized) {
-    order.queueAheadQtyRaw = 0;
-    order.queueInitialized = true;
+  // A recorded trade consumes depth at its price; a trade through a better
+  // level proves that level unavailable. Neither case can create a level.
+  if (book) {
+    const auto side = buyer ? trading_core::BookSide::Ask : trading_core::BookSide::Bid;
+    const auto view = trading_core::orderBook(*book);
+    const auto* levels = view.side(side);
+    for (std::uint32_t i = 0u; levels && i < levels->activeCount.raw; ++i) {
+      trading_core::LocalOrderBookLevel level{};
+      if (!view.readLevel(side, Index{i}, level)) break;
+      const bool better = buyer ? level.px.raw < trade.price().raw : level.px.raw > trade.price().raw;
+      if (!better && level.px.raw != trade.price().raw) break;
+      const auto available = depthLiquidity(engine).available(side, level.px.raw, level.qty.raw);
+      const auto consumed = better ? available : std::min(trade.qty().raw, available);
+      if (consumed > 0 && !depthLiquidity(engine).consume(side, level.px.raw, consumed)) {
+        engine.simulationEvidenceFailed = true;
+        return;
+      }
+      if (!better) break;
+    }
   }
-  std::int64_t oppositeQtyE8 = 0;
-  if (!makerBboTouchesOrder(order, top, oppositeQtyE8)) return out;
-  out.queueAheadBeforeE8 = order.queueAheadQtyRaw;
-  out.queueAheadAfterE8 = order.queueAheadQtyRaw;
-  if (oppositeQtyE8 <= order.queueAheadQtyRaw) {
-    order.queueAheadQtyRaw -= oppositeQtyE8;
-    out.queueAheadAfterE8 = order.queueAheadQtyRaw;
-    return out;
+  std::sort(candidates.begin(), candidates.begin() + count,
+      [](const OpenOrder* left, const OpenOrder* right) noexcept {
+        if (left->state.price.raw != right->state.price.raw)
+          return left->state.side.raw == Side::Buy().raw
+              ? left->state.price.raw > right->state.price.raw
+              : left->state.price.raw < right->state.price.raw;
+        if (left->activeTsNs != right->activeTsNs) return left->activeTsNs < right->activeTsNs;
+        if (left->activationSequence != right->activationSequence)
+          return left->activationSequence < right->activationSequence;
+        return left->recordIndex < right->recordIndex;
+      });
+  std::int64_t remaining = trade.qty().raw;
+  for (std::size_t i = 0u; i < count && remaining > 0; ++i) {
+    OpenOrder& order = *candidates[i];
+    if (!order.state.valid) continue;
+    const std::int64_t before = order.queueAheadQtyRaw;
+    const std::int64_t externalConsumed = std::min(before, remaining);
+    remaining -= externalConsumed;
+    const std::int64_t after = before - externalConsumed;
+    for (OpenOrder& peer : engine.open) {
+      if (peer.state.valid && peer.active && peer.queueInitialized &&
+          peer.state.orderType == canon::OrderType::Limit &&
+          peer.state.side.raw == order.state.side.raw && peer.state.price.raw == order.state.price.raw &&
+          peer.sourceGeneration == order.sourceGeneration &&
+          peer.executionBoundaryEpoch == order.executionBoundaryEpoch)
+        peer.queueAheadQtyRaw = after;
+    }
+    if (remaining <= 0) break;
+    FillExecutionMetadata metadata{};
+    metadata.depthCursorTsNs = cursorTs;
+    metadata.fillReason = kFillReasonPassiveQueue;
+    metadata.queueAheadBeforeE8 = before;
+    metadata.queueAheadAfterE8 = after;
+    const std::size_t fillsBefore = engine.fills.size();
+    (void)fillOrderQty(engine, order, order.state.price.raw, remaining, venueTsNs, false, metadata);
+    if (engine.fills.size() > fillsBefore) remaining -= engine.fills[fillsBefore].qtyE8;
+    if (engine.simulationEvidenceFailed) return;
   }
-  out.requestedQtyE8 = oppositeQtyE8 - order.queueAheadQtyRaw;
-  order.queueAheadQtyRaw = 0;
-  out.queueAheadAfterE8 = 0;
-  return out;
 }
 
 }  // namespace hft_backtest::detail

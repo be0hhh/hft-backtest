@@ -47,17 +47,6 @@ struct MetadataCache final {
                                 : StrategyParamKind::Text;
 }
 
-[[nodiscard]] const generated::GeneratedStrategyTemplate* templateForStrategy(
-    std::string_view strategy) noexcept {
-  for (const auto& candidate : generated::kStrategyTemplates) {
-    if (candidate.strategyType != nullptr &&
-        strategy == std::string_view{candidate.strategyType}) {
-      return &candidate;
-    }
-  }
-  return nullptr;
-}
-
 void applyTemplate(const generated::GeneratedStrategyTemplate& source,
                    StrategyMetadata& destination) noexcept {
   if (source.paramCount > kStrategyMetadataMaxParams ||
@@ -112,31 +101,26 @@ void applyTemplate(const generated::GeneratedStrategyTemplate& source,
 
 [[nodiscard]] MetadataCache buildMetadataCache() noexcept {
   MetadataCache cache{};
-  const std::size_t count = trading_core::strategyDescriptorCount();
-  if (count > cache.strategies.size()) failClosedMetadataContract();
-
-  for (std::size_t i = 0u; i < count; ++i) {
+  // Generated templates contain only the explicitly supported replay adapters.
+  // Registered trading strategies without an adapter are absent, including
+  // Delivery and Finam until their native execution contracts can be replayed.
+  for (const auto& source : generated::kStrategyTemplates) {
+    if (source.strategyType == nullptr) failClosedMetadataContract();
     const trading_core::StrategyDescriptor* descriptor =
-        trading_core::strategyDescriptorAt(i);
+        trading_core::findStrategyDescriptor(source.strategyType);
     if (descriptor == nullptr || descriptor->name == nullptr ||
-        descriptor->name[0] == '\0') {
+        descriptor->name[0] == '\0' ||
+        !trading_core::strategyDescriptorContractValid(*descriptor) ||
+        cache.count == cache.strategies.size()) {
       failClosedMetadataContract();
     }
-    if (!trading_core::strategyDescriptorContractValid(*descriptor)) {
-      failClosedMetadataContract();
-    }
-    // Backtest metadata describes executable order strategies. A signal-only
-    // descriptor has no order cycle or backtest profile template.
-    if (descriptor->evaluateSignalPpm != nullptr) continue;
 
     StrategyMetadata& metadata = cache.strategies[cache.count++];
     metadata.id = descriptor->name;
     metadata.displayNameRu = descriptor->name;
     metadata.minSessionCount = 1u;
     metadata.maxSessionCount = 1u;
-    const auto* source = templateForStrategy(descriptor->name);
-    if (source == nullptr) failClosedMetadataContract();
-    applyTemplate(*source, metadata);
+    applyTemplate(source, metadata);
   }
   return cache;
 }

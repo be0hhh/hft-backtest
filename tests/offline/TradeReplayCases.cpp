@@ -16,7 +16,7 @@
 #include "Input/Binary/BinaryCorpusLoader.hpp"
 #include "Input/Binary/BinaryCorpusStream.hpp"
 #include "Run/BacktestUniverse.hpp"
-#include "strategy/hft-trader/SpreadMaker1and2/Descriptor.hpp"
+#include "hft_backtest/StrategyMetadata.hpp"
 #include "hftrec/CorpusContract/BinaryMarketCorpusReader.hpp"
 #include "hftrec/CorpusContract/BinaryMarketCorpusWriter.hpp"
 
@@ -204,113 +204,42 @@ struct BinaryTradeFixture {
   }
 };
 
-struct UniverseAuditFixture {
-  std::filesystem::path root=std::filesystem::current_path()/
-      ("backtest-universe-audit-"+std::to_string(::getpid())+"-"+
-       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-  explicit UniverseAuditFixture(bool changeQuote,bool splitVenues=false) {
-    namespace corpus=hftrec::corpus;
-    std::array<corpus::BinaryMarketSource,2u> sources{};
-    for(std::size_t i=0u;i<sources.size();++i) {
-      auto& source=sources[i];source.sourceId=i+1u;source.canonicalSymbolId=i+7u;
-      source.initialSourceGeneration=11u;source.venueId=(changeQuote || splitVenues) && i?detail::exchangeFromText("bybit").raw:1u;source.marketRaw=2u;
-      source.marketKindRaw=1u;source.assetDomainRaw=1u;
-      source.economicBaseAssetId=i+1u;source.quoteAssetId=2u;
-      source.priceScale=source.quantityScale=8u;source.tickSizeRaw=source.stepSizeRaw=1;
-      source.canonicalStepSizeRaw=source.executionQuantityStepRaw=1;
-      source.quantityConversion.canonicalBaseMultiplier=source.quantityConversion.nativeBaseMultiplier=1u;
-      source.quantityConversion.kinds[0]=corpus::BinaryMarketQuantityKind::CanonicalBase;
-      source.directoryFlags=corpus::BinaryMarketDirectoryBookTicker|corpus::BinaryMarketDirectoryTickSize;
-      source.instrumentMetadataFlags=corpus::BinaryMarketInstrumentStepSize|
-          corpus::BinaryMarketInstrumentCanonicalStepSize|corpus::BinaryMarketInstrumentExecutionQuantityStep;
-      source.configuredChannelMask=source.availableChannelMask=source.traderReplayChannelMask=1u;
-      source.compatibility[0]=corpus::BinaryMarketCompatibility::ExactTraderReplay;
-      const auto text=[](auto& dst,std::string_view value) {std::copy(value.begin(),value.end(),dst.begin());};
-      text(source.venue,(changeQuote || splitVenues) && i?"bybit":"binance");source.venueBytes=(changeQuote || splitVenues) && i?5u:7u;text(source.market,"spot");source.marketBytes=4u;
-      text(source.canonicalSymbol,i?"ETH_USDT":"BTC_USDT");source.canonicalSymbolBytes=8u;
-      text(source.nativeSymbol,i?"ETHUSDT":"BTCUSDT");source.nativeSymbolBytes=7u;
-    }
-    corpus::BinaryMarketWriterConfig cfg{};cfg.root=root;cfg.sources=sources;cfg.producerEpoch=13u;
-    cfg.maximumBytes=128u*1024u;cfg.segmentTargetBytes=4096u;cfg.targetDurationNs=10'000u;
-    cfg.startedReceiveNs=cfg.startedMonotonicNs=100u;cfg.ringCapacity=2u;cfg.shardCount=1u;
-    corpus::BinaryMarketCorpusWriter writer;CXET_CHECK(writer.start(cfg)==hftrec::Status::Ok);
-    std::uint64_t sequence=1u;
-    if(changeQuote) {
-      corpus::BinaryMarketRecord row{};auto& h=row.header;
-      h.sourceId=2u;h.sourceGeneration=12u;h.sessionEpoch=17u;h.eventSequence=h.shardSequence=sequence++;
-      h.receiveRealtimeNs=h.receiveMonotonicNs=200u;h.channel=corpus::BinaryMarketChannel::SourceLifecycle;
-      h.flags=corpus::BinaryMarketRecordSourceLifecycle|corpus::BinaryMarketRecordTraderReplayCompatible|corpus::BinaryMarketRecordExchangeTimestampMissing;
-      h.payloadBytes=sizeof(corpus::BinaryMarketSourceLifecyclePayload);
-      auto& life=*corpus::binaryMarketPayload<corpus::BinaryMarketSourceLifecyclePayload>(&row);
-      life.source=sources[1];life.source.quoteAssetId=3u;life.source.initialSourceGeneration=12u;
-      life.directoryRevision=life.requestSequence=1u;life.previousSourceGeneration=11u;
-      life.channelMaskBefore=life.channelMaskAfter=1u;life.kind=corpus::BinaryMarketSourceLifecycleKind::DirectoryChanged;
-      life.affectedChannel=1u;CXET_CHECK(writer.append(row)==hftrec::Status::Ok);
-    }
-    for(std::size_t i=0u;i<sources.size();++i) {
-      corpus::BinaryMarketRecord row{};auto& h=row.header;
-      h.sourceId=i+1u;h.sourceGeneration=changeQuote && i?12u:11u;h.sessionEpoch=17u;
-      h.eventSequence=h.shardSequence=sequence++;h.frameSequence=i+1u;
-      h.receiveRealtimeNs=h.receiveMonotonicNs=400u+i;h.exchangeTimestampNs=399u+i;
-      h.flags=corpus::BinaryMarketRecordTraderReplayCompatible;h.payloadBytes=sizeof(corpus::BinaryMarketBookTickerPayload);
-      h.sourceFlags=corpus::BinaryMarketSourceBookTickerBidPresent|corpus::BinaryMarketSourceBookTickerAskPresent;
-      *corpus::binaryMarketPayload<corpus::BinaryMarketBookTickerPayload>(&row)={100'000'000,100'000'000,101'000'000,100'000'000};
-      CXET_CHECK(writer.append(row)==hftrec::Status::Ok);
-    }
-    CXET_CHECK(writer.finalize(corpus::BinaryMarketStopReason::Requested,10'000)==hftrec::Status::Ok);
-    std::ofstream config(root/"strategy.ini");
-    config<<"[strategy]\ntype=spread_maker1and2\ndistance_bps=10\ntrigger_bps=10\norder_qty=0.00000001\nrefresh_ms=1\n"
-          "[venue.binance_spot]\nsymbols="<<((changeQuote || splitVenues)?"BTC_USDT":"BTC_USDT,ETH_USDT")<<"\nrate_limits_enabled=false\n";
-    if(changeQuote || splitVenues) config<<"[venue.bybit_spot]\nsymbols=ETH_USDT\nrate_limits_enabled=false\n";
-  }
-  ~UniverseAuditFixture(){std::error_code error;std::filesystem::remove_all(root,error);}
-  hft_backtest::BacktestRunResult run(bool enableVenue=false,bool globalEnabled=true) const {
-    hft_backtest::BacktestRunRequest request{};request.corpusPath=root;request.configPath=root/"strategy.ini";
-    request.corpusBeginReceiveNs=300;request.corpusEndReceiveNs=10'000;request.writeArtifacts=true;
-    request.outputPath=root/"result";request.initialBalanceE8=100'000'000;
-    request.rateLimitsEnabled=globalEnabled;request.strictRateLimitRejects=true;
-    if(enableVenue) {
-      hft_backtest::BacktestRateLimitSchedule policy{};policy.exchange="binance";policy.market="spot";
-      hft_backtest::BacktestQuotaBucketConfig bucket{};bucket.kind=trading_core::RateLimitBucketKind::Orders;
-      bucket.limit=1000;bucket.intervalNs=1'000'000;policy.buckets.push_back(bucket);
-      for(const auto kind:{trading_core::RateLimitActionKind::LimitOrder,trading_core::RateLimitActionKind::CancelOrder}) {
-        trading_core::RateLimitActionConfig action{};action.action=kind;action.costCount=1u;
-        action.costs[0]={bucket.kind,1};policy.actions.push_back(action);
-      }
-      request.rateLimitSchedules.push_back(std::move(policy));
-    }
-    return hft_backtest::runBacktest(request);
-  }
-};
+// Topology fixture only; no strategy callbacks or executable replay adapter.
+trading_core::StrategyDescriptor singleSourceTopology() {
+  trading_core::StrategyDescriptor descriptor{};
+  descriptor.minLegs = descriptor.maxLegs = 1u;
+  descriptor.domainMask = trading_core::StrategyDomainMask::All;
+  descriptor.universeTopology = trading_core::StrategyUniverseTopology::SingleSource;
+  return descriptor;
+}
 
 const cxet::testing::Case cases[]{
+    cxet::testing::Case{"unsupported_replay_catalogue_is_empty_and_selection_refuses", +[] {
+      CXET_CHECK(hft_backtest::strategyMetadataCount() == 0u);
+      CXET_CHECK(hft_backtest::strategyMetadataAt(0u) == nullptr);
+      BinaryTradeFixture fixture(2u, 199u, 7u);
+      for (const auto name : {"delivery_sum_signal", "finam_api_probe", "unknown_strategy"}) {
+        CXET_CHECK(hft_backtest::findStrategyMetadata(name) == nullptr);
+        const auto path = fixture.root / "unsupported.ini";
+        {
+          std::ofstream config(path);
+          config << "[strategy]\ntype=" << name
+                 << "\n[venue.binance_spot]\nsymbols=BTC_USDT\nrate_limits_enabled=false\n";
+        }
+        hft_backtest::BacktestRunRequest request{};
+        request.configPath = path; request.corpusPath = fixture.root;
+        request.corpusBeginReceiveNs = 100; request.corpusEndReceiveNs = 10'000;
+        request.writeArtifacts = false;
+        const auto result = hft_backtest::runBacktest(request);
+        CXET_CHECK(result.status == hft_backtest::Status::Unsupported);
+        CXET_CHECK(result.error.find("replay adapter/profile") != std::string::npos);
+        CXET_CHECK(result.orders == 0u && result.fills == 0u && result.inputCoverage.strategyCycles == 0u);
+      }
+    }},
     cxet::testing::Case{"backtest_api_guard_rejects_old_result_layout",+[] {
       CXET_CHECK(hft_backtest::kBacktestApiVersion==7u);
       CXET_CHECK(hft_backtest::hft_backtest_api_version()==hft_backtest::kBacktestApiVersion);
       CXET_CHECK(hft_backtest::hft_backtest_api_version()!=6u);
-    }},
-    cxet::testing::Case{"universe_hydrated_quote_currency_refuses_before_accounting", +[] {
-      UniverseAuditFixture fixture(true);const auto result=fixture.run();
-      CXET_CHECK(result.status==hft_backtest::Status::ConfigMismatch);
-      CXET_CHECK(result.error.find("quote")!=std::string::npos);
-      CXET_CHECK(result.legs.empty() && result.virtualAccounts==0u && result.universeSources==0u && result.orders==0u);
-    }},
-    cxet::testing::Case{"result_effective_disabled_quotas_do_not_claim_strict_enforcement", +[] {
-      for(const auto mode:{0u,1u,2u,3u}) {
-        const bool enabled=mode==1u || mode==2u;
-        UniverseAuditFixture fixture(false,mode==2u);const auto result=fixture.run(mode!=0u,mode!=3u);
-        CXET_CHECK(result.status==hft_backtest::Status::Ok);
-        CXET_CHECK(result.rateLimitsEnabled==enabled && result.strictRateLimitRejects==enabled);
-        CXET_CHECK(result.rateLimitSchedules.size()==(mode==2u?2u:1u));
-        CXET_CHECK(result.rateLimitSchedules[0].enabled==enabled);
-        if(mode==2u) CXET_CHECK(!result.rateLimitSchedules[1].enabled);
-        std::ifstream input(fixture.root/"result"/"manifest.json");
-        const std::string manifest((std::istreambuf_iterator<char>(input)),{});
-        CXET_CHECK(manifest.find("\"venues\"")!=std::string::npos);
-        CXET_CHECK(manifest.find(enabled?"\"enabled\": true":"\"enabled\": false")!=std::string::npos);
-        CXET_CHECK(manifest.find(enabled?"\"strict_rejects\": true":"\"strict_rejects\": false")!=std::string::npos);
-        if(mode==2u) CXET_CHECK(manifest.find("\"market\": \"spot\", \"enabled\": false, \"strict_rejects\": false")!=std::string::npos);
-      }
     }},
 
     cxet::testing::Case{"universe_refuses_mixed_or_unknown_quote_currency_before_strategy", +[] {
@@ -321,13 +250,13 @@ const cxet::testing::Case cases[]{
       }
       hft_backtest::BacktestStrategyConfig config;
       std::vector<hft_backtest::run_detail::UniverseContextSelection> contexts;std::string error;
-      CXET_CHECK(!hft_backtest::run_detail::discoverUniverseContexts(trading_core::kSpreadMaker1And2StrategyDescriptor,
+      CXET_CHECK(!hft_backtest::run_detail::discoverUniverseContexts(singleSourceTopology(),
           config,sources,contexts,error) && contexts.empty() && !error.empty());
       sources[1].quoteAssetId=0u;error.clear();
-      CXET_CHECK(!hft_backtest::run_detail::discoverUniverseContexts(trading_core::kSpreadMaker1And2StrategyDescriptor,
+      CXET_CHECK(!hft_backtest::run_detail::discoverUniverseContexts(singleSourceTopology(),
           config,sources,contexts,error));
       sources[1].quoteAssetId=sources[0].quoteAssetId;error.clear();
-      CXET_CHECK(hft_backtest::run_detail::discoverUniverseContexts(trading_core::kSpreadMaker1And2StrategyDescriptor,
+      CXET_CHECK(hft_backtest::run_detail::discoverUniverseContexts(singleSourceTopology(),
           config,sources,contexts,error) && contexts.size()==2u);
     }},
     cxet::testing::Case{"native_channel_close_preserves_membership_and_fences_execution", +[] {
@@ -535,7 +464,7 @@ const cxet::testing::Case cases[]{
       const auto configPath = fixture.root / "strategy.ini";
       {
         std::ofstream config(configPath);
-        config << "[strategy]\ntype=spread_maker1and2\n"
+        config << "[strategy]\ntype=accounting_fixture\n"
             "[venue.binance_spot]\nsymbols=BTC_USDT\nrate_limits_enabled=false\ninitial_balance_usdt=12.5\n";
       }
       hft_backtest::BacktestStrategyConfig config; std::string error;
@@ -627,7 +556,7 @@ const cxet::testing::Case cases[]{
       std::vector<hft_backtest::run_detail::UniverseContextSelection> contexts;
       std::string error;
       CXET_CHECK(hft_backtest::run_detail::discoverUniverseContexts(
-          trading_core::kSpreadMaker1And2StrategyDescriptor, config, sources, contexts, error));
+          singleSourceTopology(), config, sources, contexts, error));
       CXET_CHECK(contexts.size() == 60u);
       for (std::size_t i = 0; i < contexts.size(); ++i)
         CXET_CHECK(contexts[i].sourceIndices.size() == 1u && contexts[i].sourceIndices[0] == i);
@@ -641,7 +570,7 @@ const cxet::testing::Case cases[]{
       };
       const std::array catalog{row("AAA_USDT",2u),row("NEW_USDT",2u),row("OTHER_USDC",3u)};
       hft_backtest::BacktestStrategyConfig config;
-      config.strategyType="SpreadMaker1And2";
+      config.strategyType="topology_fixture";
       hft_backtest::BacktestStrategyVenueConfig venue;
       venue.name="Binance_Futures";venue.exchange.raw=1u;venue.market.raw=1u;
       venue.initialBalanceE8=123;venue.hasInitialBalance=true;
@@ -650,7 +579,7 @@ const cxet::testing::Case cases[]{
       CXET_CHECK(hft_backtest::run_detail::materializeUniverseSymbolsFromCorpus(config,catalog,error));
       CXET_CHECK(config.venues[0].symbols.size()==2u);
       CXET_CHECK(std::string_view(config.venues[0].symbols[1].data)=="NEW_USDT");
-      CXET_CHECK(config.venues[0].initialBalanceE8==123 && config.strategyType=="SpreadMaker1And2");
+      CXET_CHECK(config.venues[0].initialBalanceE8==123 && config.strategyType=="topology_fixture");
     }},
     cxet::testing::Case{"whole_market_ambiguous_quote_refuses_without_partial_config_change", +[] {
       std::array<hftrec::corpus::BinaryMarketSource,2u> catalog{};

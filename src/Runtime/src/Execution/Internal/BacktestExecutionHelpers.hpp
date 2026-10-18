@@ -84,8 +84,6 @@ bool rejectOrder(EngineState& engine, OpenOrder& order, std::int64_t tsNs);
 void terminalizeUnavailableLiquidity(EngineState& engine, OpenOrder& order, std::int64_t tsNs);
 std::int64_t triggeredStopLimitBboPrice(const OpenOrder& order,
                                         const cxet::composite::BookTicker& top) noexcept;
-std::int64_t triggeredStopLimitBboQty(const OpenOrder& order,
-                                      const cxet::composite::BookTicker& top) noexcept;
 bool triggeredStopLimitBboCapOk(const OpenOrder& order, std::int64_t topPrice) noexcept;
 void fillTriggeredStopLimitFromBbo(EngineState& engine,
                                    OpenOrder& order,
@@ -107,28 +105,9 @@ const trading_core::LocalOrderBookState* executionDepthBook(EngineState& engine,
 bool venueOrderBookExecutionConfigured(const EngineState& engine) noexcept;
 bool needsTopExecutionBook(const OpenOrder& order, std::int64_t bid, std::int64_t ask) noexcept;
 bool hasTopExecutionCandidate(const EngineState& engine, std::int64_t bid, std::int64_t ask) noexcept;
-bool bboOverlayCandidate(const cxet::composite::BookTicker& top) noexcept;
-trading_core::AlgoFlag effectiveBidQtyKnown(
-    const trading_core::StrategyMarketSnapshot& snapshot,
-    const cxet::composite::BookTicker& top) noexcept;
-trading_core::AlgoFlag effectiveAskQtyKnown(
-    const trading_core::StrategyMarketSnapshot& snapshot,
-    const cxet::composite::BookTicker& top) noexcept;
-const trading_core::LocalOrderBookState& overlayedTakerExecutionBook(
-    const trading_core::StrategyMarketSnapshot& snapshot,
-    const cxet::composite::BookTicker& top,
-    const trading_core::LocalOrderBookState& rawBook,
-    trading_core::LocalOrderBookState& scratch) noexcept;
 bool marketDepthFreshEnough(const trading_core::LocalOrderBookState& book,
                             const cxet::composite::BookTicker& top) noexcept;
-trading_core::LocalOrderBookState& topExecutionOverlayScratch(
-    EngineState& engine,
-    const trading_core::LocalOrderBookState& source);
 AggressiveFillPlan& topExecutionFillPlanScratch(EngineState& engine);
-bool marketDepthPlanUsable(const OpenOrder& order,
-                           const AggressiveFillPlan& plan,
-                           const trading_core::LocalOrderBookState& book,
-                           const cxet::composite::BookTicker& top) noexcept;
 void activateOrder(EngineState& engine, OpenOrder& order, std::int64_t activeTsNs);
 
 }  // namespace hft_backtest::detail::execution_detail

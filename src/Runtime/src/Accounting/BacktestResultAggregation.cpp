@@ -89,21 +89,29 @@ void addDepthSummary(BacktestDepthExecutionSummary& out,
 void appendDepthWarningForEngine(BacktestRunResult& result,
                                  const detail::EngineState& engine,
                                  std::size_t legIndex) noexcept {
-  if (engine.depthExecutionMode != BacktestDepthExecutionMode::BboFallback) return;
+  if (engine.depthExecutionMode != BacktestDepthExecutionMode::BboFallback &&
+      engine.depthFallbackFills == 0u) return;
   try {
-    std::string warning{};
+    std::string prefix{};
     if (legIndex != static_cast<std::size_t>(-1)) {
-      warning += "leg ";
-      warning += std::to_string(legIndex);
-      warning += ": ";
+      prefix += "leg ";
+      prefix += std::to_string(legIndex);
+      prefix += ": ";
     }
-    warning += "declared execution depth failed; continuing with BBO fills";
-    if (!engine.depthFallbackReason.empty()) {
-      warning += " (reason=";
-      warning += engine.depthFallbackReason;
-      warning += ")";
+    if (engine.depthExecutionMode == BacktestDepthExecutionMode::BboFallback) {
+      std::string warning = prefix + "declared execution depth failed; continuing with BBO fills";
+      if (!engine.depthFallbackReason.empty()) {
+        warning += " (reason=";
+        warning += engine.depthFallbackReason;
+        warning += ")";
+      }
+      if (!warningAlreadyPresent(result, warning)) result.warnings.push_back(std::move(warning));
     }
-    if (!warningAlreadyPresent(result, warning)) result.warnings.push_back(std::move(warning));
+    if (engine.depthFallbackFills != 0u) {
+      std::string warning = prefix +
+          "optimistic BBO execution used: full order fills at best price without displayed quantity limits";
+      if (!warningAlreadyPresent(result, warning)) result.warnings.push_back(std::move(warning));
+    }
   } catch (...) {
   }
 }

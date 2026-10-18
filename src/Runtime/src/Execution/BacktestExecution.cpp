@@ -347,8 +347,10 @@ bool submitCancelIntent(EngineState& engine,
   slot.createdTsNs = tsNs;
   slot.activeTsNs = activeTs;
   slot.filledQtyRaw = 0;
+  slot.filledNotionalRaw = 0;
+  slot.activationSequence = 0u;
   slot.queueAheadQtyRaw = 0;
-  slot.lastAggressiveBookTsNs = 0;
+  slot.aggressiveEvaluated = false;
   slot.active = false;
   slot.reduceOnly = reduceOnly;
   slot.postOnly = postOnly;

@@ -23,6 +23,19 @@ std::int64_t midpointE8(std::int64_t high, std::int64_t low) noexcept {
 
 }  // namespace
 
+bool refreshReplayDepthProjection(trading_core::LocalOrderBookState& out,
+    const cxet::api::market::PublicMarketOrderBookView& source, const Symbol& symbol) noexcept {
+  const bool acceptedEmpty = source.ready && out.hasStorage() &&
+      source.bidCount == 0u && source.askCount == 0u &&
+      source.bidOrigins.empty() && source.askOrigins.empty() &&
+      source.feedCoverage.size() <= out.coverageCapacity();
+  if (trading_core::refreshAuthoritativeOrderBook(out, source, symbol)) return true;
+  // The canonical projector returns initialized, not application success.
+  // All empty-input preconditions must hold and the projection must be cleared.
+  return acceptedEmpty && out.bids.storedCount.raw == 0u && out.asks.storedCount.raw == 0u &&
+      out.ts.raw == source.lastEventTs.raw;
+}
+
 bool ReplayDepthBook::prepare() noexcept {
   if (books_.ready()) return true;
   const std::array<std::uint32_t, 1u> capacities{

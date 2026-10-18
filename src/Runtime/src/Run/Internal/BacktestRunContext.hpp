@@ -1,9 +1,10 @@
 #pragma once
 
+#include "capital/Risk/PortfolioRisk.hpp"
+#include "capital/AccountState/AccountState.hpp"
 #include "../../Engine/BacktestEngine.hpp"
 #include "../../Preparation/BacktestPrepared.hpp"
 #include "../../Strategy/BacktestStrategyRuntime.hpp"
-#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
 
 #include <array>
 #include <memory>
@@ -48,9 +49,9 @@ struct BacktestRunContext {
   const std::vector<detail::TimelineEvent>& timeline;
   std::int64_t& replayStartTsNs;
   std::int64_t& greatestProcessedTsNs;
-  std::array<trading_core::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs>& riskAccounts;
+  std::array<capital::accounting::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs>& riskAccounts;
   const std::size_t& riskAccountCount;
-  trading_core::PortfolioRiskState& traderRiskState;
+  capital::risk::PortfolioRiskState& traderRiskState;
   bool& traderRiskCloseProblem;
   bool& legLiquidationProblem;
 };

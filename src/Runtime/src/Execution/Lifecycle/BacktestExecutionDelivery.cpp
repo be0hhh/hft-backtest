@@ -38,7 +38,8 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
   event.orderType = order.state.orderType;
   event.orderStatus = finalFill ? canon::OrderStatus::Closed : canon::OrderStatus::PartiallyFilled;
   event.price.raw = priceE8;
-  event.avgPrice.raw = priceE8;
+  event.avgPrice.raw = cumulativeQtyE8 > 0 && order.filledNotionalRaw > 0
+      ? static_cast<std::int64_t>(order.filledNotionalRaw / cumulativeQtyE8) : priceE8;
   event.lastPrice.raw = priceE8;
   event.qty = order.state.qty;
   event.filledQty.raw = cumulativeQtyE8;
@@ -152,6 +153,10 @@ cxet::composite::UserDataEvent makeCanceledOrderEvent(EngineState& engine,
   event.price = order.state.price;
   event.qty = order.state.qty;
   event.filledQty.raw = order.filledQtyRaw;
+  if (order.filledQtyRaw > 0) {
+    event.avgPrice.raw = static_cast<std::int64_t>(order.filledNotionalRaw / order.filledQtyRaw);
+    cxet::composite::markUserDataFieldPresent(event, cxet::composite::UserDataField::AvgPrice);
+  }
   event.lastFilledQty.raw = 0;
   event.eventTime.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   event.updateTime = event.eventTime;

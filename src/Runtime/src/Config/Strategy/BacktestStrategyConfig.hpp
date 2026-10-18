@@ -1,9 +1,9 @@
 #pragma once
 
+#include "capital/Risk/PortfolioRisk.hpp"
 #include "trading_core/Strategy/Params/StrategyParams.hpp"
 #include "trading_core/Algorithm/Primitives/AlgorithmPrimitives.hpp"
 #include "hft_backtest/Backtest.hpp"
-#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
 
 #include "cxet/Canon/PositionAndExchange.hpp"
 #include "cxet/Canon/Subtypes.hpp"
@@ -96,9 +96,9 @@ makeBacktestStrategyParamContext(
       config.risk.rateLimitGuardMinRemaining};
 }
 
-[[nodiscard]] inline trading_core::PortfolioRiskConfig
+[[nodiscard]] inline capital::risk::PortfolioRiskConfig
 makeBacktestPortfolioRiskConfig(const BacktestRiskConfig& config) noexcept {
-  trading_core::PortfolioRiskConfig out{};
+  capital::risk::PortfolioRiskConfig out{};
   out.enabled = config.enabled;
   out.minEquityPctE8 = config.minEquityPctE8;
   out.minLegEquityPctE8 = config.minLegEquityPctE8;
@@ -109,10 +109,10 @@ makeBacktestPortfolioRiskConfig(const BacktestRiskConfig& config) noexcept {
   return out;
 }
 
-[[nodiscard]] inline trading_core::PortfolioRiskLegConfig
+[[nodiscard]] inline capital::risk::PortfolioRiskLegConfig
 makeBacktestPortfolioRiskLegConfig(
     const BacktestStrategyVenueConfig* venue) noexcept {
-  trading_core::PortfolioRiskLegConfig out{};
+  capital::risk::PortfolioRiskLegConfig out{};
   if (!venue) return out;
   out.minEquityPctE8 = venue->riskMinEquityPctE8;
   out.minEquityE8 = venue->riskMinEquityE8;

@@ -10,16 +10,9 @@ namespace {
 
 BacktestExcursionMetrics calculateFromPnlSeries(const std::vector<std::int64_t>& series) noexcept {
   BacktestExcursionMetrics out{};
-  bool hasPoint = false;
+  // PnL starts at zero before the first recorded observation.
   std::int64_t peak = 0;
   for (const std::int64_t pnl : series) {
-    if (!hasPoint) {
-      hasPoint = true;
-      peak = pnl;
-      out.mfeE8 = pnl > 0 ? pnl : 0;
-      out.maeE8 = pnl < 0 ? pnl : 0;
-      continue;
-    }
     if (pnl > peak) peak = pnl;
     const std::int64_t drawdown =
         peak > pnl ? trading_core::saturatingSubI64(peak, pnl) : 0;
@@ -64,16 +57,9 @@ std::vector<std::int64_t> buildPortfolioPnlSeries(const std::vector<EngineState>
 
 BacktestExcursionMetrics calculateExcursionMetrics(const EngineState& engine) noexcept {
   BacktestExcursionMetrics out{};
-  bool hasPoint = false;
+  // Include the initial zero-PnL account baseline even without an explicit row.
   std::int64_t peak = 0;
   auto observe = [&](std::int64_t pnl) noexcept {
-    if (!hasPoint) {
-      hasPoint = true;
-      peak = pnl;
-      out.mfeE8 = pnl > 0 ? pnl : 0;
-      out.maeE8 = pnl < 0 ? pnl : 0;
-      return;
-    }
     if (pnl > peak) peak = pnl;
     const std::int64_t drawdown =
         peak > pnl ? trading_core::saturatingSubI64(peak, pnl) : 0;

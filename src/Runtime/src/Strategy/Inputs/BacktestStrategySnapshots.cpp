@@ -58,13 +58,13 @@ void publishBacktestReconstructedBbo(
     trading_core::StrategyMarketSnapshot& snapshot,
     trading_core::LocalOrderBookState& orderBook,
     const trading_core::BboReconstructionState& bbo,
-    std::uint64_t receiveMonotonicNs) noexcept {
+    std::uint64_t receiveMonotonicNs, bool overlayDepth) noexcept {
   const trading_core::BboReconstructionView view = trading_core::bboReconstructionView(bbo);
   TimeNs receiveMonotonic{};
   receiveMonotonic.raw = receiveMonotonicNs;
   trading_core::copyReconstructedBboSnapshot(
       snapshot, view, receiveMonotonic);
-  overlayBacktestReconstructedBbo(snapshot, orderBook, view);
+  if (overlayDepth) overlayBacktestReconstructedBbo(snapshot, orderBook, view);
 }
 
 [[nodiscard]] bool applyCapturedBookTicker(
@@ -275,6 +275,8 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   // are market payload evidence and may be in a completely different epoch.
   const std::int64_t executionTsNs =
       event.deliveryTsNs > 0 ? event.deliveryTsNs : event.tsNs;
+  // Fill reports retain that delivery coordinate; lazy execution Depth must
+  // advance only to event.tsNs, the venue coordinate currently being replayed.
   const std::uint64_t replayReceiveMonotonicNs =
       static_cast<std::uint64_t>(
           replayReceiveMonotonic > 0 ? replayReceiveMonotonic : 0);
@@ -282,6 +284,12 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
   if (event.kind == detail::kTimelineKindDepth) {
     const detail::DepthRow& depth = session.depths[event.index];
     auto& depthBook = strategyVisible ? engine.strategyDepthBook : engine.venueDepthBook;
+    const auto& previous = depthBook.arrival();
+    const bool depthIdentityChanged = previous.producerEpoch != 0u &&
+        (previous.producerEpoch != depth.arrival.producerEpoch ||
+         previous.sourceId != depth.arrival.sourceId ||
+         previous.sourceGeneration != depth.arrival.sourceGeneration ||
+         previous.sessionEpoch != depth.arrival.sessionEpoch);
     if (!depthBook.apply(depth.levels, depth.tsNs, depth.arrival,
             depth.resetBookBeforeApply, depth.capturedSequence,
             depth.capturedPublicationSequence)) {
@@ -296,8 +304,14 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
       (void)trading_core::configureLocalOrderBookTick(orderBook, instrument.tickSizeRaw);
     }
     if (orderBook.hasStorage()) {
-      (void)trading_core::refreshAuthoritativeOrderBook(
-          orderBook, depthBook.view(), selectedSymbol);
+      if (!detail::refreshReplayDepthProjection(orderBook, depthBook.view(), selectedSymbol)) {
+        engine.depthReplayFailed = true;
+        trading_core::clearOrderBookSnapshot(snapshot);
+        return;
+      }
+    }
+    if (!strategyVisible) {
+      engine.executionLiquidity.publish(depth.levels, depth.resetBookBeforeApply || depthIdentityChanged);
     }
     trading_core::bindOrderBookSnapshot(snapshot, orderBook);
     changed = true;
@@ -311,9 +325,9 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
         reconstructionTimestampOrigin(row.arrival, row.tsNs));
     if (reconstructionApplied) {
       publishBacktestReconstructedBbo(
-          snapshot, orderBook, bbo, replayReceiveMonotonicNs);
+          snapshot, orderBook, bbo, replayReceiveMonotonicNs, strategyVisible);
     }
-    if (!strategyVisible) detail::tryFillOnTrade(engine, trade, executionTsNs);
+    if (!strategyVisible) detail::tryFillOnTrade(engine, trade, executionTsNs, event.tsNs);
     changed = true;
   } else if (event.kind == detail::kTimelineKindBookTicker) {
     const auto& row = session.bookTickers[event.index];
@@ -333,10 +347,10 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
       if (!reconstructionApplied) return;
       tradeRebasePending=false;
       publishBacktestReconstructedBbo(
-          snapshot, orderBook, bbo, replayReceiveMonotonicNs);
+          snapshot, orderBook, bbo, replayReceiveMonotonicNs, strategyVisible);
       trading_core::bindOrderBookSnapshot(snapshot, orderBook);
       if (!strategyVisible) {
-        detail::tryFillOnTop(engine, executionTsNs, true);
+        detail::tryFillOnTop(engine, executionTsNs, true, event.tsNs);
       }
       changed = true;
     }
