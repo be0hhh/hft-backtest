@@ -2,8 +2,8 @@
 #include "BacktestOrderEvidence.hpp"
 #include "../Engine/BacktestEngine.hpp"
 #include "BacktestClientOrderId.hpp"
-#include "trading_core/Strategy/Orders/OrderDecisionCursor.hpp"
-#include "trading_core/Algorithm/Math/Integer/Saturating.hpp"
+#include "trading_core/Strategy/Orders/Evidence/OrderDecisionCursor.hpp"
+#include "trading_core/Contracts/Numeric/Integer/Saturating.hpp"
 #include <algorithm>
 #include <iterator>
 #include <limits>

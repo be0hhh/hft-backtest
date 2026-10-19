@@ -9,7 +9,7 @@
 #include "Accounting/BacktestMetrics.hpp"
 #include "Strategy/Inputs/BacktestStrategyWarmup.hpp"
 #include "Strategy/Internal/BacktestStrategyRuntimeHelpers.hpp"
-#include "trading_core/Strategy/Orders/OrderDecisionCursor.hpp"
+#include "trading_core/Strategy/Orders/Evidence/OrderDecisionCursor.hpp"
 #include "Input/Binary/BinaryCorpusStream.hpp"
 #include "Input/Binary/BinaryCorpusLoader.hpp"
 #include "Strategy/Inputs/BacktestStrategyInstrument.hpp"

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "trading_core/Algorithm/Math/Integer/Saturating.hpp"
+#include "trading_core/Contracts/Numeric/Integer/Saturating.hpp"
 #include "../BacktestStrategyRuntime.hpp"
 
 #include "../../Config/BacktestRunConfig.hpp"
@@ -8,7 +8,7 @@
 #include "../Diagnostics/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
-#include "trading_core/Strategy/Orders/WarmupIntents.hpp"
+#include "trading_core/Strategy/Orders/Intent/WarmupIntents.hpp"
 #include "trading_core/Strategy/StrategyInputFreshness.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 

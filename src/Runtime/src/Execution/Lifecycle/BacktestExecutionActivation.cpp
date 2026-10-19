@@ -13,7 +13,7 @@
 
 #include "../Internal/BacktestExecutionHelpers.hpp"
 #include "../../Strategy/Inputs/BacktestStrategyWarmup.hpp"
-#include "trading_core/Strategy/Orders/OrderDecisionCursor.hpp"
+#include "trading_core/Strategy/Orders/Evidence/OrderDecisionCursor.hpp"
 
 namespace hft_backtest::detail::execution_detail {
 

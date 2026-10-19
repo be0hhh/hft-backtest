@@ -1,5 +1,5 @@
 #include "BacktestStrategyInstrument.hpp"
-#include "trading_core/Algorithm/Math/PriceQuantity/PriceNormalization.hpp"
+#include "trading_core/Contracts/Numeric/PriceQuantity/PriceNormalization.hpp"
 namespace hft_backtest {
 Status prepareBacktestStrategyInstrument(const detail::InstrumentMetadata& metadata,
     trading_core::StrategyInstrumentSpec& instrument, std::string& error) {

@@ -11,7 +11,7 @@
 #include <utility>
 
 #include "../Internal/BacktestExecutionHelpers.hpp"
-#include "trading_core/Strategy/Orders/OrderDecisionCursor.hpp"
+#include "trading_core/Strategy/Orders/Evidence/OrderDecisionCursor.hpp"
 
 namespace hft_backtest::detail::execution_detail {
 

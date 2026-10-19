@@ -1,6 +1,6 @@
 #pragma once
 
-#include "trading_core/Algorithm/Math/Integer/Saturating.hpp"
+#include "trading_core/Contracts/Numeric/Integer/Saturating.hpp"
 #include "../../Engine/BacktestEngine.hpp"
 
 #include <algorithm>

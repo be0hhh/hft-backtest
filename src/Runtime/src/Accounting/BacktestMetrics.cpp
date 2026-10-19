@@ -1,9 +1,9 @@
-#include "trading_core/Algorithm/Math/Integer/Saturating.hpp"
+#include "trading_core/Contracts/Numeric/Integer/Saturating.hpp"
 #include "BacktestMetrics.hpp"
 
 #include <algorithm>
 
-#include "trading_core/Algorithm/Math/PriceQuantity/NotionalQty.hpp"
+#include "trading_core/Contracts/Numeric/PriceQuantity/NotionalQty.hpp"
 
 namespace hft_backtest::detail {
 namespace {

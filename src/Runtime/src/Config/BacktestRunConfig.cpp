@@ -1,8 +1,8 @@
-#include "trading_core/Algorithm/Math/Integer/Saturating.hpp"
+#include "trading_core/Contracts/Numeric/Integer/Saturating.hpp"
 #include "BacktestRunConfig.hpp"
 
 #include "trading_core/Algorithm/Fees/FeePresets.hpp"
-#include "trading_core/Algorithm/Math/PriceQuantity/NotionalQty.hpp"
+#include "trading_core/Contracts/Numeric/PriceQuantity/NotionalQty.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
 #include <chrono>

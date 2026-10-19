@@ -4,7 +4,7 @@
 #include "../../Input/Session/SessionLoader.hpp"
 
 #include "trading_core/Strategy/Descriptor/StrategyDescriptor.hpp"
-#include "trading_core/Strategy/Orders/WarmupIntents.hpp"
+#include "trading_core/Strategy/Orders/Intent/WarmupIntents.hpp"
 
 #include <string>
 
