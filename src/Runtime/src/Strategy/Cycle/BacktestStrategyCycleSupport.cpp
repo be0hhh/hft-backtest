@@ -76,7 +76,6 @@ void bindBacktestStrategyStateView(
   ctx.state.positions.legs = ctx.positionStates;
   ctx.state.account.primary = ctx.accountState;
   ctx.state.account.legs = ctx.accountStates;
-  ctx.state.account.rateLimits = ctx.rateLimits;
   trading_core::bindStrategyContextStateAliases(ctx);
 }
 

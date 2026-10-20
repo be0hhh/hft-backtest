@@ -20,9 +20,10 @@ class BacktestQuota final {
   [[nodiscard]] bool configure(const BacktestRateLimitSchedule&, std::string& error);
   [[nodiscard]] trading_core::execution::PermitDecision admit(
       trading_core::RateLimitActionKind, TimeNs now) noexcept;
-  [[nodiscard]] trading_core::StrategyRateLimitBook observationBook(
+  // Replaces the active prefixes and their counts; storage beyond them is not observed.
+  void observationBook(
       trading_core::ExecutionRouteHandle, ExchangeId, canon::MarketType,
-      std::uint8_t apiSlot, TimeNs now) noexcept;
+      std::uint8_t apiSlot, TimeNs now, trading_core::StrategyRateLimitBook& out) noexcept;
   [[nodiscard]] bool configured() const noexcept { return storage_ != nullptr; }
 
  private:

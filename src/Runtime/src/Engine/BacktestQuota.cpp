@@ -165,10 +165,12 @@ PermitDecision BacktestQuota::admit(RateLimitActionKind action, TimeNs now) noex
   return {};
 }
 
-StrategyRateLimitBook BacktestQuota::observationBook(ExecutionRouteHandle route,
-    ExchangeId exchange, canon::MarketType market, std::uint8_t apiSlot, TimeNs now) noexcept {
-  StrategyRateLimitBook result{};
-  if (!storage_ || !storage_->ledger.advanceCold(now.raw)) return result;
+void BacktestQuota::observationBook(ExecutionRouteHandle route,
+    ExchangeId exchange, canon::MarketType market, std::uint8_t apiSlot, TimeNs now,
+    StrategyRateLimitBook& result) noexcept {
+  result.count = 0u;
+  result.actionCount = 0u;
+  if (!storage_ || !storage_->ledger.advanceCold(now.raw)) return;
   result.actionCount = static_cast<std::uint8_t>(storage_->actionCount);
   for (std::size_t i = 0; i < storage_->actionCount; ++i) {
     result.actions[i] = storage_->actions[i];
@@ -176,6 +178,7 @@ StrategyRateLimitBook BacktestQuota::observationBook(ExecutionRouteHandle route,
   }
   for (std::size_t d = 0; d < storage_->bucketCount; ++d) {
     auto& view = result.buckets[result.count++];
+    view = RateLimitBucketView{};
     const auto& metadata = storage_->buckets[d];
     const auto& domain = storage_->domains[d];
     view.routeHandle = route;
@@ -201,7 +204,6 @@ StrategyRateLimitBook BacktestQuota::observationBook(ExecutionRouteHandle route,
     view.remaining = view.limit - view.used;
     view.exhausted = view.remaining <= 0;
   }
-  return result;
 }
 
 }  // namespace hft_backtest::detail

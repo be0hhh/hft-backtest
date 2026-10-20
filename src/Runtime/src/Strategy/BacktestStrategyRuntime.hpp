@@ -28,6 +28,8 @@ enum class RunUntilBoundary : std::uint8_t {
 };
 
 struct SingleLegCycleScratch {
+  // Borrowed by the current cycle only; absence is represented by a null view.
+  trading_core::StrategyRateLimitBook rateLimitSnapshot{};
   trading_core::StrategyOrderEvidenceView executionView{};
   std::array<trading_core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<trading_core::CancelIntent, detail::kIntentCapacity> cancelBuf{};
@@ -42,6 +44,8 @@ struct SingleLegCycleScratch {
 };
 
 struct MultiLegCycleScratch {
+  trading_core::StrategyRateLimitBook rateLimitSnapshot{};
+  trading_core::StrategyRateLimitBook legRateLimitSnapshot{};
   std::array<trading_core::StrategyOrderEvidenceView, trading_core::kStrategyRuntimeMaxLegs> executionViews{};
   std::array<trading_core::OrderIntent, detail::kIntentCapacity> orderBuf{};
   std::array<trading_core::CancelIntent, detail::kIntentCapacity> cancelBuf{};

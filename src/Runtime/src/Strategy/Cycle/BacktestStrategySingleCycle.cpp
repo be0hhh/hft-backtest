@@ -122,11 +122,13 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
     engine.hasPendingProblem = false;
   }
   if (engine.rateLimitSnapshotRequested || ctx.hasUserEvent || ctx.hasProblemEvent) {
-    ctx.rateLimits = engine.quotaOwner().observationBook(trading_core::kDefaultExecutionRouteHandle,
+    engine.quotaOwner().observationBook(trading_core::kDefaultExecutionRouteHandle,
                                                     engine.exchange,
                                                     engine.market,
                                                     1u,
-                                                    ctx.nowMono);
+                                                    ctx.nowMono,
+                                                    scratch.rateLimitSnapshot);
+    ctx.state.account.rateLimits = &scratch.rateLimitSnapshot;
     engine.rateLimitSnapshotRequested = false;
   }
   scratch.executionView = detail::simulationOrderEvidenceView(engine);

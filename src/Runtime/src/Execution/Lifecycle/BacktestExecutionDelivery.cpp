@@ -308,12 +308,13 @@ using execution_detail::timeNsFromI64Local;
 
 void appendRateLimitUsageSnapshot(EngineState& engine, std::int64_t tsNs) {
   if (!engine.quotaOwner().configured()) return;
-  const trading_core::StrategyRateLimitBook book =
-      engine.quotaOwner().observationBook(trading_core::kDefaultExecutionRouteHandle,
+  trading_core::StrategyRateLimitBook book{};
+  engine.quotaOwner().observationBook(trading_core::kDefaultExecutionRouteHandle,
                                      engine.exchange,
                                      engine.market,
                                      1u,
-                                     timeNsFromI64Local(tsNs));
+                                     timeNsFromI64Local(tsNs),
+                                     book);
   JsonRateLimitUsagePoint best{};
   bool found = false;
   for (std::uint8_t i = 0u; i < book.count; ++i) {

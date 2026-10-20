@@ -159,23 +159,28 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
     includeRateLimits = includeRateLimits || engine.rateLimitSnapshotRequested;
   }
   if (includeRateLimits) {
-    ctx.rateLimits = trading_core::StrategyRateLimitBook{};
+    auto& rateLimits = scratch.rateLimitSnapshot;
+    rateLimits.count = 0u;
+    rateLimits.actionCount = 0u;
+    auto& legLimits = scratch.legRateLimitSnapshot;
     for (std::size_t i = 0u; i < legCount; ++i) {
-      trading_core::StrategyRateLimitBook legLimits = engines[i].quotaOwner().observationBook(
+      engines[i].quotaOwner().observationBook(
           trading_core::ExecutionRouteHandle{static_cast<std::uint32_t>(i + 1u)},
           engines[i].exchange,
           engines[i].market,
           1u,
-          ctx.nowMono);
-      for (std::uint8_t j = 0u; j < legLimits.count && ctx.rateLimits.count < ctx.rateLimits.buckets.size(); ++j) {
-        ctx.rateLimits.buckets[ctx.rateLimits.count++] = legLimits.buckets[j];
+          ctx.nowMono,
+          legLimits);
+      for (std::uint8_t j = 0u; j < legLimits.count && rateLimits.count < rateLimits.buckets.size(); ++j) {
+        rateLimits.buckets[rateLimits.count++] = legLimits.buckets[j];
       }
-      for (std::uint8_t j = 0u; j < legLimits.actionCount && ctx.rateLimits.actionCount < ctx.rateLimits.actions.size(); ++j) {
-        ctx.rateLimits.actionRoutes[ctx.rateLimits.actionCount] = legLimits.actionRoutes[j];
-        ctx.rateLimits.actions[ctx.rateLimits.actionCount++] = legLimits.actions[j];
+      for (std::uint8_t j = 0u; j < legLimits.actionCount && rateLimits.actionCount < rateLimits.actions.size(); ++j) {
+        rateLimits.actionRoutes[rateLimits.actionCount] = legLimits.actionRoutes[j];
+        rateLimits.actions[rateLimits.actionCount++] = legLimits.actions[j];
       }
       engines[i].rateLimitSnapshotRequested = false;
     }
+    ctx.state.account.rateLimits = &rateLimits;
   }
   ctx.state.orders.executionLegs = scratch.executionViews.data();
   ctx.state.orders.executionLegCount = legCount;
