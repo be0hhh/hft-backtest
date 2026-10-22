@@ -218,7 +218,7 @@ const cxet::testing::Case cases[]{
       CXET_CHECK(hft_backtest::strategyMetadataCount() == 0u);
       CXET_CHECK(hft_backtest::strategyMetadataAt(0u) == nullptr);
       BinaryTradeFixture fixture(2u, 199u, 7u);
-      for (const auto name : {"delivery_sum_signal", "finam_api_probe", "unknown_strategy"}) {
+      for (const auto name : {"delivery_sum_signal", "pair_api_probe", "unknown_strategy"}) {
         CXET_CHECK(hft_backtest::findStrategyMetadata(name) == nullptr);
         const auto path = fixture.root / "unsupported.ini";
         {
