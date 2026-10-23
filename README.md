@@ -6,6 +6,74 @@ HFT Backtest is the deterministic replay/simulation consumer of canonical
 CXET events, recorder corpus contracts and trading-core semantics. It builds
 only as part of the CXET direct-source root graph.
 
+## Autonomous research
+
+The product includes `hft-backtestd` and `hft-backtest-tui`. The daemon owns
+experiments, independent strategy-variant portfolios and persistent analytics;
+neither a terminal nor Vetron is needed while experiments run. The terminal is
+a client: closing it never stops recording or experiments.
+
+Recorder publishes compressed blocks only after a durable, producer-complete
+capture cut. Backtest normally obtains those bytes through the Recorder local
+client and decodes into bounded RAM. An evicted block is read from the same
+compressed archive. Protocol or CRC failures are errors, not fallback signals.
+Original receive monotonic/UTC stamps and event identity determine simulation
+ordering; disk speed and UI polling never supply the simulation clock.
+
+Start already-built programs explicitly (these are examples, not verification
+results):
+
+```bash
+build/hft-backtestd --root /absolute/private/research --socket /absolute/private/research/control.sock --build-id BUILD --module-id MODULE
+build/hft-backtest-tui --research-socket /absolute/private/research/control.sock --recorder-runtime /absolute/private/recorder
+```
+
+The roots must be real owner-private directories. Build/module identity must
+describe the deployed implementation; clients obtain the admitted values from
+the service catalog. Saved experiments retain their original provenance.
+Profiles and exact decimal parameter ranges expand to a complete bounded grid;
+every variant has its own portfolio and the same explicit scenario seed.
+Account currencies, fees, host budget and valuation requirements are explicit.
+Unknown instrument or collateral facts refuse new risk. Unsupported financial
+representations, including missing currency valuation, are never synthesized.
+
+Enabled experiments restore automatically. Recovery replays the saved input
+from the original start into a new immutable attempt generation, then switches
+the published result manifest after catching the prior visible cut. Existing
+generations are not appended with duplicate replay rows. Analytics include
+qualified financial rows, executions, interval returns and distributions, with
+input position and account/currency provenance. Data-only C++ modules use the
+same scheduling and storage, beginning with `midprice_return_distribution`.
+
+Capture loss stops affected experiments as incomplete. User pause retains state
+and catches up from the archive on resume; a native risk stop is terminal for
+that variant. Stop does not invent liquidation fills or discard open inventory.
+RAM, source/context, variant and disk admission remain bounded. Data is not
+automatically deleted to make a quota fit.
+
+Saved specifications consume bounded catalog metadata. Running and retained
+paused experiments reserve simulation resources; completed experiments release
+those resources while their analytics remain readable. Saved jobs from another
+build/module remain available through `Describe` and result queries, with
+execution disabled until their exact implementation is deployed.
+
+The daemon's cooperative work quantum is selected with
+`--work-items-per-step` (1–64). `--max-state-bytes`,
+`--max-resident-variants`, `--max-output-bytes` and `--max-experiments` bound
+the service. One cooperative owner advances admitted experiments. Saved profiles
+and expanded variant labels can be inspected through `Describe` (`:describe`
+in the TUI) after reconnecting. An explicit clone rebuilds the complete grid
+in a separate draft.
+
+New C++ studies register a `DataStudyDescriptor` with declared input channels,
+parameters, outputs, a state-size bound and an owned prepare/observe/destroy
+binding. They do not receive an order or execution API.
+
+Vetron's Research section uses the same producer-owned local clients. Its
+optional `--recorder-service-runtime-dir` and `--backtest-research-socket`
+arguments attach to existing services without launching them. Live trading
+authority remains separate.
+
 ## Build
 
 From this directory in the canonical CXET checkout:
@@ -57,10 +125,11 @@ secret fail explicitly before checkout and do not provide a passing CI result.
 Run and sweep artifacts contain financial/simulation results without stage,
 wall/CPU or depth-read profiling. Simulated execution latency, replay timestamps,
 fills, equity, drawdown, progress and bounded sweep worker scheduling remain.
-The public Backtest ABI is version 7; Recorder and the CLI check that numeric guard before
-invoking the runtime. New `run.result` artifacts use schema 5; `fills.csv` adds
-`context_index` after the existing columns. Recorder can display older schema 4
-financial summaries read-only.
+The public Backtest ABI is version 8; Recorder and the CLI use the same numeric
+guard. Finite `run.result` artifacts retain schema 5 with JSONL streams including
+`fills.jsonl`, `equity.jsonl` and `order_lifetimes.jsonl`. Continuous research
+uses its separately guarded, immutable attempt/segment schema. Recorder can
+display older financial summaries read-only.
 
 Binary corpus runs stream checked compressed blocks directly into bounded RAM.
 An empty corpus source selection discovers eligible contexts over the recording
@@ -76,12 +145,12 @@ exchange timestamps remain market evidence. Source lifecycle boundaries suspend
 affected contexts and preserve their orders and positions. Stream decode creates
 no unpacked file. The preparation memory guard is not an RSS or throughput proof.
 
-This adapter requires the recorded canonical executable quantity grid and
-exact recorded market-quantity conversion authority for Crypto Spot or linear
-Futures/Swaps. Unknown, inverse and traditional-finance market units,
-nonunit price-basis accounting, transaction
-actors and instrument-rule rebinding remain unsupported and fail before admission
-or at the captured rule boundary. A source pause retains venue orders; real data
+This adapter requires a recorded canonical executable quantity grid, exact
+quantity-conversion authority, typed economic identity and the descriptor's
+reference/financial inputs. Admission follows those properties rather than a
+venue-name allowlist. Unsupported inverse units, nonunit price-basis accounting,
+descriptor capabilities or rule changes fail before admission or at their
+captured boundary. A source pause retains venue orders; real data
 from a healthy sibling source can still fill its existing venue-active orders.
 
 Whole-universe replay uses the binary corpus's exact quote identity. Configured
@@ -134,7 +203,8 @@ observation. Portfolio metrics synchronize legs by timestamp using each leg's
 latest observation at that timestamp, with zero before its first observation.
 
 The bounded canonical simulation evidence owner retains at most 1024 orders per
-source, including terminals, and refuses exhaustion without eviction. These
-source changes and fixtures are static-only until the authorized owner check
-can compile past the current Core dependency blockers. They provide no CI,
-performance, runtime or live-trading proof.
+source. Continuous sessions reclaim terminal records only after final private
+delivery, actor consumption and release of every borrowed reference; exhaustion
+refuses further admission. Implementation and fixture evidence is static-only.
+Builds and tests have not been run for these changes; no performance, runtime
+or live-trading result is established.
