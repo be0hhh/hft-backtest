@@ -216,6 +216,9 @@ void appendStrategyIndicator(detail::EngineState& engine,
     engine.strategyIndicator.back() = row;
     return;
   }
+  if(engine.streamingOutput && engine.strategyIndicator.size()>=detail::kMaxOrderStates*16u) {
+    engine.simulationEvidenceFailed=true;return;
+  }
   engine.strategyIndicator.push_back(row);
 }
 
@@ -228,6 +231,9 @@ void appendStrategyRange(detail::EngineState& engine,
   row.lowRaw = trace.rangeLowRaw;
   row.midRaw = trace.rangeMidRaw;
   row.highRaw = trace.rangeHighRaw;
+  if(engine.streamingOutput && engine.strategyRange.size()>=detail::kMaxOrderStates*16u) {
+    engine.simulationEvidenceFailed=true;return;
+  }
   engine.strategyRange.push_back(row);
 }
 
@@ -235,6 +241,9 @@ void appendStrategySpread(detail::EngineState& engine,
                           std::int64_t tsNs,
                           const trading_core::StrategyDecisionTrace& trace) {
   if (trace.arbReady == 0u) return;
+  if(engine.streamingOutput && engine.strategySpread.size()>=detail::kMaxOrderStates*16u) {
+    engine.simulationEvidenceFailed=true;return;
+  }
   engine.strategySpread.push_back(makeStrategySpreadPoint(tsNs, trace));
 }
 
@@ -244,6 +253,9 @@ void recordStrategySpread(detail::EngineState& engine,
                           bool captureRows) {
   if (trace.arbReady == 0u) return;
   recordStrategySpreadDiagnostics(engine.strategySpreadDiagnostics, trace);
+  if(captureRows && engine.streamingOutput && engine.strategySpread.size()>=detail::kMaxOrderStates*16u) {
+    engine.simulationEvidenceFailed=true;return;
+  }
   if (captureRows) engine.strategySpread.push_back(makeStrategySpreadPoint(tsNs, trace));
 }
 
@@ -304,7 +316,10 @@ void recordExecutionQualityActions(
       row.legs[0].firstFillTsNs = tsNs;
       row.legs[0].lastFillTsNs = tsNs;
     }
-    engine.executionQuality.push_back(row);
+    if(engine.streamingOutput && engine.executionQuality.size()>=detail::kMaxOrderStates*16u) {
+    engine.simulationEvidenceFailed=true;return;
+  }
+  engine.executionQuality.push_back(row);
   }
 }
 

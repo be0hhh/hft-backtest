@@ -9,6 +9,17 @@
 namespace {
 using namespace hft_backtest;
 
+std::unique_ptr<detail::EngineState> fundedCashQuotaEngine() {
+  auto engine = std::make_unique<detail::EngineState>();
+  const auto nativeProduct = engine->market.raw;
+  engine->accountingModel = detail::SimulationAccountingModel::Cash;
+  BacktestRunRequest request{}; request.initialBalanceE8 = 100'000'000;
+  request.hasMakerFeeBps = request.hasTakerFeeBps = true;
+  detail::initializeAccounting(*engine, request);
+  CXET_CHECK(engine->market.raw == nativeProduct);
+  return engine;
+}
+
 BacktestRateLimitSchedule policy() {
   BacktestRateLimitSchedule result{};
   BacktestQuotaBucketConfig bucket{};
@@ -46,9 +57,12 @@ void submit(detail::EngineState& engine, std::uint64_t id, std::int64_t now) {
 }
 
 void symbolsOnOneVirtualAccountShareOnePermitLedger() {
-  auto first = std::make_unique<detail::EngineState>();
-  auto second = std::make_unique<detail::EngineState>();
+  auto first = fundedCashQuotaEngine();
+  auto second = fundedCashQuotaEngine();
   detail::SharedAccountState account;
+  account.accountingModel = detail::SimulationAccountingModel::Cash;
+  account.initialBalanceE8 = account.walletBalanceE8 = account.observedWalletBalanceE8 = 100'000'000;
+  account.observedInitialized = true;
   first->sharedAccount = second->sharedAccount = &account;
   std::string error;
   CXET_CHECK(applyRateLimitSchedule(*first, policy(), error));
@@ -60,7 +74,7 @@ void symbolsOnOneVirtualAccountShareOnePermitLedger() {
 }
 
 void unsupportedIocDoesNotBecomeRestingOrder() {
-  auto engine = std::make_unique<detail::EngineState>();
+  auto engine = fundedCashQuotaEngine();
   std::string error;
   CXET_CHECK(applyRateLimitSchedule(*engine, policy(), error));
   std::array<trading_core::OrderIntent, 1> orders{order(1u)};
@@ -79,7 +93,7 @@ void unsupportedIocDoesNotBecomeRestingOrder() {
 }
 
 void depletedQuotaRefusesOrderAndCancel() {
-  auto engine = std::make_unique<detail::EngineState>();
+  auto engine = fundedCashQuotaEngine();
   std::string error;
   CXET_CHECK(!applyRateLimitSchedule(*engine, BacktestRateLimitSchedule{}, error));
   CXET_CHECK(error.find("complete explicit buckets/actions") != std::string::npos);
@@ -103,7 +117,7 @@ void depletedQuotaRefusesOrderAndCancel() {
   CXET_CHECK(engine->rateLimitRejectedCancels == 1);
   CXET_CHECK(!engine->open[0].state.cancelPending);
   CXET_CHECK(engine->pending.size() == 1);
-  auto disabled = std::make_unique<detail::EngineState>();
+  auto disabled = fundedCashQuotaEngine();
   BacktestRateLimitSchedule off{};
   off.enabled = false;
   CXET_CHECK(applyRateLimitSchedule(*disabled, off, error));
@@ -114,7 +128,7 @@ void depletedQuotaRefusesOrderAndCancel() {
 }
 
 void fixedWindowRestoresQuotaExactlyAtBoundary() {
-  auto engine = std::make_unique<detail::EngineState>();
+  auto engine = fundedCashQuotaEngine();
   std::string error;
   CXET_CHECK(applyRateLimitSchedule(*engine, policy(), error));
   submit(*engine, 1, 100);
@@ -127,7 +141,7 @@ void fixedWindowRestoresQuotaExactlyAtBoundary() {
 }
 
 void unsupportedReplaceRefusesWholeCycleWithoutQuotaCharge() {
-  auto engine = std::make_unique<detail::EngineState>();
+  auto engine = fundedCashQuotaEngine();
   std::string error;
   CXET_CHECK(applyRateLimitSchedule(*engine, policy(), error));
   std::array<trading_core::StrategyCommandIntent, 2> commands{};

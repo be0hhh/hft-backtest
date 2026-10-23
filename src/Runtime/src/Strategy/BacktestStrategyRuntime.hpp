@@ -7,6 +7,7 @@
 #include "../Engine/BacktestEngine.hpp"
 #include "../Input/Session/SessionLoader.hpp"
 #include "Inputs/BacktestStrategyInputFreshness.hpp"
+#include "Execution/BacktestCanonicalPairAdapter.hpp"
 
 #include "trading_core/Contracts/Control/ControlState.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
@@ -16,6 +17,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace hft_backtest {
@@ -44,6 +46,8 @@ struct SingleLegCycleScratch {
 };
 
 struct MultiLegCycleScratch {
+  std::unique_ptr<BacktestCanonicalPairAdapter> canonicalPair{};
+  const BacktestCanonicalPairReferences* pairReferences{};
   trading_core::StrategyRateLimitBook rateLimitSnapshot{};
   trading_core::StrategyRateLimitBook legRateLimitSnapshot{};
   std::array<trading_core::StrategyOrderEvidenceView, trading_core::kStrategyRuntimeMaxLegs> executionViews{};

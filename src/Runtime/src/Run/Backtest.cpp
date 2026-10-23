@@ -101,7 +101,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
   if (!binaryCorpus && recorderSessions && !request.configPath.empty()) {
     result.status = Status::Unsupported;
-    result.error = "recorded market quantity authority requires the current binary corpus for executable replay";
+    result.error = "legacy recorder sessions lack typed financial accounting model and market quantity authority; use the current binary corpus for executable replay";
     return result;
   }
   const std::int64_t portfolioInitialBalance = portfolioInitialBalanceE8(request, requestedSessionCount);
@@ -155,12 +155,6 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
           request.configPath.string().c_str(), cfg, error)) {
     result.status = Status::InvalidArgument;
     result.error = error;
-    (void)writeEmptyArtifacts(artifacts);
-    return result;
-  }
-  if (findStrategyMetadata(cfg.strategyType) == nullptr) {
-    result.status = Status::Unsupported;
-    result.error = "strategy has no supported Backtest replay adapter/profile";
     (void)writeEmptyArtifacts(artifacts);
     return result;
   }

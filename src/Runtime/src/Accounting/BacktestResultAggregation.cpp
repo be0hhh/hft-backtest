@@ -163,9 +163,9 @@ BacktestLegSummary legSummaryFromEngine(const detail::SessionData& session,
   out.limitOrderLatency = engine.latency.config.limitOrder;
   out.cancelOrderLatency = engine.latency.config.cancelOrder;
   out.userDataLatency = engine.latency.config.userData;
-  out.orders = engine.orders.size();
-  out.fills = engine.fills.size();
-  out.userEvents = engine.userEvents.size();
+  out.orders = (engine.emittedOrders + engine.orders.size());
+  out.fills = (engine.emittedFills + engine.fills.size());
+  out.userEvents = (engine.emittedUserEvents + engine.userEvents.size());
   out.timerWakeEvents = engine.timerWakeEvents;
   out.reduceOnlyOrders = engine.reduceOnlyOrders;
   out.reduceOnlyFills = engine.reduceOnlyFills;
@@ -303,7 +303,7 @@ void populateResultPnl(BacktestRunResult& result, const detail::EngineState& eng
   result.riskStopTsNs = engine.riskStopTsNs;
   result.riskStopEquityE8 = engine.riskStopEquityE8;
   result.riskStopThresholdEquityE8 = engine.riskStopThresholdEquityE8;
-  result.userEvents = engine.userEvents.size();
+  result.userEvents = (engine.emittedUserEvents + engine.userEvents.size());
   result.timerWakeEvents = engine.timerWakeEvents;
   result.reduceOnlyOrders = engine.reduceOnlyOrders;
   result.reduceOnlyFills = engine.reduceOnlyFills;
@@ -359,9 +359,9 @@ void populatePortfolioResultPnl(BacktestRunResult& result,
         result.unrealizedPnlE8, detail::unrealizedPnlE8(engine));
     result.openPositionQtyE8 = trading_core::saturatingAddI64(
         result.openPositionQtyE8, engine.netQtyRaw);
-    result.orders += engine.orders.size();
-    result.fills += engine.fills.size();
-    result.userEvents += engine.userEvents.size();
+    result.orders += (engine.emittedOrders + engine.orders.size());
+    result.fills += (engine.emittedFills + engine.fills.size());
+    result.userEvents += (engine.emittedUserEvents + engine.userEvents.size());
     result.timerWakeEvents += engine.timerWakeEvents;
     result.reduceOnlyOrders += engine.reduceOnlyOrders;
     result.reduceOnlyFills += engine.reduceOnlyFills;

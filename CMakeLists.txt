@@ -63,8 +63,8 @@ file(GLOB_RECURSE HFT_BACKTEST_STRATEGY_PROFILES CONFIGURE_DEPENDS
   LIST_DIRECTORIES false
   "${CMAKE_CURRENT_LIST_DIR}/../trading-core/StrategyProfiles/*.ini")
 list(SORT HFT_BACKTEST_STRATEGY_PROFILES)
-# Replay support is selected explicitly at this boundary. Neither remaining
-# Delivery nor Finam descriptor has a supported replay adapter/profile.
+# Generate discoverable profile metadata; runtime admission validates canonical
+# descriptor capabilities against the captured inputs.
 set(HFT_BACKTEST_REQUIRED_STRATEGY_NAMES)
 set(HFT_BACKTEST_REQUIRED_STRATEGY_ARGS)
 foreach(required_strategy IN LISTS HFT_BACKTEST_REQUIRED_STRATEGY_NAMES)
@@ -111,6 +111,7 @@ add_library(hft_backtest_core STATIC
   src/Runtime/src/Replay/BacktestTimeline.cpp
   src/Runtime/src/Execution/BacktestExecution.cpp
   src/Runtime/src/Execution/BacktestOrderEvidence.cpp
+  src/Runtime/src/Execution/BacktestDerivativeCollateral.cpp
   src/Runtime/src/Execution/Model/BacktestExecutionDepth.cpp
   src/Runtime/src/Execution/Model/BacktestFillModel.cpp
   src/Runtime/src/Execution/Model/BacktestLiquidity.cpp
@@ -143,11 +144,18 @@ add_library(hft_backtest_core STATIC
   src/Runtime/src/Run/BacktestUniverse.cpp
   src/Runtime/src/Run/BacktestUniversePreparation.cpp
   src/Runtime/src/Run/BacktestUniverseMembership.cpp
+  src/Runtime/src/Simulation/SimulationSession.cpp
+  src/Runtime/src/Simulation/SimulationInput.cpp
+  src/Runtime/src/Simulation/SimulationOutput.cpp
+  src/Runtime/src/Simulation/SimulationReferences.cpp
+  src/Runtime/src/Simulation/SimulationUniverse.cpp
     src/Runtime/src/Run/BacktestFinalization.cpp
     src/Runtime/src/Run/BacktestArtifacts.cpp
     src/Runtime/src/Run/BacktestReplayRisk.cpp
     src/Runtime/src/Replay/BacktestReplaySupport.cpp
   src/Runtime/src/Strategy/Execution/BacktestStrategyIntentLowering.cpp
+  src/Runtime/src/Strategy/Execution/BacktestCanonicalPairAdapter.cpp
+  src/Runtime/src/Strategy/Execution/BacktestCanonicalPairSelection.cpp
   src/Runtime/src/Strategy/Inputs/BacktestStrategyInputFreshness.cpp
   src/Runtime/src/Strategy/BacktestStrategyRuntime.cpp
   src/Runtime/src/Strategy/Diagnostics/BacktestStrategyTrace.cpp
@@ -172,6 +180,7 @@ target_link_libraries(hft_backtest_core
     capital::finance
     trading_core::algorithm
     trading_core::execution
+    hftrec::reference_contract
   PRIVATE
     trading_core::strategy
     hftrec::corpus_contract
@@ -195,6 +204,8 @@ set_target_properties(hft_backtest_core PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
+add_subdirectory(src/Research)
+
 add_executable(hft-backtest src/Process/HftBacktest.cpp)
 target_link_libraries(hft-backtest PRIVATE hft_backtest_core)
 target_compile_features(hft-backtest PRIVATE cxx_std_23)
@@ -203,7 +214,7 @@ set_target_properties(hft-backtest PROPERTIES
 )
 
 add_custom_target(hft-backtest-product
-  DEPENDS hft-backtest)
+  DEPENDS hft-backtest hft-backtestd hft-backtest-tui)
 
 # Aggregate only the concrete production targets.
 add_custom_target(hft-backtest-all DEPENDS hft-backtest-product)

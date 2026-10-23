@@ -54,11 +54,13 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
                    const BacktestRunRequest& request,
                    const cxet::composite::UserDataEvent* userEvent) {
   if (!footprintSupported(descriptor)) return false;
+  const bool canonical = descriptor.stateDiscipline == trading_core::StrategyStateDiscipline::CanonicalEvidence;
+  if (canonical && (!scratch.canonicalPair || !scratch.canonicalPair->bound())) return false;
   if (engines.empty()) return true;
   for (const detail::EngineState& engine : engines) if (engine.simulationEvidenceFailed) return false;
   for (const detail::EngineState& engine : engines) {
-    if (engine.liquidated || engine.riskStopped ||
-        (engine.capturedSourceManaged && !engine.capturedSourceMember)) return true;
+    if (!canonical && (engine.liquidated || engine.riskStopped ||
+        (engine.capturedSourceManaged && !engine.capturedSourceMember))) return true;
   }
   const std::size_t legCount = engines.size() < trading_core::kStrategyRuntimeMaxLegs ? engines.size() : trading_core::kStrategyRuntimeMaxLegs;
   const std::uint64_t configuredTradableMask = backtestTradableLegMask(request, legCount);
@@ -74,7 +76,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   }
   for (std::size_t i = 0u; i < legCount; ++i) {
     if ((readinessMask & (std::uint64_t{1} << i)) == 0u) continue;
-    if (!backtestStrategySnapshotReady(inputPolicy, engines[i].snapshot)) return true;
+    if (!canonical && !backtestStrategySnapshotReady(inputPolicy, engines[i].snapshot)) return true;
   }
   const trading_core::ShardControlState effectiveControl =
       backtestControlWithInputFreshness(control, freshness);
@@ -200,6 +202,21 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   ctx.io.transactionOut = Span<trading_core::StrategyTransactionIntent>(
       scratch.transactionBuf.data(), footprint.maxTransactions);
   ctx.io.clear();
+  if (canonical) {
+    // Public instance APIs own actor state. All borrowed financial/execution
+    // views end with this lexical owner cycle, after dispatch commits.
+    trading_core::strategy::PairStrategyInputs pairInput{};
+    const BacktestCanonicalPairReferences emptyReferences{};
+    if (!scratch.canonicalPair->prepareCycle(ctx, engines,
+        scratch.pairReferences ? *scratch.pairReferences : emptyReferences,
+        pairInput)) return false;
+    trading_core::strategy::PairStrategyCycleInputs cyclePair{pairInput};
+    ctx.pairInputs = &cyclePair;
+    const bool complete = scratch.canonicalPair->decideAndExecute(ctx) &&
+        scratch.canonicalPair->dispatchAndCommit(ctx, engines, tsNs);
+    ctx.pairInputs = nullptr;
+    return complete;
+  }
   recordInputCoverage(engines[0]);
   trading_core::StrategyDecisionTrace trace{};
   trading_core::StrategyExecutionTraceBatch executionTrace{};

@@ -9,11 +9,11 @@
 #include "hft_backtest/Status.hpp"
 #include "hft_backtest/StrategyMetadata.hpp"
 #include "trading_core/Contracts/State/AccountState/RateLimitView.hpp"
-#include "trading_core/Execution/Permits.hpp"
+#include "trading_core/Execution/PermitTypes.hpp"
 
 namespace hft_backtest {
 
-inline constexpr std::uint32_t kBacktestApiVersion = 7u;
+inline constexpr std::uint32_t kBacktestApiVersion = 8u;
 
 extern "C" HFT_BACKTEST_API std::uint32_t hft_backtest_api_version() noexcept;
 
@@ -93,7 +93,15 @@ enum class BacktestTradeMode : std::uint8_t {
   PrimaryOnly = 1,
 };
 
+struct BacktestVirtualHostPolicy {
+  bool hasStrategyBudget{false};
+  std::int64_t strategyBudgetE8{};
+  std::string budgetCurrency{};
+  bool marginBorrowAllowed{false};
+};
+
 struct BacktestRunRequest {
+  BacktestVirtualHostPolicy virtualHost{};
   std::filesystem::path sessionPath{};
   std::vector<BacktestSessionRequest> sessions{};
   std::filesystem::path corpusPath{};

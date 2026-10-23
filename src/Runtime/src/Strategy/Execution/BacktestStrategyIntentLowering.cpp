@@ -124,7 +124,12 @@ bool footprintSupported(
     const trading_core::StrategyDescriptor& descriptor) noexcept {
   const trading_core::StrategyRuntimeFootprint& footprint =
       descriptor.footprint;
-  return descriptor.stateDiscipline == trading_core::StrategyStateDiscipline::Snapshot &&
+  const bool disciplineSupported = descriptor.stateDiscipline == trading_core::StrategyStateDiscipline::Snapshot ||
+      (descriptor.stateDiscipline == trading_core::StrategyStateDiscipline::CanonicalEvidence &&
+       descriptor.minLegs == 2u && descriptor.maxLegs == 2u && descriptor.runtimePolicy &&
+       descriptor.runtimePolicy->available && descriptor.bindExecutionCold &&
+       descriptor.commitPreparedDispatch && descriptor.retainsExecutionIntent);
+  return disciplineSupported &&
       descriptor.footprint.stateScope == trading_core::StrategyStateScope::Instrument &&
       trading_core::strategyDescriptorContractValid(descriptor) &&
       footprint.maxOrders <= detail::kIntentCapacity &&

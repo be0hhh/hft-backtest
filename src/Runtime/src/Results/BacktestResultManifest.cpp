@@ -287,14 +287,14 @@ bool writeManifest(const std::filesystem::path& path,
       << ", " << q << "rows" << q << ": " << orderLifetimeRows << "},\n";
   out << "    " << q << "fills" << q << ": {" << q << "path" << q << ": " << q << "fills.jsonl" << q
       << ", " << q << "row_schema" << q << ": " << q << kFillsRowSchema << q
-      << ", " << q << "rows" << q << ": " << engine.fills.size() << "},\n";
+      << ", " << q << "rows" << q << ": " << (engine.emittedFills+engine.fills.size()) << "},\n";
   out << "    " << q << "equity" << q << ": {" << q << "path" << q << ": " << q << "equity.jsonl" << q
       << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,gross_realized_pnl_e8,realized_pnl_e8,unrealized_pnl_e8,gross_total_pnl_e8,net_total_pnl_e8,total_pnl_e8,fees_paid_e8,wallet_balance_e8,position_qty_e8,fill_count]" << q
-      << ", " << q << "rows" << q << ": " << engine.equityPoints.size() << "},\n";
+      << ", " << q << "rows" << q << ": " << (engine.emittedEquityPoints+engine.equityPoints.size()) << "},\n";
   out << "    " << q << "risk_snapshots" << q << ": {" << q << "path" << q << ": " << q << "risk_snapshots.jsonl" << q
       << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,gross_realized_pnl_e8,realized_pnl_e8,unrealized_pnl_e8,gross_total_pnl_e8,net_total_pnl_e8,fees_paid_e8,wallet_balance_e8,position_qty_e8,entry_price_e8,bid_price_e8,ask_price_e8,fill_count,reason]" << q
-      << ", " << q << "rows" << q << ": " << engine.riskSnapshots.size() << "}";
-  if (!engine.strategyIndicator.empty()) {
+      << ", " << q << "rows" << q << ": " << (engine.emittedRiskSnapshots+engine.riskSnapshots.size()) << "}";
+  if ((engine.emittedStrategyIndicator || !engine.strategyIndicator.empty())) {
     out << ",\n";
     out << "    " << q << "strategy_indicator" << q << ": {" << q << "path" << q << ": " << q << "strategy_indicator.jsonl" << q
         << ", " << q << "profile" << q << ": " << quote(engine.strategyIndicatorProfile)
@@ -303,22 +303,22 @@ bool writeManifest(const std::filesystem::path& path,
         << ", " << q << "aux_label" << q << ": " << quote(engine.strategyIndicatorAuxLabel)
         << ", " << q << "unit" << q << ": " << quote(engine.strategyIndicatorUnit)
         << ", " << q << "row_schema" << q << ": " << q << strategyIndicatorRowSchema(engine.strategyIndicatorProfile) << q
-        << ", " << q << "rows" << q << ": " << engine.strategyIndicator.size() << "}";
+        << ", " << q << "rows" << q << ": " << (engine.emittedStrategyIndicator+engine.strategyIndicator.size()) << "}";
   }
-  if (!engine.strategyRange.empty()) {
+  if ((engine.emittedStrategyRange || !engine.strategyRange.empty())) {
     out << ",\n";
     out << "    " << q << "strategy_range" << q << ": {" << q << "path" << q << ": " << q << "strategy_range.jsonl" << q
         << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,low_raw,mid_raw,high_raw]" << q
-        << ", " << q << "rows" << q << ": " << engine.strategyRange.size() << "}";
+        << ", " << q << "rows" << q << ": " << (engine.emittedStrategyRange+engine.strategyRange.size()) << "}";
   }
-  if (!engine.strategySpread.empty()) {
+  if ((engine.emittedStrategySpread || !engine.strategySpread.empty())) {
     out << ",\n";
     out << "    " << q << "strategy_spread" << q << ": {" << q << "path" << q << ": " << q << "strategy_spread.jsonl" << q
         << ", " << q << "unit" << q << ": " << q << "bps_e8" << q
         << ", " << q << "row_schema" << q << ": " << q << "[ts_ns,spread_bps_e8,ema_bps_e8,deviation_bps_e8,cost_band_bps_e8,edge_after_cost_bps_e8,direction,decision_kind,reason_raw]" << q
-        << ", " << q << "rows" << q << ": " << engine.strategySpread.size() << "}";
+        << ", " << q << "rows" << q << ": " << (engine.emittedStrategySpread+engine.strategySpread.size()) << "}";
   }
-  if (!engine.executionQuality.empty()) {
+  if ((engine.emittedExecutionQuality || !engine.executionQuality.empty())) {
     std::size_t completedRows = 0u;
     std::size_t incompleteRows = 0u;
     std::size_t rejectedRows = 0u;
@@ -331,17 +331,17 @@ bool writeManifest(const std::filesystem::path& path,
     out << ",\n    " << q << "execution_quality" << q << ": {" << q << "path" << q
         << ": " << q << "execution_quality.jsonl" << q
         << ", " << q << "row_schema" << q << ": " << quote(kExecutionQualityRowSchema)
-        << ", " << q << "rows" << q << ": " << engine.executionQuality.size()
+        << ", " << q << "rows" << q << ": " << (engine.emittedExecutionQuality+engine.executionQuality.size())
         << ", " << q << "completed_rows" << q << ": " << completedRows
         << ", " << q << "incomplete_rows" << q << ": " << incompleteRows
         << ", " << q << "rejected_rows" << q << ": " << rejectedRows << "}";
   }
-  if (!engine.rateLimitUsage.empty()) {
+  if ((engine.emittedRateLimitUsage || !engine.rateLimitUsage.empty())) {
     out << ",\n";
     out << "    " << q << "rate_limit_usage" << q << ": {" << q << "path" << q << ": " << q << "rate_limit_usage.jsonl" << q
         << ", " << q << "unit" << q << ": " << q << "pct_e4" << q
         << ", " << q << "row_schema" << q << ": " << q << kRateLimitUsageRowSchema << q
-        << ", " << q << "rows" << q << ": " << engine.rateLimitUsage.size() << "}";
+        << ", " << q << "rows" << q << ": " << (engine.emittedRateLimitUsage+engine.rateLimitUsage.size()) << "}";
   }
   out << "\n";
   out << "  },\n";

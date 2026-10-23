@@ -281,6 +281,12 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
       static_cast<std::uint64_t>(
           replayReceiveMonotonic > 0 ? replayReceiveMonotonic : 0);
   bool changed = false;
+  bool reconstructedPublished=false;
+  const auto publishReconstructed=[&](trading_core::StrategyMarketSnapshot& target,
+      trading_core::LocalOrderBookState& book,const trading_core::BboReconstructionState& state,
+      std::uint64_t mono,bool overlay=true) {
+    publishBacktestReconstructedBbo(target,book,state,mono,overlay);reconstructedPublished=true;
+  };
   if (event.kind == detail::kTimelineKindDepth) {
     const detail::DepthRow& depth = session.depths[event.index];
     auto& depthBook = strategyVisible ? engine.strategyDepthBook : engine.venueDepthBook;
@@ -324,7 +330,7 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
         bbo, trade,
         reconstructionTimestampOrigin(row.arrival, row.tsNs));
     if (reconstructionApplied) {
-      publishBacktestReconstructedBbo(
+      publishReconstructed(
           snapshot, orderBook, bbo, replayReceiveMonotonicNs, strategyVisible);
     }
     if (!strategyVisible) detail::tryFillOnTrade(engine, trade, executionTsNs, event.tsNs);
@@ -336,7 +342,7 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
         const auto ticker=detail::toRuntime(row);
         if (!applyCapturedBookTicker(snapshot,bbo,row,event,replayReceiveMonotonicNs,ticker)) return;
         tradeRebasePending=false;
-        publishBacktestReconstructedBbo(snapshot,orderBook,bbo,replayReceiveMonotonicNs);
+        publishReconstructed(snapshot,orderBook,bbo,replayReceiveMonotonicNs);
         changed = true;
       }
     } else {
@@ -346,7 +352,7 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
           replayReceiveMonotonicNs, ticker);
       if (!reconstructionApplied) return;
       tradeRebasePending=false;
-      publishBacktestReconstructedBbo(
+      publishReconstructed(
           snapshot, orderBook, bbo, replayReceiveMonotonicNs, strategyVisible);
       trading_core::bindOrderBookSnapshot(snapshot, orderBook);
       if (!strategyVisible) {
@@ -356,7 +362,11 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     }
   }
   if (changed) {
+    if(strategyVisible && reconstructedPublished)
+      engine.reconstructedQuoteReceiveUtc=snapshot.hasReconstructedBbo.raw==trading_core::kAlgoFlagTrue.raw &&
+          event.deliveryRealtimeNs>0?static_cast<std::uint64_t>(event.deliveryRealtimeNs):0u;
     detail::recordSpotValuationMark(engine, strategyVisible);
+    detail::refreshSimulationDerivativeCollateral(engine,strategyVisible);
     if (strategyVisible) {
       recordBacktestStrategySourceDelivery(engine, event);
     }

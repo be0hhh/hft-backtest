@@ -162,8 +162,7 @@ namespace strategy_config {
       out.market.raw == canon::kMarketTypeUnknown.raw) {
     return false;
   }
-  return !(out.exchange.raw == canon::kExchangeIdOkx.raw &&
-           out.market.raw == canon::kMarketTypeSwap.raw);
+  return true;
 }
 
 [[nodiscard]] bool parseLiveProbeMode(const std::string& value,

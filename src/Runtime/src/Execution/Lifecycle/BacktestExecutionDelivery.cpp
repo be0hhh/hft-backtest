@@ -207,6 +207,9 @@ std::int64_t userEventDeliveryTs(EngineState& engine, std::int64_t eventTsNs) no
 }
 
 void pushUserEvent(EngineState& engine, cxet::composite::UserDataEvent event, std::int64_t eventTsNs, Id clientIntentId, std::uint32_t contextIndex, bool service) {
+  if (engine.streamingOutput && engine.userEvents.size() >= kMaxOrderStates * 16u) {
+    engine.simulationEvidenceFailed = true; return;
+  }
   if (engine.sharedAccount && engine.sharedAccount->lastPrivateDeliveryNs == std::numeric_limits<std::int64_t>::max()) {
     engine.simulationEvidenceFailed = true; return;
   }
@@ -338,6 +341,9 @@ void appendRateLimitUsageSnapshot(EngineState& engine, std::int64_t tsNs) {
   }
   if (!found) return;
   if (!engine.rateLimitUsage.empty() && sameRateLimitUsagePoint(engine.rateLimitUsage.back(), best)) return;
+  if(engine.streamingOutput && engine.rateLimitUsage.size()>=detail::kMaxOrderStates*16u) {
+    engine.simulationEvidenceFailed=true;return;
+  }
   engine.rateLimitUsage.push_back(best);
 }
 

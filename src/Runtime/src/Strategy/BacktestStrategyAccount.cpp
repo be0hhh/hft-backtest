@@ -79,11 +79,12 @@ using strategy_runtime_detail::venueMatchesSession;
 
 capital::accounting::StrategyAccountState accountStateFromEngine(const detail::EngineState& engine) noexcept {
   capital::accounting::StrategyAccountState out{};
+  if(!detail::knownAccountingModel(engine))return out;
   out.initialBalanceE8 = engine.sharedAccount ? engine.sharedAccount->initialBalanceE8 : engine.initialBalanceE8;
   out.walletBalanceE8 = engine.sharedAccount ? (engine.sharedAccount->observedInitialized
       ? engine.sharedAccount->observedWalletBalanceE8 : engine.sharedAccount->initialBalanceE8) : engine.observedWalletBalanceE8;
   out.availableBalanceE8 = out.walletBalanceE8;
-  if (engine.market.raw == canon::kMarketTypeSpot.raw) {
+  if (detail::isCashAccounting(engine)) {
     const auto held = engine.sharedAccount ? engine.sharedAccount->observedReservedQuoteE8 : engine.observedReservedQuoteE8;
     out.availableBalanceE8 = held > out.walletBalanceE8 ? 0 : out.walletBalanceE8 - held;
   }
@@ -93,7 +94,7 @@ capital::accounting::StrategyAccountState accountStateFromEngine(const detail::E
   out.makerFeeBpsE8 = engine.makerFeeBpsE8;
   out.takerFeeBpsE8 = engine.takerFeeBpsE8;
   out.hasBalance = out.initialBalanceE8 != 0 || out.walletBalanceE8 != 0;
-  out.hasFees = engine.makerFeeBpsE8 != 0 || engine.takerFeeBpsE8 != 0;
+  out.hasFees = engine.feePolicyKnown;
   return out;
 }
 

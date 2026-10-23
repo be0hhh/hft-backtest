@@ -1,4 +1,5 @@
 #include "capital/Accounting/FillPositionAccounting.hpp"
+#include "../../Accounting/BacktestPositionQuantity.hpp"
 #include "../../Engine/BacktestEngine.hpp"
 
 #include "../Model/BacktestExecutionDepth.hpp"
@@ -102,6 +103,7 @@ void fillTriggeredStopLimitFromBbo(EngineState& engine,
   // Deliberately optimistic BBO fallback: price cap/TIF still apply, quantity
   // is unbounded. Finite FOK liquidity is checked only on the Depth route.
   (void)fillOrderQty(engine, order, topPrice, remaining, tsNs, true, metadata);
+  if (engine.simulationEvidenceFailed) return;
   if (order.state.valid) terminalizeUnavailableLiquidity(engine, order, tsNs);
 }
 
@@ -228,7 +230,7 @@ AggressiveFillPlan& topExecutionFillPlanScratch(EngineState& engine) {
   return engine.topExecutionFillPlanScratch.front();
 }
 
-bool fokPlanExecutable(const EngineState& engine, const OpenOrder& order,
+bool fokPlanExecutable(EngineState& engine, const OpenOrder& order,
                        const AggressiveFillPlan& plan) noexcept {
   const auto requested = openOrderRemainingQty(order);
   if (plan.filledQtyE8 != requested || fillableOrderQty(engine, order, requested) != requested ||
@@ -245,6 +247,10 @@ bool fokPlanExecutable(const EngineState& engine, const OpenOrder& order,
     // together so a later chunk cannot run out of storage after an early fill.
     if (liquidity.available(side, chunk.priceE8, std::numeric_limits<std::int64_t>::max()) ==
         std::numeric_limits<std::int64_t>::max()) ++newPrices;
+    if (fillPositionQuantityOverflows(position.netQtyRaw, order.state.side, chunk.qtyE8)) {
+      engine.simulationEvidenceFailed = true;
+      return false;
+    }
     const auto accounting = capital::accounting::applyFillPositionAccounting(
         position, order.state.side, chunk.priceE8, chunk.qtyE8, engine.takerFeeBpsE8);
     if (!accounting.applied) return false;
@@ -348,12 +354,36 @@ bool fillOrderQty(EngineState& engine,
                   std::int64_t tsNs,
                   bool taker,
                   const FillExecutionMetadata& metadata) {
-  if (engine.liquidated || engine.riskStopped || engine.simulationEvidenceFailed) return false;
-  if (!order.state.valid || !order.active || order.state.qty.raw <= 0 || priceE8 <= 0 ||
-      (engine.capturedSourceManaged && (!engine.capturedSourceMember || (order.sourceGeneration != engine.capturedSourceGeneration || order.executionBoundaryEpoch != engine.executionBoundaryEpoch)))) return false;
-  const std::int64_t fillQty = fillableOrderQty(engine, order, requestedQty);
-  if (fillQty <= 0) return rejectOrder(engine, order, tsNs);
-  const std::int64_t feeBpsE8 = taker ? engine.takerFeeBpsE8 : engine.makerFeeBpsE8;
+  if (engine.liquidated || engine.riskStopped || engine.simulationEvidenceFailed ||
+      !order.state.valid || !order.active || order.state.qty.raw <= 0 || priceE8 <= 0 ||
+      (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
+       order.sourceGeneration != engine.capturedSourceGeneration ||
+       order.executionBoundaryEpoch != engine.executionBoundaryEpoch))) return false;
+  const auto fillQty = fillableOrderQty(engine, order, requestedQty);
+  if (fillQty <= 0 || !engine.feePolicyKnown) return rejectOrder(engine, order, tsNs);
+  const auto actualFee = capital::accounting::fillFeeE8(priceE8, fillQty,
+      taker ? engine.takerFeeBpsE8 : engine.makerFeeBpsE8);
+  if (!spotVenueFillAffordable(engine, order, priceE8, fillQty, actualFee)) return rejectOrder(engine, order, tsNs);
+  return applyAcceptedOrderFill(engine, order, priceE8, fillQty, actualFee, tsNs, taker, metadata);
+}
+
+bool applyAcceptedOrderFill(EngineState& engine,
+                  OpenOrder& order,
+                  std::int64_t priceE8,
+                  std::int64_t fillQty,
+                  std::int64_t actualFeeE8,
+                  std::int64_t tsNs,
+                  bool taker,
+                  const FillExecutionMetadata& metadata) {
+  if(engine.streamingOutput && (engine.fills.size()+2u>kMaxOrderStates*16u || engine.orders.size()+2u>kMaxOrderStates*8u)) {
+    engine.simulationEvidenceFailed=true;return false;
+  }
+
+  if (engine.simulationEvidenceFailed || !knownAccountingModel(engine) || !order.state.valid || !order.active ||
+      order.state.qty.raw <= 0 || priceE8 <= 0 || fillQty <= 0 ||
+      actualFeeE8 < 0 ||
+      order.filledQtyRaw < 0 || order.filledQtyRaw > order.state.qty.raw ||
+      fillQty > order.state.qty.raw - order.filledQtyRaw) return false;
   const auto liquiditySide = order.state.side.raw == Side::Buy().raw
       ? trading_core::BookSide::Ask : trading_core::BookSide::Bid;
   const bool depthFill = taker && metadata.fillReason == kFillReasonAggressiveBook;
@@ -362,10 +392,9 @@ bool fillOrderQty(EngineState& engine,
     return false;
   }
   const std::int64_t closeQtyBefore = reduceOnlyPositionCloseQty(engine, order);
-  if (!spotVenueFillAffordable(engine, order, priceE8, fillQty, feeBpsE8)) return rejectOrder(engine, order, tsNs);
-  const capital::accounting::FillPositionAccountingResult accounting = updatePosition(
-      engine, order.state.side, priceE8, fillQty, tsNs, feeBpsE8);
-  if (!accounting.applied) return rejectOrder(engine, order, tsNs);
+  const capital::accounting::FillPositionAccountingResult accounting = updatePositionActualFee(
+      engine, order.state.side, priceE8, fillQty, tsNs, actualFeeE8);
+  if (!accounting.applied) { engine.simulationEvidenceFailed = true; return false; }
   // Single-owner commit: canConsume was checked before accounting and no
   // other execution can mutate this ledger between preflight and commit.
   if (depthFill && !depthLiquidity(engine).consume(liquiditySide, priceE8, fillQty)) {
@@ -452,9 +481,8 @@ bool fillOrderQty(EngineState& engine,
           }
         }
       }
-      if (unwindPrice <= 0 || opposite.qty.raw < fillQty || available < fillQty ||
+      if (!engine.feePolicyKnown || unwindPrice <= 0 || opposite.qty.raw < fillQty || available < fillQty ||
           (unwindDepthFill && !depthLiquidity(engine).canConsume(unwindBookSide, unwindPrice, fillQty))) {
-        engine.simulationEvidenceFailed = true;
         if (finalFill) {
           if (order.recordIndex < engine.orders.size()) engine.orders[order.recordIndex].status = kRecordStatusFilled;
           order = OpenOrder{};
@@ -470,8 +498,7 @@ bool fillOrderQty(EngineState& engine,
     unwindIntent.orderType = canon::OrderType::Market;
     unwindIntent.side = unwindSide; unwindIntent.qty.raw = fillQty; unwindIntent.service = true;
     if (!unwindIntent.clientIntentId.raw || !installSimulationOrderIntent(engine, unwindIntent) ||
-        !markSimulationWarmupIntent(engine, unwindIntent.clientIntentId, true) ||
-        !settleSimulationOrderSubmit(engine, unwindIntent.clientIntentId, true)) {
+        !markSimulationWarmupIntent(engine, unwindIntent.clientIntentId, true)) {
       engine.activeContextIndex = savedContext;
       engine.simulationEvidenceFailed = true;
       if (finalFill) {
@@ -485,9 +512,13 @@ bool fillOrderQty(EngineState& engine,
     unwind.contextIndex = order.contextIndex; unwind.state.clientIntentId = unwindIntent.clientIntentId;
     unwind.state.orderType = canon::OrderType::Market; unwind.state.side = unwindSide;
     unwind.state.qty.raw = fillQty; unwind.reduceOnly = unwind.service = unwind.serviceAutounwind = true;
+    const auto unwindActualFee = capital::accounting::fillFeeE8(unwindPrice, fillQty, engine.takerFeeBpsE8);
     if (!reserveSpotVenueOrder(engine, unwind) ||
-        !spotVenueFillAffordable(engine, unwind, unwindPrice, fillQty, engine.takerFeeBpsE8)) {
+        !spotVenueFillAffordable(engine, unwind, unwindPrice, fillQty, unwindActualFee)) {
       updateSpotVenueReservation(engine, unwind, 0);
+      engine.activeContextIndex = unwind.contextIndex;
+      if (!settleSimulationOrderSubmit(engine, unwind.state.clientIntentId, false)) engine.simulationEvidenceFailed = true;
+      engine.activeContextIndex = savedContext;
       pushUserEvent(engine, execution_detail::makeRejectedOrderEvent(engine, unwind, tsNs), tsNs,
           unwind.state.clientIntentId, unwind.contextIndex, true);
       engine.simulationEvidenceFailed = true;
@@ -497,16 +528,20 @@ bool fillOrderQty(EngineState& engine,
       }
       return true;
     }
+    engine.activeContextIndex = unwind.contextIndex;
+    const bool unwindSent = settleSimulationOrderSubmit(engine, unwind.state.clientIntentId, true);
+    engine.activeContextIndex = savedContext;
+    if (!unwindSent) { engine.simulationEvidenceFailed = true; return true; }
     auto unwindAck = execution_detail::makeCanceledOrderEvent(engine, unwind, tsNs);
     unwindAck.orderStatus = canon::OrderStatus::Open;
     pushUserEvent(engine, unwindAck, tsNs, unwind.state.clientIntentId, unwind.contextIndex, true);
     const capital::accounting::FillPositionAccountingResult unwindAccounting =
-        updatePosition(engine,
+        updatePositionActualFee(engine,
                        unwindSide,
                        unwindPrice,
                        fillQty,
                        tsNs,
-                       engine.takerFeeBpsE8);
+                       unwindActualFee);
     if (!unwindAccounting.applied) {
       updateSpotVenueReservation(engine, unwind, 0);
       pushUserEvent(engine, execution_detail::makeRejectedOrderEvent(engine, unwind, tsNs), tsNs,
@@ -677,6 +712,7 @@ void tryFillOnTop(EngineState& engine,
       const bool planned = buildAggressiveBookFillPlan(engine, order, *fillBook, plan);
       if (triggeredStopFokLimitOrder(order) &&
           (!planned || !execution_detail::fokPlanExecutable(engine, order, plan))) {
+        if (engine.simulationEvidenceFailed) return;
         terminalizeUnavailableLiquidity(engine, order, tsNs);
         continue;
       }
@@ -728,6 +764,7 @@ void tryFillOnTop(EngineState& engine,
     } else if (order.state.side.raw == Side::Sell().raw && order.state.price.raw <= bid) {
       (void)fillOrder(engine, order, bid, tsNs, true, metadata);
     }
+    if (engine.simulationEvidenceFailed) return;
     if (order.state.valid && iocLimit) terminalizeUnavailableLiquidity(engine, order, tsNs);
     if (order.state.valid && order.state.orderType == canon::OrderType::Limit)
       order.aggressiveEvaluated = true;

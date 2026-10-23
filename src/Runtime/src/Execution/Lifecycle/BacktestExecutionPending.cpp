@@ -27,7 +27,7 @@ using execution_detail::serviceOrder;
 using execution_detail::submitCancelIntent;
 
 void applyDueActions(EngineState& engine, std::int64_t tsNs) {
-  if (engine.liquidated || engine.riskStopped ||
+  if (engine.liquidated || engine.riskStopped || engine.simulationEvidenceFailed ||
       (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
        (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u))) return;
   bool changed = false;
@@ -60,6 +60,7 @@ void applyDueActions(EngineState& engine, std::int64_t tsNs) {
     }
     if (action.kind == PendingActionKind::OrderAck) {
       activateOrder(engine, order, action.activeTsNs);
+      if (engine.simulationEvidenceFailed) return;
       if (order.state.valid && order.warmup && !order.warmupCancelRequested) {
         const bool ackDue = order.warmupCancelAfterAck;
         const bool timeoutDue = order.warmupCancelTimeoutTsNs != 0 &&

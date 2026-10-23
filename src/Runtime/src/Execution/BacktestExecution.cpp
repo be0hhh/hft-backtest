@@ -54,7 +54,7 @@ std::uint8_t recordType(canon::OrderType type) noexcept {
 }
 
 std::uint64_t nextOrderId(const EngineState& engine) noexcept {
-  std::uint64_t out = 1u;
+  std::uint64_t out = engine.greatestOrderId + 1u;
   for (const JsonOrder& order : engine.orders) {
     if (order.id >= out) out = order.id + 1u;
   }
@@ -84,6 +84,9 @@ bool pendingEarlier(const PendingAction& lhs, const PendingAction& rhs) noexcept
 }
 
 void pushPendingAction(EngineState& engine, PendingAction action) {
+  if (engine.streamingOutput && engine.pending.size() >= kMaxOrderStates * 4u) {
+    engine.simulationEvidenceFailed = true; return;
+  }
   action.submitSequence = engine.nextPendingSubmitSequence++;
   engine.pending.push_back(std::move(action));
   std::push_heap(engine.pending.begin(), engine.pending.end(), pendingEarlier);
@@ -99,6 +102,10 @@ bool submitCancelIntent(EngineState& engine,
   const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
   if (slotIndex != kNoRecordIndex && engine.capturedSourceManaged &&
       (engine.open[slotIndex].sourceGeneration != engine.capturedSourceGeneration || engine.open[slotIndex].executionBoundaryEpoch != engine.executionBoundaryEpoch)) return false;
+  if (engine.streamingOutput && engine.orders.size() >= kMaxOrderStates * 8u) {
+    engine.simulationEvidenceFailed = true; return false;
+  }
+  engine.greatestOrderId = std::max(engine.greatestOrderId, intent.clientIntentId.raw);
   const std::size_t recordIndex = engine.orders.size();
   engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, intent.targetClientIntentId.raw, tsNs, activeTs, tsNs, kRecordActionCancel, kRecordSideNone, kRecordTypeNone, kRecordStatusPending, 0, 0, false});
   engine.orders.back().contextIndex = engine.activeContextIndex;
@@ -159,6 +166,7 @@ bool submitCancelIntent(EngineState& engine,
                                      bool warmup,
                                      std::uint32_t warmupCancelTimeoutMs,
                                      bool warmupCancelAfterAck) {
+  if (engine.simulationEvidenceFailed) return false;
   if (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
       (engine.capturedExecutionRequiredChannels & ~engine.capturedActiveChannels) != 0u ||
       (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u)) return false;
@@ -166,6 +174,10 @@ bool submitCancelIntent(EngineState& engine,
   const bool service = intent.service || warmup;
   const bool reduceOnly =
       trading_core::positionReductionRequested(intent.positionReduction);
+  if (engine.streamingOutput && engine.orders.size() >= kMaxOrderStates * 8u) {
+    engine.simulationEvidenceFailed = true; return false;
+  }
+  engine.greatestOrderId = std::max(engine.greatestOrderId, intent.clientIntentId.raw);
   const std::size_t recordIndex = engine.orders.size();
   engine.orders.push_back(JsonOrder{engine.legIndex, intent.clientIntentId.raw, 0, tsNs, activeTs, tsNs, kRecordActionOrder, recordSide(intent.side), recordType(intent.orderType), kRecordStatusPending, intent.price.raw, intent.qty.raw, reduceOnly, postOnly});
   engine.orders.back().contextIndex = engine.activeContextIndex;

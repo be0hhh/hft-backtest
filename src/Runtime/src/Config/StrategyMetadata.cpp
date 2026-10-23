@@ -101,9 +101,8 @@ void applyTemplate(const generated::GeneratedStrategyTemplate& source,
 
 [[nodiscard]] MetadataCache buildMetadataCache() noexcept {
   MetadataCache cache{};
-  // Generated templates contain only the explicitly supported replay adapters.
-  // Registered trading strategies without an adapter are absent, including
-  // Delivery and Finam until their native execution contracts can be replayed.
+  // Profile discovery does not confer replay support: runtime admission checks
+  // each canonical descriptor and the recorded inputs it requires.
   for (const auto& source : generated::kStrategyTemplates) {
     if (source.strategyType == nullptr) failClosedMetadataContract();
     const trading_core::StrategyDescriptor* descriptor =

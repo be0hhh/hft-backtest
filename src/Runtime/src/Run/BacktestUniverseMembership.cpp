@@ -24,6 +24,7 @@ void resetCapturedChannels(detail::EngineState& engine, std::uint16_t channels) 
     detail::setStrategySourceDeliveryTimestamp(engine, cxet::api::market::PublicMarketDataStream::Trades, 0);
   }
   if (resetBbo) {
+    engine.reconstructedQuoteReceiveUtc=0u;
     trading_core::clearBookTickerSnapshot(engine.snapshot);
     trading_core::clearBookTickerSnapshot(engine.venueSnapshot);
     engine.reconstructionBookTickerIdentity = {};

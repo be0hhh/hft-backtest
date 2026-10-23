@@ -1,4 +1,6 @@
+#include "trading_core/Execution/Identity.hpp"
 #include "capital/Accounting/FillPositionAccounting.hpp"
+#include "../Accounting/BacktestPositionQuantity.hpp"
 #include "BacktestOrderEvidence.hpp"
 #include "../Engine/BacktestEngine.hpp"
 #include "BacktestClientOrderId.hpp"
@@ -25,14 +27,19 @@ std::size_t evidenceSlot(const EngineState& engine, Id id, bool empty, std::uint
   const auto prefix = static_cast<std::uint64_t>(contextIndex) + 1u;
   const auto first = static_cast<std::size_t>((prefix ^ id.raw) * 0x100000001b3ULL) &
       (kSimulationOrderEvidenceCapacity - 1u);
+  std::size_t vacant = kSimulationOrderEvidenceCapacity;
   for (std::size_t probe = 0u; probe < trading_core::strategy::kOrderEvidenceMaxProbes; ++probe) {
     const auto index = (first + probe) & (kSimulationOrderEvidenceCapacity - 1u);
     const auto& row = engine.simulationOrders->identities[index];
-    if (!row.clientIntentId.raw) return empty ? index : kSimulationOrderEvidenceCapacity;
+    if (!row.clientIntentId.raw) {
+      if (vacant == kSimulationOrderEvidenceCapacity) vacant = index;
+      if (row.generation) continue;
+      return empty ? vacant : kSimulationOrderEvidenceCapacity;
+    }
     if (row.clientIntentId.raw == id.raw && row.contextIndex == contextIndex)
       return empty ? kSimulationOrderEvidenceCapacity : index;
   }
-  return kSimulationOrderEvidenceCapacity;
+  return empty ? vacant : kSimulationOrderEvidenceCapacity;
 }
 std::int64_t& reservedQuote(EngineState& engine, bool observed) noexcept {
   if (engine.sharedAccount) return observed ? engine.sharedAccount->observedReservedQuoteE8 : engine.sharedAccount->venueReservedQuoteE8;
@@ -42,14 +49,21 @@ std::int64_t reservedQuote(const EngineState& engine, bool observed) noexcept {
   if (engine.sharedAccount) return observed ? engine.sharedAccount->observedReservedQuoteE8 : engine.sharedAccount->venueReservedQuoteE8;
   return observed ? engine.observedReservedQuoteE8 : engine.venueReservedQuoteE8;
 }
+std::int64_t protectedQuote(const EngineState& engine, bool observed) noexcept {
+  return engine.sharedAccount ? (observed ? engine.sharedAccount->observedProtectedCollateralE8 :
+      engine.sharedAccount->venueProtectedCollateralE8) : 0;
+}
+bool collateralUnavailable(const EngineState& engine, bool observed) noexcept {
+  return engine.sharedAccount && (observed ? engine.sharedAccount->observedCollateralUnavailableSources :
+      engine.sharedAccount->venueCollateralUnavailableSources) != 0u;
+}
 bool quoteCost(std::int64_t price, std::int64_t qty, std::int64_t feeRate, std::int64_t& out) noexcept {
   if (!qty) { out = 0; return true; }
   if (qty < 0 || price <= 0) return false;
-  const auto principal = capital::accounting::quoteNotionalE8(price, qty);
   const auto fee = capital::accounting::fillFeeE8(price, qty, feeRate);
-  if (principal == std::numeric_limits<std::int64_t>::max() ||
-      principal > std::numeric_limits<std::int64_t>::max() - fee) return false;
-  out = principal + fee; return true;
+  std::int64_t delta{};
+  if (!capital::accounting::spotCashDeltaE8(Side::Buy(), price, qty, fee, delta)) return false;
+  out = -delta; return true;
 }
 bool setReservation(EngineState& engine, SpotOrderReservation& row, bool observed,
     std::int64_t quote, std::int64_t base) noexcept {
@@ -81,7 +95,16 @@ bool prepareSimulationOrderEvidence(EngineState& engine) noexcept {
   if (owner.ready) return owner.binding == binding;
   for (const auto& order : engine.open) if (order.state.valid) return false;
   owner.binding = binding;
-  owner.store.emplace(owner.records, owner.index, binding);
+  owner.store.emplace(owner.records, owner.index, binding, owner.retiredOwned);
+  // The virtual producer has complete per-command fill coverage. Select the
+  // public per-order finality seam cold; no live/private authority is implied.
+  if (!owner.store->enableOrderScopedUnknownCold()) return false;
+  const execution::OwnerRegistration registration{1u, ownerFor(engine),
+      binding.accountId, binding.instrumentId, binding.productId,
+      binding.positionSelector};
+  execution::IdentityAllocator freshRun({&registration, 1u});
+  if (!freshRun.prepareCold(1u, std::numeric_limits<std::uint64_t>::max()) ||
+      !owner.store->startCurrentRunCold(freshRun)) return false;
   // This is a newly created virtual venue with no commands or venue orders.
   // The exact empty model cut provides no real/private account authority.
   if (owner.store->reconcile(1u, 0u, {}) != execution::StateResult::Applied) return false;
@@ -102,6 +125,7 @@ trading_core::StrategyOrderEvidenceView simulationOrderEvidenceView(const Engine
   return view;
 }
 bool installSimulationOrderIntent(EngineState& engine, const trading_core::OrderIntent& intent) noexcept {
+  if (engine.simulationEvidenceFailed) return false;
   if (!prepareSimulationOrderEvidence(engine)) return false;
   std::size_t unresolved = 0u;
   for (const auto& record : engine.simulationOrders->records)
@@ -151,7 +175,7 @@ bool settleSimulationOrderSubmit(EngineState& engine, Id localId, bool sent) noe
   const auto settled = engine.simulationOrders->store->markPlaceSend(
       {engine.simulationOrders->binding, row.commandId}, sent ? execution::SendDisposition::Complete :
           execution::SendDisposition::NotAttempted) == execution::StateResult::Applied;
-  if (settled && !sent && engine.market.raw == canon::kMarketTypeSpot.raw) {
+  if (settled && !sent) {
     auto& reserve = engine.simulationOrders->spotReservations[index];
     setReservation(engine, reserve, false, 0, 0); setReservation(engine, reserve, true, 0, 0);
   }
@@ -178,17 +202,24 @@ bool beginSimulationCancel(EngineState& engine, Id target, Id cancelLocalId) noe
   return true;
 }
 bool reserveSpotObservedIntent(EngineState& engine, const trading_core::OrderIntent& intent) noexcept {
-  if (engine.market.raw != canon::kMarketTypeSpot.raw) return true;
+  if (engine.simulationEvidenceFailed || !knownAccountingModel(engine) || !engine.feePolicyKnown) return false;
   const auto index = evidenceSlot(engine, intent.clientIntentId, false, engine.activeContextIndex);
   if (index == kSimulationOrderEvidenceCapacity || intent.qty.raw <= 0) return false;
   auto& row = engine.simulationOrders->spotReservations[index];
+  if (!isCashAccounting(engine)) {
+    const auto& quote = effectiveBookTicker(engine.snapshot);
+    const auto price = intent.price.raw > 0 ? intent.price.raw :
+        (intent.side.raw == Side::Buy().raw ? quote.ask.px.raw : quote.bid.px.raw);
+    return reserveDerivativeOrder(engine, row, intent.side, intent.qty.raw, price, true);
+  }
   row.feeBpsE8 = std::max(engine.makerFeeBpsE8, engine.takerFeeBpsE8);
   if (intent.side.raw == Side::Buy().raw) {
     row.estimatedPriceE8 = intent.price.raw > 0 ? intent.price.raw : effectiveBookTicker(engine.snapshot).ask.px.raw;
     std::int64_t cost{};
     const auto cash = engine.sharedAccount ? engine.sharedAccount->observedWalletBalanceE8 : engine.observedWalletBalanceE8;
-    const auto held = reservedQuote(static_cast<const EngineState&>(engine), true);
-    if (!quoteCost(row.estimatedPriceE8, intent.qty.raw, row.feeBpsE8, cost) || held > cash || cost > cash - held) return false;
+    const auto held = static_cast<__int128>(reservedQuote(static_cast<const EngineState&>(engine), true)) + protectedQuote(engine, true);
+    if (collateralUnavailable(engine, true) || !quoteCost(row.estimatedPriceE8, intent.qty.raw, row.feeBpsE8, cost) ||
+        held > cash || cost > static_cast<__int128>(cash) - held) return false;
     return setReservation(engine, row, true, cost, 0);
   } else {
     if (intent.side.raw != Side::Sell().raw || engine.observedReservedBaseE8 > engine.position.netQty.raw ||
@@ -197,18 +228,26 @@ bool reserveSpotObservedIntent(EngineState& engine, const trading_core::OrderInt
   }
 }
 bool reserveSpotVenueOrder(EngineState& engine, const OpenOrder& order) noexcept {
-  if (engine.market.raw != canon::kMarketTypeSpot.raw) return true;
+  if (engine.simulationEvidenceFailed || !knownAccountingModel(engine) || !engine.feePolicyKnown) return false;
   const auto index = evidenceSlot(engine, order.state.clientIntentId, false, order.contextIndex);
   if (index == kSimulationOrderEvidenceCapacity) return false;
   auto& row = engine.simulationOrders->spotReservations[index];
+  if (!isCashAccounting(engine)) {
+    const auto& quote = effectiveBookTicker(engine.venueSnapshot);
+    const auto price = order.state.price.raw > 0 ? order.state.price.raw :
+        (order.state.side.raw == Side::Buy().raw ? quote.ask.px.raw : quote.bid.px.raw);
+    return reserveDerivativeOrder(engine, row, order.state.side,
+        order.state.qty.raw - order.filledQtyRaw, price, false);
+  }
   row.feeBpsE8 = std::max(engine.makerFeeBpsE8, engine.takerFeeBpsE8);
   if (order.state.side.raw == Side::Buy().raw) {
     const auto price = order.state.price.raw > 0 ? order.state.price.raw : effectiveBookTicker(engine.venueSnapshot).ask.px.raw;
     row.venuePriceE8 = price;
     std::int64_t cost{};
     const auto cash = engine.sharedAccount ? engine.sharedAccount->walletBalanceE8 : engine.walletBalanceE8;
-    const auto held = reservedQuote(static_cast<const EngineState&>(engine), false) - row.venueQuoteE8;
-    if (!quoteCost(price, order.state.qty.raw - order.filledQtyRaw, row.feeBpsE8, cost) || held < 0 || held > cash || cost > cash - held) return false;
+    const auto held = static_cast<__int128>(reservedQuote(static_cast<const EngineState&>(engine), false)) - row.venueQuoteE8 + protectedQuote(engine, false);
+    if (collateralUnavailable(engine, false) || !quoteCost(price, order.state.qty.raw - order.filledQtyRaw, row.feeBpsE8, cost) ||
+        held < 0 || held > cash || cost > static_cast<__int128>(cash) - held) return false;
     if (!setReservation(engine, row, false, cost, 0)) return false;
     if (order.serviceAutounwind && engine.serviceExposureOpen) {
       row.estimatedPriceE8 = price;
@@ -225,32 +264,37 @@ bool reserveSpotVenueOrder(EngineState& engine, const OpenOrder& order) noexcept
   return true;
 }
 bool spotVenueFillAffordable(const EngineState& engine, const OpenOrder& order,
-    std::int64_t price, std::int64_t qty, std::int64_t feeRate) noexcept {
-  if (engine.market.raw != canon::kMarketTypeSpot.raw) return true;
+    std::int64_t price, std::int64_t qty, std::int64_t actualFee) noexcept {
+  if (engine.simulationEvidenceFailed || !knownAccountingModel(engine) || !engine.feePolicyKnown) return false;
   const auto index = evidenceSlot(engine, order.state.clientIntentId, false, order.contextIndex);
   if (index == kSimulationOrderEvidenceCapacity || qty <= 0) return false;
   const auto& row = engine.simulationOrders->spotReservations[index];
+  if (!isCashAccounting(engine))
+    return derivativeVenueFillAffordable(engine, row, order, price, qty, actualFee);
   std::int64_t cashDelta{};
-  if (!capital::accounting::spotCashDeltaE8(order.state.side, price, qty, capital::accounting::fillFeeE8(price, qty, feeRate), cashDelta)) return false;
+  if (!capital::accounting::spotCashDeltaE8(order.state.side, price, qty, actualFee, cashDelta)) return false;
   if (order.state.side.raw == Side::Buy().raw) {
     const auto cash = engine.sharedAccount ? engine.sharedAccount->walletBalanceE8 : engine.walletBalanceE8;
-    const auto otherHeld = reservedQuote(engine, false) - row.venueQuoteE8;
-    return otherHeld >= 0 && otherHeld <= cash && -cashDelta <= cash - otherHeld;
+    const auto otherHeld = static_cast<__int128>(reservedQuote(engine, false)) - row.venueQuoteE8 + protectedQuote(engine, false);
+    return !collateralUnavailable(engine, false) && otherHeld >= 0 && otherHeld <= cash && -cashDelta <= static_cast<__int128>(cash) - otherHeld;
   }
   const auto otherHeld = engine.venueReservedBaseE8 - row.venueBaseE8;
   return otherHeld >= 0 && otherHeld <= engine.netQtyRaw && qty <= engine.netQtyRaw - otherHeld;
 }
 bool spotVenueFillPlanAffordable(const EngineState& engine, const OpenOrder& order,
     const AggressiveFillPlan& plan, std::int64_t feeRate) noexcept {
-  if (engine.market.raw != canon::kMarketTypeSpot.raw) return true;
+  if (engine.simulationEvidenceFailed || !knownAccountingModel(engine) || !engine.feePolicyKnown) return false;
   const auto index = evidenceSlot(engine, order.state.clientIntentId, false, order.contextIndex);
   if (index == kSimulationOrderEvidenceCapacity) return false;
   const auto& row = engine.simulationOrders->spotReservations[index];
+  if (!isCashAccounting(engine))
+    return derivativeVenueFillPlanAffordable(engine, row, order, plan, feeRate);
   const auto cash = engine.sharedAccount ? engine.sharedAccount->walletBalanceE8 : engine.walletBalanceE8;
-  const auto otherQuote = reservedQuote(engine, false) - row.venueQuoteE8;
+  const auto otherQuote = static_cast<__int128>(reservedQuote(engine, false)) - row.venueQuoteE8 + protectedQuote(engine, false);
   const auto otherBase = engine.venueReservedBaseE8 - row.venueBaseE8;
   if (otherQuote < 0 || otherQuote > cash || otherBase < 0 || otherBase > engine.netQtyRaw) return false;
   if (order.state.side.raw == Side::Sell().raw && plan.filledQtyE8 > engine.netQtyRaw - otherBase) return false;
+  if (order.state.side.raw == Side::Buy().raw && collateralUnavailable(engine, false)) return false;
   __int128 totalDebit = 0;
   for (std::size_t i = 0u; i < plan.count; ++i) {
     const auto& chunk = plan.chunks[i];
@@ -264,17 +308,20 @@ bool spotVenueFillPlanAffordable(const EngineState& engine, const OpenOrder& ord
 }
 
 void updateSpotVenueReservation(EngineState& engine, const OpenOrder& order, std::int64_t remaining) noexcept {
-  if (engine.market.raw != canon::kMarketTypeSpot.raw) return;
+  if (!knownAccountingModel(engine)) { engine.simulationEvidenceFailed = true; return; }
   const auto index = evidenceSlot(engine, order.state.clientIntentId, false, order.contextIndex);
   if (index == kSimulationOrderEvidenceCapacity) { engine.simulationEvidenceFailed = true; return; }
   auto& row = engine.simulationOrders->spotReservations[index];
+  if (!isCashAccounting(engine)) {
+    updateDerivativeOrderReservation(engine, row, order.state.side, remaining, false); return;
+  }
   std::int64_t quote{};
   if (remaining > 0 && order.state.side.raw == Side::Buy().raw &&
       !quoteCost(row.venuePriceE8, remaining, row.feeBpsE8, quote)) { engine.simulationEvidenceFailed = true; return; }
   setReservation(engine, row, false, quote, remaining > 0 && order.state.side.raw == Side::Sell().raw ? remaining : 0);
 }
 bool deliverSimulationOrderEvent(EngineState& engine, std::size_t index, std::int64_t nowNs) noexcept {
-  if (index >= engine.userEvents.size() || index >= engine.userEventDeliveryTsNs.size() ||
+  if (engine.simulationEvidenceFailed || index >= engine.userEvents.size() || index >= engine.userEventDeliveryTsNs.size() ||
       nowNs < engine.userEventDeliveryTsNs[index] || index >= engine.userEventConsumed.size() ||
       index >= engine.userEventContextIndices.size() || index >= engine.userEventClientIntentIds.size() ||
       index >= engine.userEventGenerations.size() || index >= engine.userEventCommandIds.size() ||
@@ -300,6 +347,7 @@ bool deliverSimulationOrderEvent(EngineState& engine, std::size_t index, std::in
     if (!record || record != identity->record || event.side.raw != record->request.side.raw ||
         event.qty.raw != record->request.qtyE8) return false;
     if (record->placeSend != execution::SendDisposition::NotAttempted || !record->placeSettled) {
+      if (!knownAccountingModel(engine)) return false;
       const auto identitySlot = evidenceSlot(engine, identity->clientIntentId, false, engine.activeContextIndex);
       if (identitySlot == kSimulationOrderEvidenceCapacity) return false;
       const bool serviceFill = (owner.serviceFlags[identitySlot] &
@@ -316,6 +364,10 @@ bool deliverSimulationOrderEvent(EngineState& engine, std::size_t index, std::in
             !cxet::composite::userDataFieldPresent(event, cxet::composite::UserDataField::Fee) ||
             !cxet::composite::userDataFieldPresent(event, cxet::composite::UserDataField::RealizedPnl) ||
             event.lastFilledQty.raw != fillDelta || event.fee.raw < 0) return false;
+        if (fillPositionQuantityOverflows(engine.position.netQty.raw, event.side, fillDelta)) {
+          engine.simulationEvidenceFailed = true;
+          return false;
+        }
         if (serviceFill) {
           const auto delta = event.side.raw == Side::Buy().raw ? fillDelta : -fillDelta;
           if ((delta > 0 && observedServiceQty > std::numeric_limits<std::int64_t>::max() - delta) ||
@@ -325,10 +377,9 @@ bool deliverSimulationOrderEvent(EngineState& engine, std::size_t index, std::in
         projected = capital::accounting::applyFillPositionAccounting(
             {engine.position.netQty.raw, engine.position.entryPrice.raw}, event.side, event.lastPrice.raw, fillDelta, 0);
         if (!projected.applied || trading_core::saturatingAddI64(projected.grossRealizedPnlE8, -event.fee.raw) != event.realizedPnl.raw) return false;
-        if (engine.market.raw == canon::kMarketTypeSpot.raw) {
-          const auto cash = engine.sharedAccount ? engine.sharedAccount->observedWalletBalanceE8 : engine.observedWalletBalanceE8;
-          if (projected.position.netQtyRaw < 0 || !capital::accounting::spotCashDeltaE8(event.side, event.lastPrice.raw, fillDelta, event.fee.raw, walletDelta) ||
-              (walletDelta < 0 && cash < -walletDelta)) return false;
+        if (isCashAccounting(engine)) {
+          if (projected.position.netQtyRaw < 0 || !capital::accounting::spotCashDeltaE8(
+              event.side, event.lastPrice.raw, fillDelta, event.fee.raw, walletDelta)) return false;
         }
       }
       switch (event.orderStatus) {
@@ -342,6 +393,12 @@ bool deliverSimulationOrderEvent(EngineState& engine, std::size_t index, std::in
       }
       observation.cumulativeKnown = cxet::composite::userDataFieldPresent(event, cxet::composite::UserDataField::FilledQty);
       observation.cumulativeQtyE8 = event.filledQty.raw;
+      // This producer models complete per-order fills and fees, and applies
+      // them to the observed account in this same delivery operation.
+      observation.terminalQuantityFinal = observation.cumulativeKnown &&
+          (event.orderStatus == canon::OrderStatus::Closed ||
+           event.orderStatus == canon::OrderStatus::Canceled ||
+           event.orderStatus == canon::OrderStatus::Rejected);
       if (event.orderStatus == canon::OrderStatus::Canceled) {
         observation.cancelCommandId = record->cancelCommandId;
         observation.cancelStatus = record->cancelCommandId ? execution::CancelStatus::Confirmed : execution::CancelStatus::None;
@@ -376,7 +433,7 @@ bool deliverSimulationOrderEvent(EngineState& engine, std::size_t index, std::in
         }
         refreshAccountPositionValue(engine, true);
       }
-      if (engine.market.raw == canon::kMarketTypeSpot.raw) {
+      if (isCashAccounting(engine)) {
         const auto slot = evidenceSlot(engine, identity->clientIntentId, false, engine.activeContextIndex);
         if (slot == kSimulationOrderEvidenceCapacity) return false;
         auto& reserve = owner.spotReservations[slot];
@@ -386,12 +443,63 @@ bool deliverSimulationOrderEvent(EngineState& engine, std::size_t index, std::in
             !quoteCost(reserve.estimatedPriceE8, remaining, reserve.feeBpsE8, heldQuote)) return false;
         if (!setReservation(engine, reserve, true, heldQuote,
             remaining > 0 && event.side.raw == Side::Sell().raw ? remaining : 0)) return false;
+      } else {
+        auto& reserve = owner.spotReservations[identitySlot];
+        const auto remaining = record->terminal() ? 0 : record->request.qtyE8 - record->cumulativeQtyE8;
+        updateDerivativeOrderReservation(engine, reserve, event.side, remaining, true);
       }
     }
   }
   ++engine.deliveredUserEvents; engine.lastDeliveredUserEvent = index;
   engine.lastReplayMonotonicNs = std::max(engine.lastReplayMonotonicNs, nowNs);
   engine.userEventConsumed[index] = 1u; bumpContextRevision(engine);
+  if (engine.userEventCommandIds[index]) {
+    auto& owner = *engine.simulationOrders;
+    const auto slot = evidenceSlot(engine, engine.userEventClientIntentIds[index],
+        false, engine.activeContextIndex);
+    if (slot == kSimulationOrderEvidenceCapacity ||
+        owner.deliveryCut == std::numeric_limits<std::uint64_t>::max()) return false;
+    owner.deliveredCuts[slot] = ++owner.deliveryCut;
+  }
   return true;
+}
+
+std::size_t reclaimSimulationOrderEvidence(EngineState& engine,
+    SimulationEvidenceRetirementProof proof) noexcept {
+  if (!proof.released || !engine.simulationOrders ||
+      !engine.simulationOrders->ready) return 0u;
+  auto& owner = *engine.simulationOrders;
+  std::size_t reclaimed{};
+  for (std::size_t slot = 0u; slot < owner.identities.size(); ++slot) {
+    const auto identity = owner.identities[slot];
+    if (!identity.clientIntentId.raw || !identity.record ||
+        !owner.deliveredCuts[slot]) continue;
+    const execution::OrderKey key{owner.binding, identity.commandId};
+    if (!owner.store->validateRecord(identity.record, identity.recordGeneration, key) ||
+        owner.store->reclaimable(key, true) != execution::StateResult::Applied) continue;
+    const auto& reservation = owner.spotReservations[slot];
+    if (reservation.observedQuoteE8 || reservation.venueQuoteE8 ||
+        reservation.observedBaseE8 || reservation.venueBaseE8) continue;
+    bool borrowed = false;
+    for (const auto& order : engine.open)
+      borrowed = borrowed || (order.state.valid && order.contextIndex == identity.contextIndex &&
+          order.state.clientIntentId.raw == identity.clientIntentId.raw);
+    for (const auto& action : engine.pending)
+      borrowed = borrowed || (action.contextIndex == identity.contextIndex &&
+          (action.targetClientIntentId.raw == identity.clientIntentId.raw ||
+           action.commandClientIntentId.raw == identity.clientIntentId.raw));
+    for (std::size_t event = 0u; event < engine.userEventCommandIds.size(); ++event)
+      if (engine.userEventCommandIds[event] == identity.commandId &&
+          (event >= engine.userEventConsumed.size() || !engine.userEventConsumed[event])) borrowed = true;
+    if (borrowed || !proof.released(proof.owner, identity.contextIndex,
+        identity.clientIntentId, owner.deliveredCuts[slot])) continue;
+    if (owner.store->reclaim(key) != execution::StateResult::Applied) continue;
+    // A generation-only tombstone preserves every colliding lookup chain.
+    owner.identities[slot] = {}; owner.identities[slot].generation = 1u;
+    owner.localStates[slot] = {}; owner.serviceFlags[slot] = 0u;
+    owner.spotReservations[slot] = {}; owner.deliveredCuts[slot] = 0u;
+    ++reclaimed;
+  }
+  return reclaimed;
 }
 }

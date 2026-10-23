@@ -344,9 +344,8 @@ def main() -> int:
             f"missing canonical profile for registered strategy {missing_types[0]!r}"
         )
 
-    # A canonical profile alone does not certify a replay adapter. CMake owns
-    # the explicit supported adapter set; an empty set is a valid catalogue.
-    profiles = [profile for profile in profiles if profile.strategy_type in required_types]
+    # Profiles are discoverable metadata. Runtime admission inspects canonical
+    # descriptor capabilities and captured evidence, not a product-name list.
     content = generate(profiles)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")

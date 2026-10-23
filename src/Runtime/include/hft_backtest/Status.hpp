@@ -13,6 +13,7 @@ enum class Status : int {
   Unsupported,
   Cancelled,
   Unknown,
+  NotReady,
 };
 
 inline constexpr std::string_view statusToString(Status status) noexcept {
@@ -25,6 +26,7 @@ inline constexpr std::string_view statusToString(Status status) noexcept {
     case Status::Unsupported: return "Unsupported";
     case Status::Cancelled: return "Cancelled";
     case Status::Unknown: return "Unknown";
+    case Status::NotReady: return "NotReady";
   }
   return "Unknown";
 }

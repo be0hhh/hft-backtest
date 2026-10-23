@@ -53,6 +53,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
               const BacktestRunRequest& request,
               const cxet::composite::UserDataEvent* userEvent) {
   if (!footprintSupported(descriptor)) return false;
+  if (descriptor.stateDiscipline == trading_core::StrategyStateDiscipline::CanonicalEvidence) return false;
   if (engine.simulationEvidenceFailed) return false;
   if (engine.liquidated || engine.riskStopped) return true;
   if (engine.capturedSourceManaged && (!engine.capturedSourceMember ||

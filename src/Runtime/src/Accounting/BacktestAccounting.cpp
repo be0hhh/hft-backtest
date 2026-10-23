@@ -1,4 +1,5 @@
 #include "capital/Accounting/FillPositionAccounting.hpp"
+#include "BacktestPositionQuantity.hpp"
 #include "trading_core/Contracts/Numeric/Integer/Saturating.hpp"
 #include "../Engine/BacktestEngine.hpp"
 
@@ -17,6 +18,7 @@ void initializeAccounting(EngineState& engine, const BacktestRunRequest& request
     engine.sharedAccount->observedWalletBalanceE8 = engine.sharedAccount->initialBalanceE8;
     engine.sharedAccount->observedInitialized = true;
   }
+  engine.feePolicyKnown=request.hasMakerFeeBps && request.hasTakerFeeBps;
   engine.makerFeeBpsE8 = request.makerFeeBpsE8;
   engine.takerFeeBpsE8 = request.takerFeeBpsE8;
   engine.position.netQty.raw = engine.netQtyRaw;
@@ -26,29 +28,13 @@ void initializeAccounting(EngineState& engine, const BacktestRunRequest& request
   bumpContextRevision(engine);
 }
 
-capital::accounting::FillPositionAccountingResult updatePosition(
-    EngineState& engine,
-    Side side,
-    std::int64_t priceE8,
-    std::int64_t qtyE8,
-    std::int64_t tsNs,
-    std::int64_t feeBpsE8) noexcept {
-  (void)tsNs;
-  const capital::accounting::FillPositionAccountingResult result =
-      capital::accounting::applyFillPositionAccounting(
-          capital::accounting::FillPositionAccountingState{engine.netQtyRaw,
-                                                     engine.entryPriceE8},
-          side,
-          priceE8,
-          qtyE8,
-          feeBpsE8);
-  if (!result.applied) return result;
-
+namespace {
+capital::accounting::FillPositionAccountingResult commitPositionFill(
+    EngineState& engine,Side side,std::int64_t priceE8,std::int64_t qtyE8,
+    const capital::accounting::FillPositionAccountingResult& result) noexcept {
   auto walletDelta = result.netRealizedPnlE8;
-  if (engine.market.raw == canon::kMarketTypeSpot.raw) {
-    const auto cash = engine.sharedAccount ? engine.sharedAccount->walletBalanceE8 : engine.walletBalanceE8;
-    if (result.position.netQtyRaw < 0 || !capital::accounting::spotCashDeltaE8(side, priceE8, qtyE8, result.feeE8, walletDelta) ||
-        (walletDelta < 0 && cash < -walletDelta)) return {};
+  if (isCashAccounting(engine)) {
+    if (result.position.netQtyRaw < 0 || !capital::accounting::spotCashDeltaE8(side, priceE8, qtyE8, result.feeE8, walletDelta)) return {};
   }
 
   recordSpotValuationMark(engine, false);
@@ -72,10 +58,35 @@ capital::accounting::FillPositionAccountingResult updatePosition(
   // projections advance only at the corresponding private-event delivery.
   return result;
 }
+} // namespace
+
+capital::accounting::FillPositionAccountingResult updatePositionActualFee(
+    EngineState& engine,Side side,std::int64_t priceE8,std::int64_t qtyE8,
+    std::int64_t tsNs,std::int64_t actualFeeE8) noexcept {
+  (void)tsNs;
+  if(engine.simulationEvidenceFailed || !knownAccountingModel(engine) || actualFeeE8<0)return {};
+  if (fillPositionQuantityOverflows(engine.netQtyRaw, side, qtyE8)) {
+    engine.simulationEvidenceFailed = true;
+    return {};
+  }
+  auto result=capital::accounting::applyFillPositionAccounting(
+      {engine.netQtyRaw,engine.entryPriceE8},side,priceE8,qtyE8,0);
+  if(!result.applied)return result;
+  result.feeE8=actualFeeE8;
+  result.netRealizedPnlE8=trading_core::saturatingSubI64(result.grossRealizedPnlE8,actualFeeE8);
+  return commitPositionFill(engine,side,priceE8,qtyE8,result);
+}
+
+capital::accounting::FillPositionAccountingResult updatePosition(
+    EngineState& engine,Side side,std::int64_t priceE8,std::int64_t qtyE8,
+    std::int64_t tsNs,std::int64_t feeBpsE8) noexcept {
+  const auto actualFee=capital::accounting::fillFeeE8(priceE8,qtyE8,feeBpsE8);
+  return updatePositionActualFee(engine,side,priceE8,qtyE8,tsNs,actualFee);
+}
 
 std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
   const cxet::composite::BookTicker& top = effectiveBookTicker(engine.venueSnapshot);
-  const auto bid = engine.market.raw == canon::kMarketTypeSpot.raw && top.bid.px.raw <= 0
+  const auto bid = isCashAccounting(engine) && top.bid.px.raw <= 0
       ? engine.venueValuationBidE8 : top.bid.px.raw;
   return capital::accounting::markToMarketPnlE8(
       capital::accounting::FillPositionAccountingState{engine.netQtyRaw,
@@ -86,7 +97,7 @@ std::int64_t unrealizedPnlE8(const EngineState& engine) noexcept {
 
 std::int64_t observedUnrealizedPnlE8(const EngineState& engine) noexcept {
   const auto& top = effectiveBookTicker(engine.snapshot);
-  const auto bid = engine.market.raw == canon::kMarketTypeSpot.raw && top.bid.px.raw <= 0
+  const auto bid = isCashAccounting(engine) && top.bid.px.raw <= 0
       ? engine.observedValuationBidE8 : top.bid.px.raw;
   return capital::accounting::markToMarketPnlE8(
       {engine.position.netQty.raw, engine.position.entryPrice.raw}, bid, top.ask.px.raw);
@@ -98,7 +109,7 @@ std::int64_t equityE8(const EngineState& engine) noexcept {
 }
 
 std::int64_t positionEquityValueE8(const EngineState& engine, bool observed) noexcept {
-  if (engine.market.raw != canon::kMarketTypeSpot.raw)
+  if (!isCashAccounting(engine))
     return observed ? observedUnrealizedPnlE8(engine) : unrealizedPnlE8(engine);
   const auto& top = effectiveBookTicker(observed ? engine.snapshot : engine.venueSnapshot);
   const auto qty = observed ? engine.position.netQty.raw : engine.netQtyRaw;
@@ -117,7 +128,7 @@ void refreshAccountPositionValue(EngineState& engine, bool observed) noexcept {
 }
 
 void recordSpotValuationMark(EngineState& engine, bool observed) noexcept {
-  if (engine.market.raw != canon::kMarketTypeSpot.raw) return;
+  if (!isCashAccounting(engine)) return;
   const auto& snapshot = observed ? engine.snapshot : engine.venueSnapshot;
   const auto& top = effectiveBookTicker(snapshot);
   if (top.bid.px.raw > 0) {
@@ -133,10 +144,13 @@ void appendEquityPoint(EngineState& engine, std::int64_t tsNs) {
   const auto unrealized = unrealizedPnlE8(engine);
   const auto grossTotal = trading_core::saturatingAddI64(engine.grossRealizedPnlE8, unrealized);
   const auto netTotal = trading_core::saturatingAddI64(engine.netRealizedPnlE8, unrealized);
+  if(engine.streamingOutput && engine.equityPoints.size()>=detail::kMaxOrderStates*16u) {
+    engine.simulationEvidenceFailed=true;return;
+  }
   engine.equityPoints.push_back(JsonEquityPoint{tsNs, engine.grossRealizedPnlE8,
       engine.netRealizedPnlE8, unrealized, grossTotal, netTotal, netTotal,
       engine.feesPaidE8, engine.walletBalanceE8, engine.netQtyRaw,
-      static_cast<std::uint64_t>(engine.fills.size())});
+      static_cast<std::uint64_t>((engine.emittedFills + engine.fills.size()))});
 }
 
 void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t reason) {
@@ -146,6 +160,9 @@ void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t rea
   const std::int64_t netTotal = trading_core::saturatingAddI64(
       engine.netRealizedPnlE8, unrealized);
   const cxet::composite::BookTicker& top = effectiveBookTicker(engine.venueSnapshot);
+  if(engine.streamingOutput && engine.riskSnapshots.size()>=detail::kMaxOrderStates*16u) {
+    engine.simulationEvidenceFailed=true;return;
+  }
   engine.riskSnapshots.push_back(JsonRiskSnapshot{tsNs,
                                                   engine.grossRealizedPnlE8,
                                                   engine.netRealizedPnlE8,
@@ -158,7 +175,7 @@ void appendRiskSnapshot(EngineState& engine, std::int64_t tsNs, std::uint8_t rea
                                                   engine.entryPriceE8,
                                                   top.bid.px.raw,
                                                   top.ask.px.raw,
-                                                  static_cast<std::uint64_t>(engine.fills.size()),
+                                                  static_cast<std::uint64_t>((engine.emittedFills + engine.fills.size())),
                                                   reason});
   engine.lastRiskSnapshotTsNs = tsNs;
   engine.lastRiskSnapshotUnrealizedPnlE8 = unrealized;

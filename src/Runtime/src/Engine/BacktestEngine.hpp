@@ -408,7 +408,10 @@ struct ReconstructionSourceIdentity {
   bool initialized{false};
 };
 
+enum class SimulationAccountingModel : std::uint8_t { Unknown, Cash, Linear };
+
 struct SharedAccountState {
+  SimulationAccountingModel accountingModel{SimulationAccountingModel::Unknown};
   std::uint32_t quoteAssetId{};
   std::int64_t initialBalanceE8{};
   std::int64_t walletBalanceE8{};
@@ -418,13 +421,23 @@ struct SharedAccountState {
   bool observedInitialized{};
   std::int64_t venueReservedQuoteE8{};
   std::int64_t observedReservedQuoteE8{};
+  std::int64_t venueProtectedCollateralE8{}, observedProtectedCollateralE8{};
+  std::uint32_t venueCollateralUnavailableSources{}, observedCollateralUnavailableSources{};
   std::int64_t lastPrivateDeliveryNs{};
   std::uint64_t revision{1u};
   BacktestQuota quotas{};
 };
 struct EngineState {
+  SimulationAccountingModel accountingModel{SimulationAccountingModel::Unknown};
   std::unique_ptr<SimulationOrderEvidenceOwner> simulationOrders{std::make_unique<SimulationOrderEvidenceOwner>()};
   bool simulationEvidenceFailed{false};
+  // Cold streaming consumers discard committed output rows, never execution state.
+  bool streamingOutput{false};
+  bool feePolicyKnown{false};
+  std::uint64_t emittedOrders{}, emittedFills{}, emittedUserEvents{};
+  std::uint64_t greatestOrderId{};
+  std::uint64_t emittedEquityPoints{},emittedRiskSnapshots{},emittedStrategyIndicator{},emittedStrategyRange{},
+      emittedStrategySpread{},emittedExecutionQuality{},emittedRateLimitUsage{};
   std::vector<JsonOrder> orders{};
   std::vector<JsonFill> fills{};
   std::vector<JsonEquityPoint> equityPoints{};
@@ -479,6 +492,7 @@ struct EngineState {
       strategySourceDeliveryTsNs{};
   // Difference between the captured realtime clock and the replay monotonic
   // coordinate at the most recently delivered market-data boundary.
+  std::uint64_t reconstructedQuoteReceiveUtc{};
   std::int64_t replayUtcOffsetNs{0};
   std::int64_t lastReplayMonotonicNs{0};
   std::int64_t firstReplayDeliveryNs{0};
@@ -570,6 +584,16 @@ struct EngineState {
   bool riskStopped{false};
 };
 
+[[nodiscard]] inline bool isCashAccounting(const EngineState& engine) noexcept {
+  return engine.accountingModel==SimulationAccountingModel::Cash;
+}
+[[nodiscard]] inline bool isLinearAccounting(const EngineState& engine) noexcept {
+  return engine.accountingModel==SimulationAccountingModel::Linear;
+}
+[[nodiscard]] inline bool knownAccountingModel(const EngineState& engine) noexcept {
+  return isCashAccounting(engine) || isLinearAccounting(engine);
+}
+
 inline void setStrategySourceDeliveryTimestamp(
     EngineState& engine,
     cxet::api::market::PublicMarketDataStream stream,
@@ -644,6 +668,11 @@ bool buildTieredCandleHistory(const std::vector<CandleRow>& rows,
                               cxet::composite::TieredCandleHistory& out) noexcept;
 
 void initializeAccounting(EngineState& engine, const BacktestRunRequest& request) noexcept;
+// Accepted venue financial fact: supplied exact nonnegative fee cost, independent
+// of model admission. Rebates require a separate supported financial contract.
+[[nodiscard]] capital::accounting::FillPositionAccountingResult updatePositionActualFee(
+    EngineState&,Side,std::int64_t priceE8,std::int64_t qtyE8,
+    std::int64_t tsNs,std::int64_t actualFeeE8) noexcept;
 [[nodiscard]] capital::accounting::FillPositionAccountingResult updatePosition(
     EngineState& engine,
     Side side,
@@ -682,6 +711,17 @@ bool fillOrderQty(EngineState& engine,
                   OpenOrder& order,
                   std::int64_t priceE8,
                   std::int64_t requestedQty,
+                  std::int64_t tsNs,
+                  bool taker,
+                  const FillExecutionMetadata& metadata);
+// Applies an already accepted, exact venue fill and its actual nonnegative
+// fee; it never derives a fee from a policy. Prospective model matching uses
+// fillOrderQty, which preflights admission before calling this seam.
+bool applyAcceptedOrderFill(EngineState& engine,
+                  OpenOrder& order,
+                  std::int64_t priceE8,
+                  std::int64_t fillQty,
+                  std::int64_t actualFeeE8,
                   std::int64_t tsNs,
                   bool taker,
                   const FillExecutionMetadata& metadata);
