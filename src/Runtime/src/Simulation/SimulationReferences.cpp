@@ -71,7 +71,7 @@ bool SimulationReferences::instrumentAvailable(const hftrec::corpus::BinaryMarke
   return false;
 }
 bool SimulationReferences::instrument(const hftrec::corpus::BinaryMarketSource& source,
-    trading_core::StrategyInstrumentSpec& spec,BacktestCanonicalPairSource& output,
+    trading_core::StrategyInstrumentSpec& spec,BacktestCanonicalSource& output,
     std::uint64_t& visibleMono,std::string& error,std::uint64_t nowMono) const {
   using namespace hft_parser::ipc;
   const auto native=binary_corpus::fixedText(source.nativeSymbol.data(),source.nativeSymbol.size(),source.nativeSymbolBytes);

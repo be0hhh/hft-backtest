@@ -14,7 +14,7 @@
 #include "../Strategy/Inputs/BacktestStrategyWarmup.hpp"
 #include "../Strategy/Inputs/BacktestStrategyInstrument.hpp"
 #include "../Strategy/BacktestStrategyRuntime.hpp"
-#include "../Strategy/Diagnostics/BacktestStrategyTrace.hpp"
+#include "../Strategy/Diagnostic/BacktestStrategyTrace.hpp"
 #include "../Input/Binary/BinaryCorpusLoader.hpp"
 #include "../Strategy/Execution/BacktestStrategyIntentLowering.hpp"
 #include "../Input/Session/SessionLoader.hpp"
@@ -64,9 +64,6 @@ using run_detail::writeCurrentArtifacts;
 using run_detail::writeEmptyArtifacts;
 
 
-extern "C" HFT_BACKTEST_API std::uint32_t hft_backtest_api_version() noexcept {
-  return kBacktestApiVersion;
-}
 BacktestRunResult runBacktest(const BacktestRunRequest& request,
                               BacktestProgressCallback progressCallback,
                               void* userData) noexcept {
@@ -361,7 +358,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   std::unique_ptr<detail::EngineState> aggregateEngineStorage;
   const detail::EngineState* artifactEngine = &engine;
 
-  if (!prepareEngineOrderBookStorage(engine, descriptor, loadPlan)) {
+  if (!prepareEngineOrderBookStorage(engine, descriptor, loadPlan, &session)) {
     result.status = Status::IoError;
     result.error = "failed to allocate exact backtest order-book storage";
     (void)writeEmptyArtifacts(artifacts);
@@ -403,7 +400,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   if (hasExplicitSessions) {
     for (std::size_t leg = 0; leg < sessions.size(); ++leg) {
       detail::EngineState& legEngine = legEngines[leg];
-      if (!prepareEngineOrderBookStorage(legEngine, descriptor, loadPlan)) {
+      if (!prepareEngineOrderBookStorage(legEngine, descriptor, loadPlan, &sessions[leg])) {
         result.status = Status::IoError;
         result.error =
             "failed to allocate exact leg order-book storage";
@@ -530,8 +527,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
 
   const bool captureIndicatorTrace = !result.indicatorProfile.empty();
   const bool captureRangeTrace = emitsPriceRangeTrace(*descriptor);
-  const bool captureSpreadDiagnostics = emitsArbSpreadTrace(*descriptor);
-  const bool captureSpreadRows = request.captureStrategySpread && captureSpreadDiagnostics;
+  const bool captureSpreadDiagnostic = emitsArbSpreadTrace(*descriptor);
+  const bool captureSpreadRows = request.captureStrategySpread && captureSpreadDiagnostic;
   const std::uint64_t replayDurationNs = replayEndEstimateNs > replayStartTsNs && replayStartTsNs >= 0
       ? static_cast<std::uint64_t>(replayEndEstimateNs) - static_cast<std::uint64_t>(replayStartTsNs)
       : 0u;
@@ -543,7 +540,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
                            replayDurationNs,
                            traceOwner && captureIndicatorTrace,
                            traceOwner && captureRangeTrace,
-                           traceOwner && captureSpreadDiagnostics);
+                           traceOwner && captureSpreadDiagnostic);
     }
   } else {
     reserveEngineStorage(engine,
@@ -551,7 +548,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
                          replayDurationNs,
                          captureIndicatorTrace,
                          captureRangeTrace,
-                         captureSpreadDiagnostics);
+                         captureSpreadDiagnostic);
   }
   if (hasExplicitSessions) {
     for (detail::EngineState& legEngine : legEngines) {

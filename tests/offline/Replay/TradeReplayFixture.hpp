@@ -2,12 +2,13 @@
 
 #include "OfflineCase.hpp"
 #include "Engine/BacktestEngine.hpp"
+#include "Config/BacktestRunConfig.hpp"
 #include "Engine/BacktestEngineSetup.hpp"
 #include "Engine/BacktestEngineView.hpp"
 #include "Accounting/BacktestResultAggregation.hpp"
 #include "Strategy/BacktestStrategyRuntime.hpp"
 #include "Strategy/Inputs/BacktestStrategyInputFreshness.hpp"
-#include "Strategy/Diagnostics/BacktestStrategyTrace.hpp"
+#include "Strategy/Diagnostic/BacktestStrategyTrace.hpp"
 #include "Strategy/Execution/BacktestStrategyIntentLowering.hpp"
 #include "Strategy/Internal/BacktestStrategyRuntimeHelpers.hpp"
 #include "Execution/Internal/BacktestExecutionHelpers.hpp"
@@ -17,7 +18,11 @@
 #include "Input/Session/Internal/SessionLoaderHelpers.hpp"
 #include "Input/Binary/BinaryCorpusLoader.hpp"
 #include "Input/Binary/BinaryCorpusStream.hpp"
+#include "Input/Binary/Internal/BinaryCorpusHelpers.hpp"
 #include "Run/BacktestUniverse.hpp"
+#include "Run/Internal/BacktestRunContext.hpp"
+#include "Simulation/SimulationInput.hpp"
+#include "cxet/Runtime/Market/DepthFeedComposer.hpp"
 #include "hft_backtest/StrategyMetadata.hpp"
 #include "hftrec/CorpusContract/BinaryMarketCorpusReader.hpp"
 #include "hftrec/CorpusContract/BinaryMarketCorpusWriter.hpp"
@@ -109,6 +114,7 @@ struct BinaryTradeFixture {
         header.exchangeTimestampNs = part == 0u ? 199 : 150;
         header.flags = corpus::BinaryMarketRecordTraderReplayCompatible |
             corpus::BinaryMarketRecordDepthRebase |
+            (part == 1u ? corpus::BinaryMarketRecordDepthTransactionEnd : 0u) |
             (part == 0u ? corpus::BinaryMarketRecordDepthSnapshot : corpus::BinaryMarketRecordDepthDelta);
         auto& payload = *corpus::binaryMarketPayload<corpus::BinaryMarketDepthChunkPayload>(&record);
         payload = {};
@@ -193,7 +199,7 @@ struct BinaryTradeFixture {
       record.header.eventSequence = record.header.shardSequence = 3u;
       record.header.frameSequence = 2u;
       record.header.receiveRealtimeNs = record.header.receiveMonotonicNs = 250u;
-      record.header.flags = corpus::BinaryMarketRecordDepthState;
+      record.header.flags = corpus::BinaryMarketRecordDepthState | corpus::BinaryMarketRecordDepthTransactionEnd;
       record.header.sourceFlags = corpus::BinaryMarketSourceSequenceGap;
       record.payload = {};
       auto& payload = *corpus::binaryMarketPayload<corpus::BinaryMarketDepthChunkPayload>(&record);
@@ -212,6 +218,178 @@ struct BinaryTradeFixture {
   detail::SessionLoadPlan plan() const {
     detail::SessionLoadPlan result{}; result.loadBookTickers = false; result.requireTrades = true;
     return result;
+  }
+};
+
+hftrec::corpus::BinaryMarketSelection coverageDepthSelection() {
+  namespace corpus = hftrec::corpus;
+  corpus::BinaryMarketSelection selection{};
+  selection.manifest.producerEpoch = 13u;
+  selection.source.priceScale = selection.source.quantityScale = 8u;
+  selection.source.quantityConversion.canonicalBaseMultiplier =
+      selection.source.quantityConversion.nativeBaseMultiplier = 1u;
+  selection.source.quantityConversion.kinds[2] = corpus::BinaryMarketQuantityKind::CanonicalBase;
+  selection.records.resize(3u);
+  auto& root = selection.records[0];
+  auto& header = root.header;
+  header.sourceId = 1u; header.sourceGeneration = 11u; header.sessionEpoch = 17u;
+  header.eventSequence = 7u; header.frameSequence = 9u; header.shardSequence = 1u;
+  header.exchangeTimestampNs = 100; header.receiveRealtimeNs = 500;
+  header.receiveMonotonicNs = 600u; header.channel = corpus::BinaryMarketChannel::Depth;
+  header.flags = corpus::BinaryMarketRecordTraderReplayCompatible | corpus::BinaryMarketRecordDepthSnapshot |
+      corpus::BinaryMarketRecordDepthRebase | corpus::BinaryMarketRecordDepthHasCoverage |
+      corpus::BinaryMarketRecordDepthSourcePosition;
+  header.payloadBytes = sizeof(corpus::BinaryMarketDepthChunkPayload);
+  auto& depth = *corpus::binaryMarketPayload<corpus::BinaryMarketDepthChunkPayload>(&root);
+  depth.totalLevelCount = depth.levelCount = 2u;
+  depth.partCount = depth.transactionPartCount = 1u;
+  depth.frameKind = corpus::BinaryMarketDepthFrameKind::Snapshot;
+  depth.state = corpus::BinaryMarketDepthState::RebaseInFlight;
+  depth.sequence.firstUpdateId = depth.sequence.lastUpdateId = 42u;
+  depth.sourceReceiveRealtimeNs = 450u; depth.sourceFreshnessMonotonicNs = 550u;
+  using Field = cxet::api::market::MarketNativeField;
+  depth.nativeEvidence.set(Field::EventTime, 101u);
+  depth.nativeEvidence.set(Field::TransactionTime, 102u);
+  depth.nativeEvidence.set(Field::MatchingEngineTime, 103u);
+  depth.nativeEvidence.set(Field::SendTime, 104u);
+  depth.nativeEvidence.set(Field::UpdateId, 0u);
+  depth.nativeEvidence.updateGuarantee = cxet::api::market::MarketNativeCounterGuarantee::OrderOnly;
+  depth.nativeEvidence.set(Field::CrossSequence, 12u);
+  depth.levels[0] = {99u, 2u, 1u, 1u, 0u, 0u};
+  depth.levels[1] = {101u, 3u, 2u, 1u, 0u, 0u};
+  for (std::uint16_t part = 0u; part < 2u; ++part) {
+    auto& record = selection.records[part + 1u];
+    record.header = header;
+    record.header.shardSequence = part + 2u;
+    record.header.eventOrdinal = part;
+    record.header.flags = corpus::BinaryMarketRecordTraderReplayCompatible |
+        corpus::BinaryMarketRecordDepthCoverage | corpus::BinaryMarketRecordDepthHasCoverage |
+        corpus::BinaryMarketRecordDepthSourcePosition |
+        (part == 1u ? corpus::BinaryMarketRecordDepthTransactionEnd : 0u);
+    record.header.payloadBytes = sizeof(corpus::BinaryMarketDepthCoveragePayload);
+    auto& payload = *corpus::binaryMarketPayload<corpus::BinaryMarketDepthCoveragePayload>(&record);
+    payload.totalCoverageCount = 6u; payload.coverageOffset = part * 5u;
+    payload.coverageCount = part == 0u ? 5u : 1u;
+    payload.partIndex = part; payload.partCount = 2u; payload.transactionPartCount = 1u;
+    for (std::uint16_t index = 0u; index < payload.coverageCount; ++index) {
+      auto& feed = payload.coverage[index];
+      feed.sourceId = payload.coverageOffset + index + 10u; feed.sequenceDomain = 3u;
+      feed.maximumLevelsPerSide = 5u; feed.sequenceFlags = cxet::market::DepthEventSourcePosition;
+      feed.sourceGeneration = 20u; feed.sessionEpoch = 21u; feed.lastUpdateId = 22u;
+      feed.freshnessMonotonicNs = 540u; feed.lowestBidPriceRaw = 90; feed.highestAskPriceRaw = 110;
+      feed.lowestProtectedBidPriceRaw = 80; feed.highestProtectedAskPriceRaw = 120;
+      feed.state = corpus::BinaryMarketDepthState::Healthy; feed.snapshotAligned = 1u;
+      feed.nativeEvidence = depth.nativeEvidence;
+    }
+  }
+  return selection;
+}
+
+struct CoreComposedReplayFixture {
+  cxet::runtime::market::LocalOrderBookStore books;
+  cxet::runtime::market::DepthFeedComposer composer;
+  std::vector<hftrec::corpus::BinaryMarketSelection> cuts;
+  std::uint64_t nextShardSequence{1u};
+  CoreComposedReplayFixture() {
+    const std::array<std::uint32_t, 1u> capacities{8u};
+    const std::array<cxet::runtime::market::DepthFeedComposition, 1u> feeds{{{1u, 1u, 0u, 8u}}};
+    CXET_CHECK(books.initialize(capacities));
+    CXET_CHECK(composer.initialize(capacities, feeds));
+  }
+  cxet::runtime::market::DepthCommitSink sink() {
+    return {.context = this, .commit = +[](void* context,
+        const cxet::runtime::market::DepthCommitTransaction& tx) noexcept {
+      namespace corpus = hftrec::corpus;
+      try {
+        auto& self = *static_cast<CoreComposedReplayFixture*>(context);
+        if (tx.parts.size() != 1u || tx.coverage.empty() || tx.coverage.size() > 5u ||
+            tx.parts[0].metadata.mutationCount > 32u)
+          return cxet::runtime::market::DepthCommitStatus::InvalidInput;
+        auto selection = coverageDepthSelection(); selection.records.resize(2u);
+        const auto& metadata = tx.parts[0].metadata;
+        auto& record = selection.records[0]; record = {};
+        auto& h = record.header;
+        h.sourceId = metadata.sourceId; h.sourceGeneration = metadata.sourceGeneration;
+        h.sessionEpoch = metadata.sessionEpoch; h.eventSequence = metadata.publicationSequence;
+        h.frameSequence = metadata.publicationSequence; h.shardSequence = self.nextShardSequence++;
+        h.exchangeTimestampNs = static_cast<std::int64_t>(metadata.exchangeTimestampNs);
+        h.receiveRealtimeNs = static_cast<std::int64_t>(1'000u + metadata.publicationSequence);
+        h.receiveMonotonicNs = 2'000u + metadata.publicationSequence; h.channel = corpus::BinaryMarketChannel::Depth;
+        h.flags = corpus::BinaryMarketRecordTraderReplayCompatible | corpus::BinaryMarketRecordDepthSnapshot |
+            corpus::BinaryMarketRecordDepthSourcePosition | corpus::BinaryMarketRecordDepthHasCoverage;
+        if (metadata.state == cxet::market::DepthSourceState::Partial) h.flags |= corpus::BinaryMarketRecordDepthPartial;
+        if (!h.exchangeTimestampNs) {
+          h.flags |= corpus::BinaryMarketRecordExchangeTimestampMissing;
+          h.sourceFlags |= corpus::BinaryMarketSourceExchangeTimestampMissing;
+        }
+        h.payloadBytes = sizeof(corpus::BinaryMarketDepthChunkPayload);
+        auto& p = *corpus::binaryMarketPayload<corpus::BinaryMarketDepthChunkPayload>(&record);
+        p.sequence = {metadata.sequence.firstUpdateId, metadata.sequence.lastUpdateId, metadata.sequence.previousUpdateId};
+        p.totalLevelCount = metadata.mutationCount; p.levelCount = static_cast<std::uint16_t>(metadata.mutationCount);
+        p.partCount = p.transactionPartCount = 1u; p.frameKind = corpus::BinaryMarketDepthFrameKind::Snapshot;
+        p.state = static_cast<corpus::BinaryMarketDepthState>(metadata.state);
+        p.failure = static_cast<std::uint8_t>(metadata.failure);
+        p.sourceReceiveRealtimeNs = metadata.receiveTimestampNs;
+        p.sourceFreshnessMonotonicNs = metadata.freshnessMonotonicNs; p.nativeEvidence = metadata.nativeEvidence;
+        std::size_t level = 0u;
+        for (const auto& chunk : tx.parts[0].mutationChunks) for (std::uint32_t i=0u; i<chunk.count; ++i) {
+          if (level == p.levels.size()) return cxet::runtime::market::DepthCommitStatus::InvalidInput;
+          const auto& value = chunk.data[i];
+          p.levels[level++] = {static_cast<std::uint64_t>(value.priceRaw), static_cast<std::uint64_t>(value.quantityRaw),
+              static_cast<std::uint8_t>(value.side), static_cast<std::uint8_t>(value.action), 0u, 0u};
+        }
+        if (level != metadata.mutationCount) return cxet::runtime::market::DepthCommitStatus::InvalidInput;
+        auto& tail = selection.records[1]; tail = {}; tail.header = h;
+        tail.header.shardSequence = self.nextShardSequence++;
+        tail.header.flags &= ~static_cast<std::uint32_t>(corpus::BinaryMarketRecordDepthSnapshot | corpus::BinaryMarketRecordDepthPartial);
+        tail.header.flags |= corpus::BinaryMarketRecordDepthCoverage | corpus::BinaryMarketRecordDepthTransactionEnd;
+        tail.header.payloadBytes = sizeof(corpus::BinaryMarketDepthCoveragePayload);
+        auto& coverage = *corpus::binaryMarketPayload<corpus::BinaryMarketDepthCoveragePayload>(&tail);
+        coverage.totalCoverageCount = static_cast<std::uint32_t>(tx.coverage.size());
+        coverage.coverageCount = static_cast<std::uint16_t>(tx.coverage.size());
+        coverage.partCount = coverage.transactionPartCount = 1u;
+        for (std::size_t i=0u; i<tx.coverage.size(); ++i)
+          coverage.coverage[i] = corpus::encodeBinaryMarketDepthCoverage(tx.coverage[i]);
+        self.cuts.push_back(std::move(selection));
+        return cxet::runtime::market::DepthCommitStatus::Committed;
+      } catch (...) { return cxet::runtime::market::DepthCommitStatus::CapacityExceeded; }
+    }};
+  }
+  void publish(std::uint64_t sequence, bool snapshot) {
+    using namespace cxet::runtime::market;
+    const std::array<cxet::market::DepthMutation, 1u> mutations{{
+        {.priceRaw=99, .quantityRaw=static_cast<std::int64_t>(sequence + 1u), .side=cxet::market::DepthSide::Bid}}};
+    auto* book = books.book(1u);
+    const cxet::market::DepthSequence nativeSequence{sequence, sequence, snapshot ? 0u : sequence - 1u};
+    if (snapshot) {
+      CXET_CHECK(book->stageSnapshot(nativeSequence, mutations) == LocalOrderBookStatus::RebaseStaged);
+      CXET_CHECK(book->commitRebase() == LocalOrderBookStatus::RebaseCommitted);
+    } else CXET_CHECK(book->applyPartialDelta(nativeSequence, mutations) == LocalOrderBookStatus::Partial);
+    cxet::api::market::MarketNativeEvidence native;
+    native.set(cxet::api::market::MarketNativeField::EventTime, 100u + sequence);
+    native.set(cxet::api::market::MarketNativeField::UpdateId, sequence);
+    native.updateGuarantee = cxet::api::market::MarketNativeCounterGuarantee::OrderOnly;
+    DepthBookProjection projection{11u, 17u, sequence, 500u + sequence, 100u + sequence};
+    projection.nativeEvidence = native; book->commitProjection(projection);
+    const DepthCommitPart::MutationChunk chunk{mutations.data(), 1u};
+    const DepthCommitPart part{.metadata={.sourceId=1u, .mutationCount=1u, .sourceGeneration=11u,
+        .sessionEpoch=17u, .publicationSequence=sequence, .exchangeTimestampNs=100u + sequence,
+        .receiveTimestampNs=500u + sequence, .freshnessMonotonicNs=600u + sequence,
+        .sequence=nativeSequence, .flags=snapshot ? cxet::market::DepthEventSnapshot | cxet::market::DepthEventRebase
+            : cxet::market::DepthEventDelta | cxet::market::DepthEventPartial,
+        .state=book->state(), .nativeEvidence=native}, .mutationChunks={&chunk, 1u}};
+    const cxet::market::DepthSourceStateRecord state{.sourceId=1u, .sourceGeneration=11u, .sessionEpoch=17u,
+        .publicationSequence=sequence, .lastUpdateId=sequence, .lastExchangeTimestampNs=100u + sequence,
+        .lastFreshnessMonotonicNs=600u + sequence, .state=book->state(), .nativeEvidence=native};
+    composer.commit(books, {sequence, {&part, 1u}, state}, sink());
+  }
+  void gap(std::uint64_t sequence) {
+    books.book(1u)->markGap();
+    const cxet::market::DepthSourceStateRecord state{.sourceId=1u, .sourceGeneration=11u, .sessionEpoch=17u,
+        .publicationSequence=sequence, .lastUpdateId=sequence - 1u,
+        .lastExchangeTimestampNs=100u + sequence, .lastFreshnessMonotonicNs=600u + sequence,
+        .state=cxet::market::DepthSourceState::Gap, .failure=cxet::market::DepthFailure::ExchangeSequenceGap};
+    composer.observeState(books, state, sink());
   }
 };
 

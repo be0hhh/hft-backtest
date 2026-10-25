@@ -9,8 +9,6 @@
 
 namespace hft_backtest::research {
 
-inline constexpr std::uint32_t kResearchSchemaVersion = 2;
-inline constexpr std::uint32_t kResearchProtocolVersion = 1;
 // Wire admission ceiling matches the Recorder corpus owner (checked by service).
 inline constexpr std::uint32_t kResearchMaximumSources = 65536;
 inline constexpr std::uint32_t kResearchMaximumContexts = 100000;
@@ -51,7 +49,6 @@ struct ResourceBudget {
   std::uint64_t maxResultRows{10000000};
 };
 struct ExperimentSpec {
-  std::uint32_t schemaVersion{kResearchSchemaVersion};
   std::string id;
   ModuleKind kind{ModuleKind::Strategy};
   std::string module;
@@ -140,7 +137,6 @@ struct ModuleDescriptor {
   std::vector<std::string> profiles;
 };
 struct Request {
-  std::uint32_t protocolVersion{kResearchProtocolVersion};
   Command command{Command::Status};
   std::string experimentId;
   ExperimentSpec spec;
@@ -158,7 +154,6 @@ struct VariantDescription {
   std::string label;
 };
 struct Response {
-  std::uint32_t protocolVersion{kResearchProtocolVersion};
   bool ok{};
   std::string error;
   std::string buildIdentity;

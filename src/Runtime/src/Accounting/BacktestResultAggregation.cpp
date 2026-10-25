@@ -116,8 +116,8 @@ void appendDepthWarningForEngine(BacktestRunResult& result,
   }
 }
 
-void mergeStrategySpreadDiagnostics(detail::JsonStrategySpreadDiagnostics& out,
-                                    const detail::JsonStrategySpreadDiagnostics& in) noexcept {
+void mergeStrategySpreadDiagnostic(detail::JsonStrategySpreadDiagnostic& out,
+                                    const detail::JsonStrategySpreadDiagnostic& in) noexcept {
   if (in.rows == 0u) return;
   if (out.rows == 0u) {
     out.minEdgeAfterCostBpsE8 = in.minEdgeAfterCostBpsE8;
@@ -213,7 +213,7 @@ void populateAggregateArtifactEngine(const std::vector<detail::EngineState>& eng
     out.strategyRange.insert(out.strategyRange.end(), engine.strategyRange.begin(), engine.strategyRange.end());
     out.strategySpread.insert(out.strategySpread.end(), engine.strategySpread.begin(), engine.strategySpread.end());
     out.executionQuality.insert(out.executionQuality.end(), engine.executionQuality.begin(), engine.executionQuality.end());
-    mergeStrategySpreadDiagnostics(out.strategySpreadDiagnostics, engine.strategySpreadDiagnostics);
+    mergeStrategySpreadDiagnostic(out.strategySpreadDiagnostic, engine.strategySpreadDiagnostic);
     out.rateLimitUsage.insert(out.rateLimitUsage.end(), engine.rateLimitUsage.begin(), engine.rateLimitUsage.end());
     out.userEvents.insert(out.userEvents.end(), engine.userEvents.begin(), engine.userEvents.end());
     out.userEventContextIndices.insert(out.userEventContextIndices.end(), engine.userEventContextIndices.begin(), engine.userEventContextIndices.end());

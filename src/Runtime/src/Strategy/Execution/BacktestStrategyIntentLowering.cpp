@@ -126,8 +126,7 @@ bool footprintSupported(
       descriptor.footprint;
   const bool disciplineSupported = descriptor.stateDiscipline == trading_core::StrategyStateDiscipline::Snapshot ||
       (descriptor.stateDiscipline == trading_core::StrategyStateDiscipline::CanonicalEvidence &&
-       descriptor.minLegs == 2u && descriptor.maxLegs == 2u && descriptor.runtimePolicy &&
-       descriptor.runtimePolicy->available && descriptor.bindExecutionCold &&
+       trading_core::strategyDescriptorHasCanonicalExecution(descriptor) && descriptor.bindExecutionCold &&
        descriptor.commitPreparedDispatch && descriptor.retainsExecutionIntent);
   return disciplineSupported &&
       descriptor.footprint.stateScope == trading_core::StrategyStateScope::Instrument &&

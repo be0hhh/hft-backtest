@@ -53,6 +53,7 @@ struct SimulationEvidenceRetirementProof {
 [[nodiscard]] std::size_t reclaimSimulationOrderEvidence(
     EngineState&, SimulationEvidenceRetirementProof) noexcept;
 [[nodiscard]] bool prepareSimulationOrderEvidence(EngineState&) noexcept;
+[[nodiscard]] bool qualifySimulationGenericExecutionCold(EngineState&) noexcept;
 [[nodiscard]] bool configureSimulationDerivativeCollateral(EngineState&,
     std::int64_t initialMarginE8, std::int64_t basisQuantityE8,
     std::uint32_t currency) noexcept;

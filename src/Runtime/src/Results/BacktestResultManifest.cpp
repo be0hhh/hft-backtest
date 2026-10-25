@@ -216,13 +216,12 @@ bool writeManifest(const std::filesystem::path& path,
   std::ofstream out(path, std::ios::out | std::ios::trunc);
   if (!out.is_open()) return false;
   const char q = '"';
-  const RateLimitDiagnostics manifestRateLimits = collectRateLimitDiagnostics(engine, legEngines);
+  const RateLimitDiagnostic manifestRateLimits = collectRateLimitDiagnostic(engine, legEngines);
   const std::uint64_t manifestRejectedCommands = result.rateLimitRejectedCommands != 0u
       ? result.rateLimitRejectedCommands
       : rejectedCommandCount(manifestRateLimits);
   out << "{\n";
   out << "  " << q << "type" << q << ": " << q << "run.result" << q << ",\n";
-  out << "  " << q << "schema_version" << q << ": 5,\n";
   out << "  " << q << "universe" << q << ": {" << q << "sources" << q << ": "
       << result.universeSources << ", " << q << "contexts" << q << ": "
       << result.universeContexts << ", " << q << "virtual_accounts" << q << ": "
@@ -365,7 +364,7 @@ bool writeManifest(const std::filesystem::path& path,
   writeSummaryObject(out, result, engine, "    ");
   out << "  }";
   out << ",\n";
-  writeDiagnosticsObject(out, result, engine, legEngines, orderLifetimeRows, "  ");
+  writeDiagnosticObject(out, result, engine, legEngines, orderLifetimeRows, "  ");
   if (!result.legs.empty()) {
     out << ",\n";
     writeLegsArray(out, result, "  ");

@@ -86,12 +86,6 @@ bool validateCurrentRecorderManifest(const hftrec::capture::SessionManifest& man
                                      const SessionLoadPlan& plan,
                                      std::vector<std::string>& warnings,
                                      std::string& error) {
-  if (manifest.manifestSchemaVersion != hftrec::capture::kManifestSchemaVersionCurrent ||
-      manifest.corpusSchemaVersion != hftrec::capture::kCorpusSchemaVersionCurrent ||
-      manifest.captureContractVersion != hftrec::capture::kCaptureContractVersionCurrent) {
-    error = "incompatible recorder corpus: captured-arrival contract is required";
-    return false;
-  }
   if (manifest.sessionStatus != "complete") {
     error = "recorder session is not finalized: status=" + manifest.sessionStatus;
     return false;

@@ -134,6 +134,19 @@ Status BinaryCorpusStream::open(const std::filesystem::path& path,
     corpus::BinaryMarketSelection metadata;
     auto status = owner->cursor.open(common, metadata, error);
     if (!hftrec::isOk(status)) return binary_corpus::convertStatus(status);
+    std::vector<std::uint32_t> maximumCoverage(catalog.size());
+    if (plan.loadDepths) {
+      corpus::BinaryMarketRecord record{}; bool present = false;
+      do {
+        status = owner->cursor.next(record, present, error);
+        if (!hftrec::isOk(status)) return binary_corpus::convertStatus(status);
+        if (present && !binary_corpus::includeDepthCoverageMaximum(record, maximumCoverage)) {
+          error = "invalid captured depth coverage preflight"; return Status::CorruptData;
+        }
+      } while (present);
+      status = owner->cursor.open(common, metadata, error);
+      if (!hftrec::isOk(status)) return binary_corpus::convertStatus(status);
+    }
     for (const auto sourceId : common.sourceIds) {
       const auto required = requestedMask(plan, true);
       if (!allowQuietSources && (sourceId > metadata.sourceObservedChannelMasks.size() ||
@@ -165,9 +178,20 @@ Status BinaryCorpusStream::open(const std::filesystem::path& path,
       const auto initialized = binary_corpus::initializeBinaryMarketSession(
           selected, source.selection, plan, owner->sessions[leg], error);
       if (!isOk(initialized)) return initialized;
+      owner->sessions[leg].maximumCapturedDepthCoverageSources = maximumCoverage[sourceId - 1u];
       owner->sessions[leg].capturedDirectoryRevision = metadata.sourceLifecycleRevisionsAtBegin[sourceId - 1u];
       owner->sessions[leg].capturedUnhealthyChannels = source.unhealthyMask =
           metadata.sourceUnhealthyChannelMasksAtBegin[sourceId - 1u];
+      if (sourceId > metadata.sourceAdministrativeUnhealthyChannelMasksAtBegin.size() ||
+          sourceId > metadata.sourceRecoveryPendingChannelMasksAtBegin.size()) {
+        error = "bounded corpus preflight omitted administrative depth overlay"; return Status::CorruptData;
+      }
+      const auto depthBit = corpus::binaryMarketChannelBit(corpus::BinaryMarketChannel::Depth);
+      owner->sessions[leg].capturedDepthAdministrativeUnhealthy =
+          ((metadata.sourceAdministrativeUnhealthyChannelMasksAtBegin[sourceId - 1u] |
+            metadata.sourceRecoveryPendingChannelMasksAtBegin[sourceId - 1u]) & depthBit) != 0u;
+      owner->sessions[leg].capturedDepthRecoveryPending =
+          (metadata.sourceRecoveryPendingChannelMasksAtBegin[sourceId - 1u] & depthBit) != 0u;
     }
     status = owner->cursor.next(owner->head, owner->available, error);
     if (!hftrec::isOk(status)) return binary_corpus::convertStatus(status);
@@ -261,6 +285,32 @@ Status BinaryCorpusStream::next(std::vector<TimelineEvent>& events,
         if (!hftrec::isOk(status)) return binary_corpus::convertStatus(status);
       }
     }
+    if (first.channel == corpus::BinaryMarketChannel::Depth &&
+        (first.flags & corpus::BinaryMarketRecordDepthHasCoverage) != 0u) {
+      const auto* coverage = impl_->available
+          ? binary_corpus::checkedPayload<corpus::BinaryMarketDepthCoveragePayload>(impl_->head) : nullptr;
+      if (!coverage || !corpus::validBinaryMarketDepthCoveragePayload(*coverage) ||
+          coverage->partIndex != 0u || coverage->transactionPartCount != transactions) {
+        error = "missing bounded binary corpus depth coverage tail";
+        return Status::CorruptData;
+      }
+      const auto chunks = coverage->partCount;
+      for (std::uint16_t chunk = 0u; chunk < chunks; ++chunk) {
+        if (!impl_->available ||
+            (impl_->head.header.flags & corpus::BinaryMarketRecordDepthCoverage) == 0u) {
+          error = "truncated bounded binary corpus depth coverage tail";
+          return Status::CorruptData;
+        }
+        selection.records.push_back(impl_->head);
+        const auto status = impl_->cursor.next(impl_->head, impl_->available, error);
+        if (!hftrec::isOk(status)) return binary_corpus::convertStatus(status);
+      }
+    }
+    if (first.channel == corpus::BinaryMarketChannel::Depth &&
+        !binary_corpus::completeDepthApplication(selection.records)) {
+      error = "incomplete bounded binary corpus depth application";
+      return Status::CorruptData;
+    }
     auto& session = impl_->sessions[leg];
     if (first.channel == corpus::BinaryMarketChannel::SourceLifecycle) {
       const auto* lifecycle = binary_corpus::checkedPayload<corpus::BinaryMarketSourceLifecyclePayload>(selection.records[0]);
@@ -318,9 +368,16 @@ Status BinaryCorpusStream::next(std::vector<TimelineEvent>& events,
       if (!isOk(updated)) return updated;
     } else {
       const auto bit = corpus::binaryMarketChannelBit(first.channel);
-      const bool unhealthy = std::any_of(selection.records.begin(), selection.records.end(), observedUnhealthy);
+      const bool composed = corpus::binaryMarketDepthRecordIsComposedCut(selection.records.front());
+      const auto* composedPayload = composed
+          ? corpus::binaryMarketPayload<corpus::BinaryMarketDepthChunkPayload>(&selection.records.front()) : nullptr;
+      const bool unhealthy = composedPayload
+          ? composedPayload->state == corpus::BinaryMarketDepthState::Gap || composedPayload->state == corpus::BinaryMarketDepthState::Empty
+          : std::any_of(selection.records.begin(), selection.records.end(), observedUnhealthy);
       const bool previous = (source.unhealthyMask & bit) != 0u;
-      if (unhealthy || previous) {
+      const bool canRecover = first.channel != corpus::BinaryMarketChannel::Depth ||
+          binary_corpus::depthRecordCanRecoverSource(selection.records.front());
+      if (unhealthy || (previous && canRecover)) {
         // Keep the exact observed record, including native depth Gap payload.
         // It supplies readiness evidence and never installs unhealthy prices.
         const auto arrival = binary_corpus::makeArrival(selection.manifest, first);
@@ -332,7 +389,7 @@ Status BinaryCorpusStream::next(std::vector<TimelineEvent>& events,
         if (unhealthy) source.unhealthyMask |= bit;
         else source.unhealthyMask &= static_cast<std::uint16_t>(~bit);
       }
-      if (unhealthy) {
+      if (unhealthy && !composed) {
         binary_corpus::includeEvidence(session, first);
       } else {
         const auto status = binary_corpus::decodeBinaryMarketRecords(

@@ -1,5 +1,6 @@
 #pragma once
 #include "trading_core/Strategy/Descriptor/StrategyInstanceSelection.hpp"
+#include "trading_core/Strategy/Descriptor/StrategyRuntimePolicy.hpp"
 #include "trading_core/Strategy/Orders/Execution/PairStrategyInputs.hpp"
 
 #include <vector>

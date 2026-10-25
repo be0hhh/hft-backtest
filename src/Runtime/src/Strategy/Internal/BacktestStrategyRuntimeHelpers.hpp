@@ -5,7 +5,7 @@
 
 #include "../../Config/BacktestRunConfig.hpp"
 #include "../Execution/BacktestStrategyIntentLowering.hpp"
-#include "../Diagnostics/BacktestStrategyTrace.hpp"
+#include "../Diagnostic/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
 #include "trading_core/Strategy/Orders/Intent/WarmupIntents.hpp"
@@ -103,8 +103,6 @@ trading_core::ShardControlState backtestControlWithInputFreshness(
     const trading_core::strategy::StrategyInputSourceMaskState& freshness) noexcept;
 void retainCancelOutputsWhenNewOrdersBlocked(
     trading_core::StrategyIo& io) noexcept;
-void bindBacktestStrategyStateView(
-    trading_core::StrategyContext& ctx) noexcept;
 const BacktestStrategyVenueConfig* venueByName(
     const BacktestStrategyConfig& cfg,
     const std::string& name) noexcept;

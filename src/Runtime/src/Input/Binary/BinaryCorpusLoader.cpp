@@ -186,7 +186,8 @@ checkedBookTickerPayload(
   const bool askPresent =
       (record.header.sourceFlags &
        corpus::BinaryMarketSourceBookTickerAskPresent) != 0u;
-  return payload && (bidPresent || askPresent) &&
+  return payload && cxet::api::market::validMarketNativeEvidence(payload->nativeEvidence) &&
+          (bidPresent || askPresent) &&
           (bidPresent
                ? payload->bidPriceRaw > 0 && payload->bidQtyRaw >= 0
                : payload->bidPriceRaw == 0 && payload->bidQtyRaw == 0) &&
@@ -286,7 +287,11 @@ void includeEvidence(SessionData& output,
         corpus::BinaryMarketRecordDepthDelta |
         corpus::BinaryMarketRecordDepthPartial |
         corpus::BinaryMarketRecordDepthRebase |
-        corpus::BinaryMarketRecordDepthState;
+        corpus::BinaryMarketRecordDepthState |
+        corpus::BinaryMarketRecordDepthCoverage |
+        corpus::BinaryMarketRecordDepthHasCoverage |
+        corpus::BinaryMarketRecordDepthTransactionEnd |
+        corpus::BinaryMarketRecordDepthSourcePosition;
   }
   return (header.flags & corpus::BinaryMarketRecordGapBoundary) == 0u &&
       (header.flags & ~allowed) == 0u;
@@ -426,14 +431,7 @@ Status decodeBinaryMarketRecords(const corpus::BinaryMarketSelection& selection,
       }
       ++ingestSequence;
       if (record.header.channel == corpus::BinaryMarketChannel::Depth) {
-        const auto* depth =
-            checkedPayload<corpus::BinaryMarketDepthChunkPayload>(record);
-        if (!depth ||
-            !advanceDepthRebase(record.header, *depth, depthRebase)) {
-          error = "binary corpus depth rebase transaction is incomplete";
-          return Status::CorruptData;
-        }
-        if (!appendDepth(selection, recordIndex, ingestSequence,
+        if (!appendDepthTransaction(selection, recordIndex, state,
                          output, error)) {
           return Status::CorruptData;
         }
@@ -464,6 +462,7 @@ Status decodeBinaryMarketRecords(const corpus::BinaryMarketSelection& selection,
           row.tsNs = record.header.exchangeTimestampNs;
           row.ingestSeq = ingestSequence;
           row.arrival = arrival;
+          row.nativeEvidence = payload->nativeEvidence;
           row.bidPresent =
               (record.header.sourceFlags &
                corpus::BinaryMarketSourceBookTickerBidPresent) != 0u;
@@ -477,7 +476,8 @@ Status decodeBinaryMarketRecords(const corpus::BinaryMarketSelection& selection,
         case corpus::BinaryMarketChannel::Trade: {
           const auto* payload =
               checkedPayload<corpus::BinaryMarketTradePayload>(record);
-          if (!payload || (payload->side != 1u && payload->side != 2u) ||
+          if (!payload || !cxet::api::market::validMarketNativeEvidence(payload->nativeEvidence) ||
+              (payload->side != 1u && payload->side != 2u) ||
               payload->reserved != decltype(payload->reserved){}) {
             error = "invalid binary corpus trade payload";
             return Status::CorruptData;
@@ -495,6 +495,7 @@ Status decodeBinaryMarketRecords(const corpus::BinaryMarketSelection& selection,
           row.tsNs = record.header.exchangeTimestampNs;
           row.ingestSeq = ingestSequence;
           row.arrival = arrival;
+          row.nativeEvidence = payload->nativeEvidence;
           row.nativeIdentity.nativeFirst = record.header.nativeIdentityFirst;
           row.nativeIdentity.nativeSecond = record.header.nativeIdentitySecond;
           row.nativeIdentity.nativeShape = static_cast<cxet::api::market::PublicMarketNativeIdentityShape>(

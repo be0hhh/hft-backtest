@@ -9,7 +9,8 @@ namespace hft_backtest::detail::binary_corpus {
   constexpr std::uint32_t anomalyFlags =
       corpus::BinaryMarketRecordRealtimeRegression |
       corpus::BinaryMarketRecordMonotonicNonIncreasing |
-      corpus::BinaryMarketRecordExchangeAheadOfReceive;
+      corpus::BinaryMarketRecordExchangeAheadOfReceive |
+      corpus::BinaryMarketRecordDepthTransactionEnd;
   return current.sourceId == first.sourceId &&
       current.sourceGeneration == first.sourceGeneration &&
       current.sessionEpoch == first.sessionEpoch &&
@@ -118,24 +119,26 @@ namespace hft_backtest::detail::binary_corpus {
   const auto& firstRecord = selection.records[recordIndex];
   const auto* first = checkedPayload<corpus::BinaryMarketDepthChunkPayload>(
       firstRecord);
+  const bool composed = corpus::binaryMarketDepthRecordIsComposedCut(firstRecord);
   if (!first || first->partIndex != 0u || first->partCount == 0u ||
-      first->totalLevelCount == 0u ||
+      (first->totalLevelCount == 0u &&
+       first->frameKind != corpus::BinaryMarketDepthFrameKind::Snapshot) ||
       first->totalLevelCount > rawdata::kMaxOrderbookLevels ||
       first->partCount !=
-          (first->totalLevelCount +
+          std::max<std::size_t>(1u, (first->totalLevelCount +
            corpus::kBinaryMarketDepthLevelsPerRecord - 1u) /
-              corpus::kBinaryMarketDepthLevelsPerRecord ||
+              corpus::kBinaryMarketDepthLevelsPerRecord) ||
       (first->frameKind !=
            corpus::BinaryMarketDepthFrameKind::Snapshot &&
        first->frameKind != corpus::BinaryMarketDepthFrameKind::Delta) ||
-      (first->state != corpus::BinaryMarketDepthState::Partial &&
+      (!composed && first->state != corpus::BinaryMarketDepthState::Partial &&
        first->state != corpus::BinaryMarketDepthState::RebaseInFlight &&
        first->state != corpus::BinaryMarketDepthState::Healthy) ||
-      first->failure != 0u ||
-      first->sourceReceiveRealtimeNs == 0u ||
+      (!composed && first->failure != 0u) ||
+      (!composed && first->sourceReceiveRealtimeNs == 0u) ||
       first->sourceReceiveRealtimeNs > static_cast<std::uint64_t>(
           std::numeric_limits<std::int64_t>::max()) ||
-      first->sourceFreshnessMonotonicNs == 0u ||
+      (!composed && first->sourceFreshnessMonotonicNs == 0u) ||
       first->transactionPartCount == 0u ||
       first->transactionPartIndex >= first->transactionPartCount ||
       first->reserved8 != 0u || first->reserved16 != 0u) {
@@ -164,9 +167,9 @@ namespace hft_backtest::detail::binary_corpus {
       (firstRecord.header.flags & otherKindFlag) != 0u ||
       (firstRecord.header.flags &
        corpus::BinaryMarketRecordDepthState) != 0u ||
-      partialFlag != partial || (snapshot && partial) ||
+      partialFlag != partial || (!composed && snapshot && partial) ||
       rebaseFlag != rebaseInFlight ||
-      (snapshot && !rebaseInFlight) ||
+      (!composed && snapshot && !rebaseInFlight) ||
       (rebaseInFlight &&
        (snapshot != (first->transactionPartIndex == 0u))) ||
       (!rebaseInFlight &&
@@ -195,6 +198,14 @@ namespace hft_backtest::detail::binary_corpus {
   row.capturedPublicationSequence = firstRecord.header.eventSequence;
   row.capturedSequence = {first->sequence.firstUpdateId,
       first->sequence.lastUpdateId, first->sequence.previousUpdateId};
+  row.nativeEvidence = first->nativeEvidence;
+  row.sourceReceiveRealtimeNs = first->sourceReceiveRealtimeNs;
+  row.sourceFreshnessMonotonicNs = first->sourceFreshnessMonotonicNs;
+  row.capturedSourcePosition = (firstRecord.header.flags &
+      corpus::BinaryMarketRecordDepthSourcePosition) != 0u;
+  row.capturedComposedCut = composed;
+  row.capturedState = static_cast<cxet::market::DepthSourceState>(first->state);
+  row.capturedFailure = static_cast<cxet::market::DepthFailure>(first->failure);
   row.applicationAtomicRebase = rebaseInFlight;
   row.levels.reserve(first->totalLevelCount);
 
@@ -217,7 +228,7 @@ namespace hft_backtest::detail::binary_corpus {
         std::min<std::uint32_t>(
             corpus::kBinaryMarketDepthLevelsPerRecord,
             first->totalLevelCount - offset));
-    if (!part || !channelFlagsValid(record.header) ||
+    if (!part || !corpus::validBinaryMarketRecord(record) || !channelFlagsValid(record.header) ||
         !sameDepthFrame(firstRecord.header, record.header, partIndex) ||
         part->totalLevelCount != first->totalLevelCount ||
         part->levelOffset != offset || part->partIndex != partIndex ||
@@ -235,6 +246,12 @@ namespace hft_backtest::detail::binary_corpus {
             first->sourceReceiveRealtimeNs ||
         part->sourceFreshnessMonotonicNs !=
             first->sourceFreshnessMonotonicNs ||
+        part->nativeEvidence != first->nativeEvidence ||
+        !cxet::api::market::validMarketNativeEvidence(part->nativeEvidence) ||
+        (((record.header.flags & corpus::BinaryMarketRecordDepthTransactionEnd) != 0u) !=
+            ((record.header.flags & corpus::BinaryMarketRecordDepthHasCoverage) == 0u &&
+             first->transactionPartIndex + 1u == first->transactionPartCount &&
+             partIndex + 1u == first->partCount)) ||
         part->reserved8 != 0u || part->reserved16 != 0u) {
       error = "binary corpus depth chunk contract mismatch";
       return false;
@@ -284,6 +301,125 @@ namespace hft_backtest::detail::binary_corpus {
   includeEvidence(output, firstRecord.header);
   output.depths.push_back(std::move(row));
   recordIndex += first->partCount;
+  return true;
+}
+
+[[nodiscard]] bool appendDepthTransaction(
+    const corpus::BinaryMarketSelection& selection,
+    std::size_t& recordIndex,
+    BinaryDecodeState& state,
+    SessionData& output,
+    std::string& error) {
+  const auto start = recordIndex;
+  const auto& root = selection.records[start].header;
+  const auto* initial = checkedPayload<corpus::BinaryMarketDepthChunkPayload>(selection.records[start]);
+  if (!initial || initial->transactionPartIndex != 0u ||
+      initial->transactionPartCount == 0u ||
+      initial->transactionPartCount > cxet::market::kMaximumDepthTransactionParts ||
+      (root.flags & corpus::BinaryMarketRecordDepthCoverage) != 0u) {
+    error = "invalid binary corpus depth transaction start";
+    return false;
+  }
+  const auto count = initial->transactionPartCount;
+  const bool hasCoverage = (root.flags & corpus::BinaryMarketRecordDepthHasCoverage) != 0u;
+  corpus::BinaryMarketDepthTransactionState transaction{};
+  std::size_t transactionEnd = start;
+  do {
+    if (transactionEnd - start >= kMaximumDepthApplicationRecords ||
+        transactionEnd >= selection.records.size() ||
+        !corpus::advanceBinaryMarketDepthTransaction(selection.records[transactionEnd], transaction)) {
+      error = "incomplete binary corpus depth application transaction"; return false;
+    }
+    ++transactionEnd;
+  } while (transaction.active());
+  const bool composed = corpus::binaryMarketDepthRecordIsComposedCut(selection.records[start]);
+  if (composed && state.composedSourceGeneration == root.sourceGeneration &&
+      state.composedSessionEpoch == root.sessionEpoch &&
+      root.eventSequence <= state.composedPublicationSequence) {
+    error = "binary corpus composed depth publication is stale"; return false;
+  }
+  // Stage all native parts and their coverage before publishing any replay row.
+  SessionData staged{};
+  std::array<std::size_t, cxet::market::kMaximumDepthTransactionParts> starts{};
+  std::uint64_t totalLevels = 0u;
+  std::size_t next = start;
+  for (std::uint16_t part = 0u; part < count; ++part) {
+    if (next >= selection.records.size()) {
+      error = "truncated binary corpus depth transaction"; return false;
+    }
+    const auto& record = selection.records[next];
+    const auto* payload = checkedPayload<corpus::BinaryMarketDepthChunkPayload>(record);
+    if (!payload || payload->transactionPartIndex != part || payload->transactionPartCount != count ||
+        ((record.header.flags & corpus::BinaryMarketRecordDepthHasCoverage) != 0u) != hasCoverage ||
+        !advanceDepthRebase(record.header, *payload, state.depthRebase)) {
+      error = "binary corpus depth transaction part mismatch"; return false;
+    }
+    totalLevels += payload->totalLevelCount;
+    if (totalLevels > cxet::market::kMaximumDepthTransactionMutations ||
+        (part != 0u && state.ingestSequence == std::numeric_limits<std::int64_t>::max())) {
+      error = "binary corpus depth transaction exceeds bounded replay capacity"; return false;
+    }
+    if (part != 0u) ++state.ingestSequence;
+    starts[part] = next;
+    if (!appendDepth(selection, next, state.ingestSequence, staged, error)) return false;
+  }
+  if (state.depthRebase.active) {
+    error = "binary corpus depth transaction is incomplete"; return false;
+  }
+  if (hasCoverage) {
+    if (next >= selection.records.size()) {
+      error = "missing binary corpus depth coverage tail"; return false;
+    }
+    const auto& last = selection.records[next - 1u].header;
+    const auto* firstCoverage = checkedPayload<corpus::BinaryMarketDepthCoveragePayload>(selection.records[next]);
+    if (!firstCoverage || !corpus::validBinaryMarketDepthCoveragePayload(*firstCoverage)) {
+      error = "invalid binary corpus depth coverage tail"; return false;
+    }
+    auto& coverage = staged.depths.back().capturedCoverage;
+    coverage.reserve(firstCoverage->totalCoverageCount);
+    for (std::uint16_t part = 0u; part < firstCoverage->partCount; ++part) {
+      if (next >= selection.records.size()) {
+        error = "truncated binary corpus depth coverage tail"; return false;
+      }
+      const auto& record = selection.records[next];
+      const auto& header = record.header;
+      const auto* payload = checkedPayload<corpus::BinaryMarketDepthCoveragePayload>(record);
+      if (!payload || !corpus::validBinaryMarketRecord(record) ||
+          !corpus::validBinaryMarketDepthCoveragePayload(*payload) ||
+          header.shardIndex != last.shardIndex || header.eventOrdinal != part ||
+          last.shardSequence > std::numeric_limits<std::uint64_t>::max() - part - 1u ||
+          header.shardSequence != last.shardSequence + part + 1u) {
+        error = "binary corpus depth coverage transaction mismatch"; return false;
+      }
+      for (std::uint16_t index = 0u; index < payload->coverageCount; ++index) {
+        auto feed = corpus::decodeBinaryMarketDepthCoverage(payload->coverage[index]);
+        if (!rescaleToE8(feed.lowestBidPriceRaw, selection.source.priceScale, feed.lowestBidPriceRaw) ||
+            !rescaleToE8(feed.highestAskPriceRaw, selection.source.priceScale, feed.highestAskPriceRaw) ||
+            !rescaleToE8(feed.lowestProtectedBidPriceRaw, selection.source.priceScale, feed.lowestProtectedBidPriceRaw) ||
+            !rescaleToE8(feed.highestProtectedAskPriceRaw, selection.source.priceScale, feed.highestProtectedAskPriceRaw)) {
+          error = "binary corpus depth coverage price cannot be represented exactly in E8"; return false;
+        }
+        coverage.push_back(feed);
+      }
+      ++next;
+    }
+  }
+  if (next != transactionEnd) {
+    error = "binary corpus depth transaction boundary mismatch"; return false;
+  }
+  if (composed) {
+    state.composedPublicationSequence = root.eventSequence;
+    state.composedSourceGeneration = root.sourceGeneration;
+    state.composedSessionEpoch = root.sessionEpoch;
+  }
+  output.maximumCapturedDepthCoverageSources = std::max(output.maximumCapturedDepthCoverageSources,
+      static_cast<std::uint32_t>(staged.depths.back().capturedCoverage.size()));
+  output.depths.reserve(output.depths.size() + count);
+  for (std::uint16_t part = 0u; part < count; ++part) {
+    includeEvidence(output, selection.records[starts[part]].header);
+    output.depths.push_back(std::move(staged.depths[part]));
+  }
+  recordIndex = next;
   return true;
 }
 

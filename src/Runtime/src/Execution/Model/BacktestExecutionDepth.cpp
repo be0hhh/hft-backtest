@@ -327,12 +327,6 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
   if (!readText(sessionPath / "manifest.json", manifestDocument) ||
       !hftrec::isOk(hftrec::capture::parseManifestJson(
           manifestDocument, manifest)) ||
-      manifest.manifestSchemaVersion !=
-          hftrec::capture::kManifestSchemaVersionCurrent ||
-      manifest.corpusSchemaVersion !=
-          hftrec::capture::kCorpusSchemaVersionCurrent ||
-      manifest.captureContractVersion !=
-          hftrec::capture::kCaptureContractVersionCurrent ||
       manifest.sessionStatus != "complete" ||
       !manifest.structurallyLoadable ||
       manifest.sessionHealth != hftrec::SessionHealth::Clean ||

@@ -3,7 +3,7 @@
 
 #include "../../Config/BacktestRunConfig.hpp"
 #include "../Execution/BacktestStrategyIntentLowering.hpp"
-#include "../Diagnostics/BacktestStrategyTrace.hpp"
+#include "../Diagnostic/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
 #include "trading_core/Strategy/Orders/Intent/WarmupIntents.hpp"
@@ -64,19 +64,6 @@ void retainCancelOutputsWhenNewOrdersBlocked(
     ++writeIndex;
   }
   io.commandCount = writeIndex;
-}
-
-void bindBacktestStrategyStateView(
-    trading_core::StrategyContext& ctx) noexcept {
-  ctx.state.orders.primary = ctx.orderState;
-  ctx.state.orders.legs = ctx.orderStates;
-  ctx.state.orders.primaryWarmup = ctx.orderPathWarmup;
-  ctx.state.orders.warmups = ctx.orderPathWarmups;
-  ctx.state.positions.primary = ctx.positionState;
-  ctx.state.positions.legs = ctx.positionStates;
-  ctx.state.account.primary = ctx.accountState;
-  ctx.state.account.legs = ctx.accountStates;
-  trading_core::bindStrategyContextStateAliases(ctx);
 }
 
 }  // namespace hft_backtest::strategy_runtime_detail

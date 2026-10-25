@@ -2,6 +2,8 @@
 
 #include "Model/BacktestExecutionDepth.hpp"
 #include "BacktestClientOrderId.hpp"
+#include "trading_core/Strategy/Orders/Admission/StrategyCloseGrant.hpp"
+#include "trading_core/Strategy/Orders/Evidence/OrderDecisionCursor.hpp"
 #include "Model/BacktestFillModel.hpp"
 
 #include <algorithm>
@@ -96,7 +98,7 @@ bool submitCancelIntent(EngineState& engine,
                         const trading_core::CancelIntent& intent,
                         std::int64_t tsNs,
                         std::int64_t activeTs) {
-  if (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
+  if (!engine.genericCommandInputAdmission && engine.capturedSourceManaged && (!engine.capturedSourceMember ||
       (engine.capturedExecutionRequiredChannels & ~engine.capturedActiveChannels) != 0u ||
       (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u)) return false;
   const std::size_t slotIndex = findOpenIndex(engine, intent.targetClientIntentId);
@@ -167,9 +169,13 @@ bool submitCancelIntent(EngineState& engine,
                                      std::uint32_t warmupCancelTimeoutMs,
                                      bool warmupCancelAfterAck) {
   if (engine.simulationEvidenceFailed) return false;
+  if (engine.genericCommandInputAdmission && intent.semantic == trading_core::StrategyOrderSemantic::ManagedReduce &&
+      !engine.scopedCloseGrant) return false;
+  if (engine.liquidated || engine.riskStopped) return false;
   if (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
-      (engine.capturedExecutionRequiredChannels & ~engine.capturedActiveChannels) != 0u ||
-      (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u)) return false;
+      (!engine.genericCommandInputAdmission &&
+       ((engine.capturedExecutionRequiredChannels & ~engine.capturedActiveChannels) != 0u ||
+        (engine.capturedExecutionRequiredChannels & engine.capturedUnhealthyChannels) != 0u)))) return false;
   const bool postOnly = intent.orderType == canon::OrderType::Limit && isPostOnlyPolicy(intent.limitTimeInForcePolicy);
   const bool service = intent.service || warmup;
   const bool reduceOnly =
@@ -327,6 +333,15 @@ bool submitCancelIntent(EngineState& engine,
   }
   appendRateLimitUsageSnapshot(engine, tsNs);
   if (reduceOnly) ++engine.reduceOnlyOrders;
+  if (engine.scopedCloseGrant) {
+    const auto view = simulationOrderEvidenceView(engine);
+    const auto* identity = trading_core::strategy::canonicalOrderEvidenceIdentity(view, intent.clientIntentId, view.expectedGeneration);
+    if (!identity || !identity->record || !engine.scopedCloseGrant->authorizeWrite(identity->record)) {
+      engine.orders[recordIndex].status = kRecordStatusRejected;
+      if (!settleSimulationOrderSubmit(engine, intent.clientIntentId, false)) engine.simulationEvidenceFailed = true;
+      return false;
+    }
+  }
   if (!settleSimulationOrderSubmit(engine, intent.clientIntentId, true)) {
     engine.orders[recordIndex].status = kRecordStatusRejected;
     engine.simulationEvidenceFailed = true;
@@ -416,7 +431,7 @@ void applyIntentsImpl(EngineState& engine,
                       std::int64_t tsNs,
                       OrderActiveTsFn orderActiveTs,
                       CancelActiveTsFn cancelActiveTs) {
-  if (engine.liquidated || engine.riskStopped) return;
+  if (!engine.genericCommandInputAdmission && (engine.liquidated || engine.riskStopped)) return;
   if (!trading_core::strategyIoCommandSequencesValid(io)) return;
 
   const bool hasIntents = io.cancelCount != 0u || io.orderCount != 0u || io.commandCount != 0u;

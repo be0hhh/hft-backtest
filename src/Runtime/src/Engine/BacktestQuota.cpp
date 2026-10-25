@@ -1,4 +1,5 @@
 #include "BacktestQuota.hpp"
+#include "trading_core/Execution/Permits.hpp"
 
 #include <algorithm>
 #include <array>

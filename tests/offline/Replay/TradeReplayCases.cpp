@@ -9,6 +9,7 @@ const cxet::testing::Case cases[]{
 #include "TradeReplayStreamingCases.ipp"
 #include "TradeReplayFreshnessCases.ipp"
 #include "TradeReplayIdentityConversionCases.ipp"
+#include "TradeReplayNativeEvidenceCases.ipp"
 };
 }
 

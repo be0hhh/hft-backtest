@@ -9,7 +9,7 @@ target_include_directories(hft_backtest_research_client PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(hft_backtest_research_client PUBLIC cxx_std_23)
 target_link_libraries(hft_backtest_research_client
-  PUBLIC cxet::read_only_contracts PRIVATE Threads::Threads)
+  PUBLIC cxet::read_only_contracts hftrec::corpus_contract PRIVATE Threads::Threads)
 
 add_library(hft_backtest_research_service STATIC
   src/ResearchRegistry.cpp

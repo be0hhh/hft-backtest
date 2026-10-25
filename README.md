@@ -125,11 +125,10 @@ secret fail explicitly before checkout and do not provide a passing CI result.
 Run and sweep artifacts contain financial/simulation results without stage,
 wall/CPU or depth-read profiling. Simulated execution latency, replay timestamps,
 fills, equity, drawdown, progress and bounded sweep worker scheduling remain.
-The public Backtest ABI is version 8; Recorder and the CLI use the same numeric
-guard. Finite `run.result` artifacts retain schema 5 with JSONL streams including
+The public Backtest ABI is the one current contract shared with Recorder and
+the CLI. Finite `run.result` artifacts include JSONL streams
 `fills.jsonl`, `equity.jsonl` and `order_lifetimes.jsonl`. Continuous research
-uses its separately guarded, immutable attempt/segment schema. Recorder can
-display older financial summaries read-only.
+uses the current immutable attempt/segment layout.
 
 Binary corpus runs stream checked compressed blocks directly into bounded RAM.
 An empty corpus source selection discovers eligible contexts over the recording

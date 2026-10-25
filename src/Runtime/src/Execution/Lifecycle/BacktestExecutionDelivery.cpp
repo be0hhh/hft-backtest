@@ -42,6 +42,8 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
       ? static_cast<std::int64_t>(order.filledNotionalRaw / cumulativeQtyE8) : priceE8;
   event.lastPrice.raw = priceE8;
   event.qty = order.state.qty;
+  event.quantityUnit = cxet::contract::Unit::BaseQuantity;
+  event.quantityDenomination = cxet::contract::QuantityDenomination::Canonical;
   event.filledQty.raw = cumulativeQtyE8;
   event.lastFilledQty.raw = qtyE8;
   event.fee.raw = feeE8;
@@ -70,6 +72,10 @@ cxet::composite::UserDataEvent makeFillEvent(EngineState& engine,
       event, cxet::composite::UserDataField::LastPrice);
   cxet::composite::markUserDataFieldPresent(
       event, cxet::composite::UserDataField::Qty);
+  cxet::composite::markUserDataFieldPresent(
+      event, cxet::composite::UserDataField::QuantityUnit);
+  cxet::composite::markUserDataFieldPresent(
+      event, cxet::composite::UserDataField::QuantityDenomination);
   cxet::composite::markUserDataFieldPresent(
       event, cxet::composite::UserDataField::FilledQty);
   cxet::composite::markUserDataFieldPresent(
@@ -107,6 +113,8 @@ cxet::composite::UserDataEvent makeRejectedOrderEvent(EngineState& engine,
   event.orderStatus = canon::OrderStatus::Rejected;
   event.orderProblem = problem;
   event.qty = order.state.qty;
+  event.quantityUnit = cxet::contract::Unit::BaseQuantity;
+  event.quantityDenomination = cxet::contract::QuantityDenomination::Canonical;
   event.eventTime.raw = static_cast<std::uint64_t>(tsNs > 0 ? tsNs : 0);
   event.updateTime = event.eventTime;
   event.reduceOnly = order.reduceOnly ? 1u : 0u;
@@ -126,6 +134,10 @@ cxet::composite::UserDataEvent makeRejectedOrderEvent(EngineState& engine,
       event, cxet::composite::UserDataField::OrderProblem);
   cxet::composite::markUserDataFieldPresent(
       event, cxet::composite::UserDataField::Qty);
+  cxet::composite::markUserDataFieldPresent(
+      event, cxet::composite::UserDataField::QuantityUnit);
+  cxet::composite::markUserDataFieldPresent(
+      event, cxet::composite::UserDataField::QuantityDenomination);
   cxet::composite::markUserDataFieldPresent(
       event, cxet::composite::UserDataField::EventTime);
   cxet::composite::markUserDataFieldPresent(
@@ -152,6 +164,8 @@ cxet::composite::UserDataEvent makeCanceledOrderEvent(EngineState& engine,
   event.orderStatus = canon::OrderStatus::Canceled;
   event.price = order.state.price;
   event.qty = order.state.qty;
+  event.quantityUnit = cxet::contract::Unit::BaseQuantity;
+  event.quantityDenomination = cxet::contract::QuantityDenomination::Canonical;
   event.filledQty.raw = order.filledQtyRaw;
   if (order.filledQtyRaw > 0) {
     event.avgPrice.raw = static_cast<std::int64_t>(order.filledNotionalRaw / order.filledQtyRaw);
@@ -177,6 +191,10 @@ cxet::composite::UserDataEvent makeCanceledOrderEvent(EngineState& engine,
       event, cxet::composite::UserDataField::Price);
   cxet::composite::markUserDataFieldPresent(
       event, cxet::composite::UserDataField::Qty);
+  cxet::composite::markUserDataFieldPresent(
+      event, cxet::composite::UserDataField::QuantityUnit);
+  cxet::composite::markUserDataFieldPresent(
+      event, cxet::composite::UserDataField::QuantityDenomination);
   cxet::composite::markUserDataFieldPresent(
       event, cxet::composite::UserDataField::FilledQty);
   cxet::composite::markUserDataFieldPresent(

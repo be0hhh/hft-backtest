@@ -66,7 +66,7 @@ detail::JsonStrategySpreadPoint makeStrategySpreadPoint(std::int64_t tsNs,
   return row;
 }
 
-void recordStrategySpreadDiagnostics(detail::JsonStrategySpreadDiagnostics& out,
+void recordStrategySpreadDiagnostic(detail::JsonStrategySpreadDiagnostic& out,
                                      const trading_core::StrategyDecisionTrace& trace) noexcept {
   if (out.rows == 0u) {
     out.minEdgeAfterCostBpsE8 = trace.arbEdgeAfterCostBpsE8;
@@ -252,7 +252,7 @@ void recordStrategySpread(detail::EngineState& engine,
                           const trading_core::StrategyDecisionTrace& trace,
                           bool captureRows) {
   if (trace.arbReady == 0u) return;
-  recordStrategySpreadDiagnostics(engine.strategySpreadDiagnostics, trace);
+  recordStrategySpreadDiagnostic(engine.strategySpreadDiagnostic, trace);
   if(captureRows && engine.streamingOutput && engine.strategySpread.size()>=detail::kMaxOrderStates*16u) {
     engine.simulationEvidenceFailed=true;return;
   }

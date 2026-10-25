@@ -2,8 +2,22 @@
       CXET_CHECK(hft_backtest::strategyMetadataCount() > 0u);
       CXET_CHECK(hft_backtest::strategyMetadataAt(0u) != nullptr);
       BinaryTradeFixture fixture(2u, 199u, 7u);
-      for (const auto name : {"delivery_sum_signal", "pair_api_probe", "unknown_strategy"}) {
-        CXET_CHECK((hft_backtest::findStrategyMetadata(name) == nullptr) == (std::string{name}=="unknown_strategy"));
+      struct Refusal {
+        const char* strategy;
+        bool discoverable;
+        hft_backtest::Status status;
+        const char* error;
+      };
+      const std::array refusals{
+          Refusal{"delivery_sum_signal", true, hft_backtest::Status::ConfigMismatch,
+              "recording contains no configured market product"},
+          Refusal{"pair_api_probe", true, hft_backtest::Status::Unsupported,
+              "awaiting captured instruments in the strategy declared quote currency"},
+          Refusal{"unknown_strategy", false, hft_backtest::Status::Unsupported,
+              "strategy descriptor is missing required callbacks"}};
+      for (const auto& refusal : refusals) {
+        const auto name = refusal.strategy;
+        CXET_CHECK((hft_backtest::findStrategyMetadata(name) != nullptr) == refusal.discoverable);
         const auto path = fixture.root / "unsupported.ini";
         {
           std::ofstream config(path);
@@ -15,15 +29,12 @@
         request.corpusBeginReceiveNs = 100; request.corpusEndReceiveNs = 10'000;
         request.writeArtifacts = false;
         const auto result = hft_backtest::runBacktest(request);
-        CXET_CHECK(result.status == hft_backtest::Status::Unsupported);
-        CXET_CHECK(!result.error.empty());
+        CXET_CHECK(result.status == refusal.status);
+        CXET_CHECK(result.error == refusal.error);
         CXET_CHECK(result.orders == 0u && result.fills == 0u && result.inputCoverage.strategyCycles == 0u);
       }
     }},
-    cxet::testing::Case{"backtest_api_guard_rejects_old_result_layout",+[] {
-      CXET_CHECK(hft_backtest::kBacktestApiVersion==8u);
-      CXET_CHECK(hft_backtest::hft_backtest_api_version()==hft_backtest::kBacktestApiVersion);
-      CXET_CHECK(hft_backtest::hft_backtest_api_version()!=7u);
+    cxet::testing::Case{"backtest_refuses_missing_typed_accounting_model",+[] {
       hft_backtest::BacktestRunRequest legacy;legacy.sessionPath="/explicit/legacy-session";
       legacy.configPath="/explicit/legacy-config";legacy.writeArtifacts=false;
       const auto refused=hft_backtest::runBacktest(legacy);

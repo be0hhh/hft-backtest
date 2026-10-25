@@ -8,7 +8,6 @@ static_assert(kResearchMaximumSources==hftrec::corpus::kBinaryMarketMaximumSourc
 namespace detail {
 bool validateStoredExperimentSpec(const ExperimentSpec& s,std::string& error){
  auto refuse=[&](const char* text){error=text;return false;};
- if(s.schemaVersion!=kResearchSchemaVersion)return refuse("research schema mismatch");
  if(s.id.empty()||s.id.size()>128||!std::all_of(s.id.begin(),s.id.end(),[](unsigned char x){return (x>='a'&&x<='z')||(x>='A'&&x<='Z')||(x>='0'&&x<='9')||x=='_'||x=='-';}))return refuse("invalid experiment id");
  if(s.sourcePath.string().find('\0')!=std::string::npos||s.recorderRuntimeDirectory.string().find('\0')!=std::string::npos)return refuse("embedded NUL in immutable input path");
  if(s.sourcePath.empty()||s.sourceIdentity.empty()||s.beginReceiveNs<0)return refuse("explicit source identity/start required");

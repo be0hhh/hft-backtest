@@ -152,22 +152,22 @@ void sortAndTrimDecisionCounts(std::vector<DecisionCount>& counts) {
     if (lhs.decisionKind != rhs.decisionKind) return lhs.decisionKind < rhs.decisionKind;
     return lhs.reasonRaw < rhs.reasonRaw;
   });
-  if (counts.size() > kMaxDecisionDiagnostics) counts.resize(kMaxDecisionDiagnostics);
+  if (counts.size() > kMaxDecisionDiagnostic) counts.resize(kMaxDecisionDiagnostic);
 }
 
-SignalDiagnostics collectSignalDiagnostics(const EngineState& engine,
+SignalDiagnostic collectSignalDiagnostic(const EngineState& engine,
                                            const std::filesystem::path& configPath) {
-  SignalDiagnostics out{};
+  SignalDiagnostic out{};
   out.hasEntryEdgeBps = readConfigBpsE8(configPath, "entry_edge_bps", out.entryEdgeBpsE8);
-  if (engine.strategySpreadDiagnostics.rows > 0u) {
-    out.strategySpreadRows = engine.strategySpreadDiagnostics.rows;
-    out.minEdgeAfterCostBpsE8 = engine.strategySpreadDiagnostics.minEdgeAfterCostBpsE8;
-    out.maxEdgeAfterCostBpsE8 = engine.strategySpreadDiagnostics.maxEdgeAfterCostBpsE8;
-    out.maxAbsDeviationBpsE8 = engine.strategySpreadDiagnostics.maxAbsDeviationBpsE8;
+  if (engine.strategySpreadDiagnostic.rows > 0u) {
+    out.strategySpreadRows = engine.strategySpreadDiagnostic.rows;
+    out.minEdgeAfterCostBpsE8 = engine.strategySpreadDiagnostic.minEdgeAfterCostBpsE8;
+    out.maxEdgeAfterCostBpsE8 = engine.strategySpreadDiagnostic.maxEdgeAfterCostBpsE8;
+    out.maxAbsDeviationBpsE8 = engine.strategySpreadDiagnostic.maxAbsDeviationBpsE8;
     out.decisionCounts.reserve(16u);
-    for (std::size_t kind = 0u; kind < engine.strategySpreadDiagnostics.decisionCounts.size(); ++kind) {
-      for (std::size_t reason = 0u; reason < engine.strategySpreadDiagnostics.decisionCounts[kind].size(); ++reason) {
-        const std::uint64_t count = engine.strategySpreadDiagnostics.decisionCounts[kind][reason];
+    for (std::size_t kind = 0u; kind < engine.strategySpreadDiagnostic.decisionCounts.size(); ++kind) {
+      for (std::size_t reason = 0u; reason < engine.strategySpreadDiagnostic.decisionCounts[kind].size(); ++reason) {
+        const std::uint64_t count = engine.strategySpreadDiagnostic.decisionCounts[kind][reason];
         if (count == 0u) continue;
         out.decisionCounts.push_back(DecisionCount{
             static_cast<std::uint8_t>(kind),
@@ -210,8 +210,8 @@ SignalDiagnostics collectSignalDiagnostics(const EngineState& engine,
   return out;
 }
 
-ExecutionDiagnostics collectExecutionDiagnostics(const EngineState& engine) noexcept {
-  ExecutionDiagnostics out{};
+ExecutionDiagnostic collectExecutionDiagnostic(const EngineState& engine) noexcept {
+  ExecutionDiagnostic out{};
   for (const JsonOrder& order : engine.orders) {
     if (order.action == kRecordActionOrder) ++out.orderCommands;
     else if (order.action == kRecordActionCancel) ++out.cancelCommands;
@@ -228,7 +228,7 @@ ExecutionDiagnostics collectExecutionDiagnostics(const EngineState& engine) noex
   return out;
 }
 
-void mergeRateLimitRejects(RateLimitDiagnostics& out, const EngineState& engine) noexcept {
+void mergeRateLimitRejects(RateLimitDiagnostic& out, const EngineState& engine) noexcept {
   out.rejectedOrders += engine.rateLimitRejectedOrders;
   out.rejectedCancels += engine.rateLimitRejectedCancels;
   if (engine.firstRateLimitRejectTsNs > 0 &&
@@ -238,9 +238,9 @@ void mergeRateLimitRejects(RateLimitDiagnostics& out, const EngineState& engine)
   if (engine.lastRateLimitRejectTsNs > out.lastRejectTsNs) out.lastRejectTsNs = engine.lastRateLimitRejectTsNs;
 }
 
-RateLimitDiagnostics collectRateLimitDiagnostics(const EngineState& engine,
+RateLimitDiagnostic collectRateLimitDiagnostic(const EngineState& engine,
                                                  const std::vector<EngineState>* legEngines) noexcept {
-  RateLimitDiagnostics out{};
+  RateLimitDiagnostic out{};
   if (legEngines != nullptr) {
     for (const EngineState& legEngine : *legEngines) mergeRateLimitRejects(out, legEngine);
   } else {
@@ -253,13 +253,13 @@ RateLimitDiagnostics collectRateLimitDiagnostics(const EngineState& engine,
   return out;
 }
 
-std::uint64_t rejectedCommandCount(const RateLimitDiagnostics& rateLimits) noexcept {
+std::uint64_t rejectedCommandCount(const RateLimitDiagnostic& rateLimits) noexcept {
   return rateLimits.rejectedOrders + rateLimits.rejectedCancels;
 }
 
 std::string zeroActivityReason(const BacktestRunResult& result,
-                               const SignalDiagnostics& signal,
-                               const RateLimitDiagnostics& rateLimits) {
+                               const SignalDiagnostic& signal,
+                               const RateLimitDiagnostic& rateLimits) {
   if (result.fills > 0u) return "fills_present";
   if (result.orders == 0u) {
     if (signal.strategySpreadRows > 0u &&
@@ -286,19 +286,18 @@ void writeDecisionCounts(std::ostream& out, const std::vector<DecisionCount>& co
   out << ']';
 }
 
-void writeDiagnosticsObject(std::ostream& out,
+void writeDiagnosticObject(std::ostream& out,
                             const BacktestRunResult& result,
                             const EngineState& engine,
                             const std::vector<EngineState>* legEngines,
                             std::size_t orderLifetimeRows,
                             const char* indent) {
-  const SignalDiagnostics signal = collectSignalDiagnostics(engine, result.configPath);
-  const ExecutionDiagnostics execution = collectExecutionDiagnostics(engine);
-  const RateLimitDiagnostics rateLimits = collectRateLimitDiagnostics(engine, legEngines);
+  const SignalDiagnostic signal = collectSignalDiagnostic(engine, result.configPath);
+  const ExecutionDiagnostic execution = collectExecutionDiagnostic(engine);
+  const RateLimitDiagnostic rateLimits = collectRateLimitDiagnostic(engine, legEngines);
   const std::string reason = zeroActivityReason(result, signal, rateLimits);
   const char q = '"';
-  out << indent << q << "diagnostics" << q << ": {\n";
-  out << indent << "  " << q << "version" << q << ": 1,\n";
+  out << indent << q << "diagnostic" << q << ": {\n";
   out << indent << "  " << q << "zero_activity_reason" << q << ": " << quote(reason) << ",\n";
   out << indent << "  " << q << "activity" << q << ": {"
       << q << "events" << q << ": " << result.events
@@ -381,7 +380,7 @@ void writeDiagnosticsObject(std::ostream& out,
     appendNote("orders were placed but no fills were produced by the strict inline fill model");
     appendNote("passive maker fills require a later opposite-side trade crossing the resting limit price");
   } else if (reason == "no_orders_from_strategy") {
-    appendNote("strategy emitted spread diagnostics but did not submit order intents");
+    appendNote("strategy emitted spread diagnostic but did not submit order intents");
   } else if (reason == "no_orders") {
     appendNote("replay had events but produced no order records");
   }

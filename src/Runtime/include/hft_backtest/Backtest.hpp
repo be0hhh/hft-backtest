@@ -13,10 +13,6 @@
 
 namespace hft_backtest {
 
-inline constexpr std::uint32_t kBacktestApiVersion = 8u;
-
-extern "C" HFT_BACKTEST_API std::uint32_t hft_backtest_api_version() noexcept;
-
 struct BacktestLatencyProfile {
   std::uint64_t baseUs{0};
   std::uint64_t jitterUs{0};

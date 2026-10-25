@@ -81,7 +81,7 @@ interval ineligible.
 
 ## Result evidence
 
-The current `run.result` with mandatory `schema_version = 5` labels the model as:
+The current `run.result` labels the model as:
 
 - `arrival_boundary = hft-parser.application-frame-ready`;
 - `market_data_delivery = captured_application_frame_arrival`;

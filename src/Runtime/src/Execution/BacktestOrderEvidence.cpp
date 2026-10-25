@@ -5,6 +5,7 @@
 #include "../Engine/BacktestEngine.hpp"
 #include "BacktestClientOrderId.hpp"
 #include "trading_core/Strategy/Orders/Evidence/OrderDecisionCursor.hpp"
+#include "trading_core/Strategy/Orders/Admission/StrategyCloseGrant.hpp"
 #include "trading_core/Contracts/Numeric/Integer/Saturating.hpp"
 #include <algorithm>
 #include <iterator>
@@ -111,6 +112,21 @@ bool prepareSimulationOrderEvidence(EngineState& engine) noexcept {
   owner.ready = true;
   return true;
 }
+bool qualifySimulationGenericExecutionCold(EngineState& engine) noexcept {
+  if (!prepareSimulationOrderEvidence(engine)) return false;
+  auto& owner = *engine.simulationOrders;
+  if (!owner.store->sequence()) {
+    // Revision one certifies only the newly created, still empty virtual
+    // producer baseline. Existing commands/history can never be resnapshotted
+    // as empty to obtain close authority. Later exact per-command observations
+    // do not fabricate complete private-stream cuts or live account evidence.
+    if (owner.nextCommandCounter != 1u || owner.deliveryCut ||
+        std::any_of(owner.records.begin(), owner.records.end(), [](const auto& record) { return record.occupied; }) ||
+        owner.store->reconcile(owner.store->epoch(), 1u, {}) != execution::StateResult::Applied) return false;
+  }
+  engine.genericCommandInputAdmission = true;
+  return true;
+}
 trading_core::StrategyOrderEvidenceView simulationOrderEvidenceView(const EngineState& engine) noexcept {
   trading_core::StrategyOrderEvidenceView view;
   if (!engine.simulationOrders || !engine.simulationOrders->ready) return view;
@@ -142,6 +158,7 @@ bool installSimulationOrderIntent(EngineState& engine, const trading_core::Order
       (intent.orderType == canon::OrderType::Stop && intent.price.raw == 0)
       ? execution::OrderType::Market : execution::OrderType::Limit;
   request.priceE8 = request.type == execution::OrderType::Market ? 0 : intent.price.raw;
+  if (engine.scopedCloseGrant && !engine.scopedCloseGrant->bindNativeCommand(command)) return false;
   auto& owner = *engine.simulationOrders;
   if (owner.store->install(request) != execution::StateResult::Applied) return false;
   const auto* record = owner.store->find(request.key());
@@ -330,6 +347,12 @@ bool deliverSimulationOrderEvent(EngineState& engine, std::size_t index, std::in
       engine.userEventContextIndices[index] != engine.activeContextIndex) return false;
   const auto& event = engine.userEvents[index];
   if (engine.userEventCommandIds[index]) {
+    // Command-correlated simulation events carry canonical base quantities.
+    if (!cxet::composite::userDataFieldPresent(event, cxet::composite::UserDataField::Qty) ||
+        !cxet::composite::userDataFieldPresent(event, cxet::composite::UserDataField::QuantityUnit) ||
+        !cxet::composite::userDataFieldPresent(event, cxet::composite::UserDataField::QuantityDenomination) ||
+        event.quantityUnit != cxet::contract::Unit::BaseQuantity ||
+        event.quantityDenomination != cxet::contract::QuantityDenomination::Canonical) return false;
     const auto view = simulationOrderEvidenceView(engine);
     const auto* identity = trading_core::strategy::canonicalOrderEvidenceIdentity(
         view, engine.userEventClientIntentIds[index], engine.userEventGenerations[index]);

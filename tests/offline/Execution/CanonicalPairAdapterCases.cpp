@@ -7,6 +7,7 @@
 #include "strategy/trader/DeliverySumSignal/Compiled.hpp"
 #include "strategy/trader/PairApiProbe/Compiled.hpp"
 #include "trading_core/Strategy/Orders/Evidence/OrderDecisionCursor.hpp"
+#include "trading_core/Strategy/Orders/Admission/StrategyManagedCloseAuthority.hpp"
 
 #include <limits>
 #include <memory>
@@ -143,7 +144,7 @@ struct ActorFixture {
       std::make_unique<detail::EngineState>(), std::make_unique<detail::EngineState>()};
   std::array<detail::EngineState*, 2u> routes{owners[0].get(), owners[1].get()};
   detail::EngineView engines{routes.data(), routes.size()};
-  std::array<hft_backtest::BacktestCanonicalPairSource, 2u> sources{};
+  std::array<hft_backtest::BacktestCanonicalSource, 2u> sources{};
   std::array<trading_core::StrategyInstrumentSpec, 2u> instruments{};
   std::array<trading_core::StrategyMarketSnapshot, 2u> market{};
   std::array<trading_core::StrategyOrderEvidenceView, 2u> evidence{};
@@ -154,7 +155,7 @@ struct ActorFixture {
   trading_core::StrategyParamStorage params{};
   trading_core::SymbolShardConfig shard{};
   trading_core::StrategyContext context{};
-  hft_backtest::BacktestCanonicalPairAdapter adapter{};
+  hft_backtest::BacktestCanonicalExecutionAdapter adapter{};
   hft_backtest::BacktestCanonicalPairSelection selection{};
   trading_core::DeliveryValuationReference delivery{};
   trading_core::DeliveryValuationCentralBankReference centralBank{};
@@ -357,7 +358,11 @@ void privateBalanceCycleCannotOpenAfterFinancialAuthorityWithdrawal(bool changed
   CXET_CHECK(!fixture->descriptor.hasExecutionExposure(fixture->state.data()));
 }
 
+#include "GenericCanonicalAdapterCases.ipp"
+
 constexpr cxet::testing::Case cases[]{
+  {"canonical_generic_one_leg_multiple_slots", +[] { genericReplayUsesActualLegsAndMultipleSlots(1u); }},
+  {"canonical_generic_sixteen_legs_multiple_slots", +[] { genericReplayUsesActualLegsAndMultipleSlots(16u); }},
   {"canonical_terminal_waits_for_actor_consumed_cut", terminalRecordWaitsForConsumedActorCut},
   {"canonical_pending_dispatch_borrow_prevents_retirement", pendingDispatchBorrowPreventsRetirement},
   {"canonical_queued_private_delivery_prevents_retirement", finalPrivateDeliveryStillQueuedPreventsRetirement},

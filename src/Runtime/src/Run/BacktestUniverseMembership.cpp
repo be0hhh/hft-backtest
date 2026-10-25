@@ -40,6 +40,8 @@ void resetCapturedChannels(detail::EngineState& engine, std::uint16_t channels) 
     engine.venueReconstructionTradeRebasePending = false;
   }
   if (resetDepth) {
+    engine.capturedDepthRecoveryPending = false;
+    engine.capturedDepthAdministrativeUnhealthy = false;
     engine.executionLiquidity.reset();
     engine.strategyDepthBook.reset();
     engine.venueDepthBook.reset();
@@ -74,6 +76,8 @@ bool applyCapturedSourceHealth(detail::EngineState& engine,
     error = "observed source health does not match replay source authority"; return false;
   }
   const auto bit = corpus::binaryMarketChannelBit(header.channel);
+  if (header.channel == corpus::BinaryMarketChannel::Depth &&
+      !row.unhealthy && engine.capturedDepthAdministrativeUnhealthy) return true;
   const bool previous = (engine.capturedUnhealthyChannels & bit) != 0u;
   if (row.unhealthy) engine.capturedUnhealthyChannels |= bit;
   else engine.capturedUnhealthyChannels &= static_cast<std::uint16_t>(~bit);
@@ -104,6 +108,18 @@ bool applyCapturedSourceLifecycle(detail::EngineState& engine,
     }
     const bool changedGeneration=source.initialSourceGeneration!=engine.capturedSourceGeneration;
     const auto bit=corpus::binaryMarketChannelBit(static_cast<corpus::BinaryMarketChannel>(lifecycle.affectedChannel));
+    if (lifecycle.affectedChannel==static_cast<std::uint8_t>(corpus::BinaryMarketChannel::Depth)) {
+      if (changedGeneration) {error="depth health marker cannot change source generation";return false;}
+      if ((bit & engine.capturedExecutionRequiredChannels)!=0u && !advanceExecutionBoundary(engine,error)) return false;
+      // Availability is independent of the retained native book. A recovered
+      // marker authorizes only the next fresh cut, never the old snapshot.
+      engine.capturedUnhealthyChannels |= bit;
+      engine.capturedDepthAdministrativeUnhealthy = true;
+      engine.capturedDepthRecoveryPending = lifecycle.cause==corpus::BinaryMarketSourceTransitionCause::NativeRecovered;
+      engine.replayNotBeforeNs=replayTsNs;
+      detail::bumpContextRevision(engine);
+      return true;
+    }
     if ((changedGeneration || (bit & engine.capturedExecutionRequiredChannels)!=0u) &&
         !advanceExecutionBoundary(engine,error)) return false;
     if (corpus::binaryMarketTransitionIsUnhealthy(lifecycle.cause)) engine.capturedUnhealthyChannels|=bit;

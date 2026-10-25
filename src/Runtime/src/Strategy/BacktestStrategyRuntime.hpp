@@ -46,7 +46,7 @@ struct SingleLegCycleScratch {
 };
 
 struct MultiLegCycleScratch {
-  std::unique_ptr<BacktestCanonicalPairAdapter> canonicalPair{};
+  std::unique_ptr<BacktestCanonicalExecutionAdapter> canonicalExecution{};
   const BacktestCanonicalPairReferences* pairReferences{};
   trading_core::StrategyRateLimitBook rateLimitSnapshot{};
   trading_core::StrategyRateLimitBook legRateLimitSnapshot{};

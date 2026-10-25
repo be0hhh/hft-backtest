@@ -87,7 +87,31 @@
       CXET_CHECK(events.empty() && stream.sessions()[0].trades.empty());
     }},
     cxet::testing::Case{"replay_refuses_canonical_order_evidence_state", +[] {
-      const auto& descriptor = trading_core::kDeliverySumSignalStrategyDescriptor;
+      const auto& supported = trading_core::kDeliverySumSignalStrategyDescriptor;
+      CXET_CHECK(trading_core::strategyDescriptorContractValid(supported));
+      CXET_CHECK(hft_backtest::strategy_intent_lowering::footprintSupported(supported));
+      // Replay admits canonical execution only with its prepared dispatch seam.
+      // The public actor contract alone does not prove simulation support.
+      auto descriptor = supported;
+      descriptor.commitPreparedDispatch = nullptr;
       CXET_CHECK(trading_core::strategyDescriptorContractValid(descriptor));
       CXET_CHECK(!hft_backtest::strategy_intent_lowering::footprintSupported(descriptor));
+      for (const auto stream : {cxet::api::market::PublicMarketDataStream::PriceLimit,
+                               cxet::api::market::PublicMarketDataStream::Funding}) {
+        descriptor = supported;
+        descriptor.streamCount = 2u; descriptor.streams[1] = stream;
+        detail::SessionLoadPlan plan{}; std::string error;
+        CXET_CHECK(!hft_backtest::buildSessionLoadPlan(descriptor, plan, error));
+        descriptor.optionalStreamMask = 2u;
+        CXET_CHECK(hft_backtest::buildSessionLoadPlan(descriptor, plan, error));
+        descriptor.legInputRequirementCount = descriptor.maxLegs;
+        descriptor.legInputRequirements[0].required = stream == cxet::api::market::PublicMarketDataStream::PriceLimit
+            ? trading_core::kStrategyInputPriceLimit : trading_core::kStrategyInputFunding;
+        CXET_CHECK(!hft_backtest::buildSessionLoadPlan(descriptor, plan, error));
+      }
+      descriptor = supported;
+      descriptor.legInputRequirementCount = descriptor.maxLegs;
+      descriptor.legInputRequirements[0].required = trading_core::kStrategyInputCandle;
+      detail::SessionLoadPlan plan{}; std::string error;
+      CXET_CHECK(!hft_backtest::buildSessionLoadPlan(descriptor, plan, error));
     }},

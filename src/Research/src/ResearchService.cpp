@@ -3,6 +3,7 @@
 #include "hft_backtest/DataStudy.hpp"
 #include "hftrec/CorpusContract/CorpusCut.hpp"
 #include "hftrec/Service/RecorderService.hpp"
+#include "../../Runtime/src/Input/Binary/Internal/BinaryCorpusHelpers.hpp"
 #include <algorithm>
 #include <charconv>
 #include <limits>
@@ -15,14 +16,14 @@
 namespace hft_backtest::research {
 namespace {
 using namespace hftrec::corpus;
-struct OutputCut {std::uint64_t schema{1},generation{},segments{},rows{},inputCut{},bytes{},inputFingerprint{},sourceCount{};};
-std::vector<std::uint8_t> encodeCut(OutputCut cut){detail::Codec c;c.integer(cut.schema);c.integer(cut.generation);c.integer(cut.segments);c.integer(cut.rows);c.integer(cut.inputCut);c.integer(cut.bytes);c.integer(cut.inputFingerprint);c.integer(cut.sourceCount);detail::Codec framed;auto hash=detail::fingerprint(c.bytes);framed.integer(hash);framed.bytes.insert(framed.bytes.end(),c.bytes.begin(),c.bytes.end());return std::move(framed.bytes);}
-OutputCut decodeCut(std::vector<std::uint8_t> bytes){detail::Codec c(true);c.bytes=std::move(bytes);std::uint64_t hash{};c.integer(hash);if(detail::fingerprint(std::span<const std::uint8_t>(c.bytes).subspan(c.offset))!=hash)throw std::runtime_error("output cut checksum mismatch");OutputCut cut;c.integer(cut.schema);c.integer(cut.generation);c.integer(cut.segments);c.integer(cut.rows);c.integer(cut.inputCut);c.integer(cut.bytes);c.integer(cut.inputFingerprint);c.integer(cut.sourceCount);c.done();if(cut.schema!=1)throw std::runtime_error("output cut schema mismatch");return cut;}
+struct OutputCut {std::uint64_t generation{},segments{},rows{},inputCut{},bytes{},inputFingerprint{},sourceCount{};};
+std::vector<std::uint8_t> encodeCut(OutputCut cut){detail::Codec c;c.integer(cut.generation);c.integer(cut.segments);c.integer(cut.rows);c.integer(cut.inputCut);c.integer(cut.bytes);c.integer(cut.inputFingerprint);c.integer(cut.sourceCount);detail::Codec framed;auto hash=detail::fingerprint(c.bytes);framed.integer(hash);framed.bytes.insert(framed.bytes.end(),c.bytes.begin(),c.bytes.end());return std::move(framed.bytes);}
+OutputCut decodeCut(std::vector<std::uint8_t> bytes){detail::Codec c(true);c.bytes=std::move(bytes);std::uint64_t hash{};c.integer(hash);if(detail::fingerprint(std::span<const std::uint8_t>(c.bytes).subspan(c.offset))!=hash)throw std::runtime_error("output cut checksum mismatch");OutputCut cut;c.integer(cut.generation);c.integer(cut.segments);c.integer(cut.rows);c.integer(cut.inputCut);c.integer(cut.bytes);c.integer(cut.inputFingerprint);c.integer(cut.sourceCount);c.done();return cut;}
 std::uint64_t prefixFingerprint(const CorpusCut& cut,std::uint64_t safe,std::uint64_t sources){
  if(sources>cut.sources.size())throw std::runtime_error("restored input source prefix is missing");
  std::uint64_t hash=14695981039346656037ULL;
  auto mix=[&](const auto& value){const auto bytes=std::as_bytes(std::span{&value,1});for(auto b:bytes){hash^=std::to_integer<std::uint8_t>(b);hash*=1099511628211ULL;}};
- mix(cut.manifest.producerEpoch);mix(cut.manifest.writerAbiFingerprint);mix(cut.manifest.replayAnchorReceiveNs);mix(cut.manifest.replayAnchorMonotonicNs);mix(safe);
+ mix(cut.manifest.producerEpoch);mix(cut.manifest.replayAnchorReceiveNs);mix(cut.manifest.replayAnchorMonotonicNs);mix(safe);
  for(std::size_t i=0;i<sources;++i)mix(cut.sources[i]);
  for(const auto& block:cut.blocks)if(block.firstMonotonicNs<safe){mix(block.offset);mix(block.segmentNumber);mix(block.shardIndex);mix(block.header);}
  return hash;
@@ -41,6 +42,7 @@ struct Experiment {
  std::unique_ptr<hftrec::service::RecorderServiceClient> recorder;
  std::vector<std::unique_ptr<Variant>> variants;
  std::vector<ResultRow> pending;std::size_t pendingBytes{};
+ std::vector<std::uint32_t> maximumDepthCoverageSourcesBySource;
  OutputCut output;
  std::uint64_t targetCut{},restartVisibleCut{},waitingCutGeneration{};
  std::string waitingReason;
@@ -108,7 +110,7 @@ struct ResearchService::Impl {
   std::string error;if(!save(e,error)){e.status.diagnostic+="; state persistence failed: "+error;if(e.status.diagnostic.size()>4096)e.status.diagnostic.resize(4096);return;}releaseCompute(e);
  }
  bool flush(Experiment& e){
-  if(e.pending.empty())return true;detail::Codec codec;std::uint64_t schema=1;codec.integer(schema);codec.list(e.pending,4096,[&](auto& row){detail::code(codec,row);});const auto hash=detail::fingerprint(codec.bytes);detail::Codec framed;std::uint64_t mutableHash=hash;framed.integer(mutableHash);framed.bytes.insert(framed.bytes.end(),codec.bytes.begin(),codec.bytes.end());codec.bytes=std::move(framed.bytes);
+  if(e.pending.empty())return true;detail::Codec codec;codec.list(e.pending,4096,[&](auto& row){detail::code(codec,row);});const auto hash=detail::fingerprint(codec.bytes);detail::Codec framed;std::uint64_t mutableHash=hash;framed.integer(mutableHash);framed.bytes.insert(framed.bytes.end(),codec.bytes.begin(),codec.bytes.end());codec.bytes=std::move(framed.bytes);
   if(codec.bytes.size()>e.spec.budget.maxOutputBytes||e.status.outputBytes>e.spec.budget.maxOutputBytes-codec.bytes.size()){e.writeError="experiment output byte quota exceeded";return false;}
   if(!write(segmentPath(e.attempt,e.output.segments),codec.bytes,false,e.writeError))return false;
   ++e.output.segments;e.output.rows+=e.pending.size();e.output.bytes+=codec.bytes.size();e.status.outputBytes+=codec.bytes.size();e.pending.clear();e.pendingBytes=0;return true;
@@ -169,6 +171,29 @@ struct ResearchService::Impl {
    }while(bytes.size()<total);available=true;return hftrec::Status::Ok;
   }catch(const std::exception& x){error=x.what();return hftrec::Status::IoError;}
  }
+ bool preflightDepthCoverage(Experiment& e,const CorpusCut& cut,std::string& error){
+  if(e.spec.kind!=ModuleKind::Strategy)return true;
+  CorpusCompressedBlockSource feed;
+  if(!e.spec.recorderRuntimeDirectory.empty()){feed.context=&e;feed.approvedGeneration=approved;feed.fetch=compressed;}
+  CorpusActiveCursor preflight;
+  auto status=preflight.open(e.spec.sourcePath,0,error,{},feed,e.spec.budget.maxInputBytes/2);
+  if(!hftrec::isOk(status))return false;
+  const auto prefix=preflight.cut();
+  if(!prefix || prefix->generation!=cut.generation || prefix->progress.safeMonotonicNs!=cut.progress.safeMonotonicNs ||
+     sourceIdentity(*prefix)!=sourceIdentity(cut)){
+   error="waiting for stable captured depth coverage preflight";return false;
+  }
+  std::vector<std::uint32_t> maxima(cut.sources.size());
+  BinaryMarketRecord record{};CorpusCursorResult result=CorpusCursorResult::Record;
+  do{
+   status=preflight.next(record,result,error);if(!hftrec::isOk(status))return false;
+   if(result==CorpusCursorResult::Record && record.header.receiveRealtimeNs>=e.spec.beginReceiveNs &&
+      !hft_backtest::detail::binary_corpus::includeDepthCoverageMaximum(record,maxima)){
+    error="invalid exact captured depth coverage preflight";return false;
+   }
+  }while(result==CorpusCursorResult::Record);
+  e.maximumDepthCoverageSourcesBySource=std::move(maxima);return true;
+ }
  bool initialize(Experiment& e,std::string& error){
   if(e.cursor.cut()){if(!hftrec::isOk(e.cursor.refresh(error)))return false;}
   else {CorpusCompressedBlockSource feed;if(!e.spec.recorderRuntimeDirectory.empty()){feed.context=&e;feed.approvedGeneration=approved;feed.fetch=compressed;}if(!hftrec::isOk(e.cursor.open(e.spec.sourcePath,0,error,{},feed,e.spec.budget.maxInputBytes/2)))return false;}
@@ -183,6 +208,7 @@ struct ResearchService::Impl {
   if(e.cut->sources.size()>e.spec.budget.maxSources){error="whole-market source capacity exceeded";return false;}
   if(gapIntersects(e,*e.cut)){error="capture gap intersects selected run";return false;}
   if(e.spec.budget.inputBatchEvents>e.spec.budget.maxInputBytes/4/sizeof(BinaryMarketRecord)){error="input batch exceeds byte quota";return false;}
+  if(!preflightDepthCoverage(e,*e.cut,error))return false;
   std::vector<std::unique_ptr<Variant>> prepared;
   std::vector<std::unique_ptr<SinkContext>> preparedSinks;
   for(std::size_t i=0;i<e.spec.variants.size();++i){
@@ -194,7 +220,7 @@ struct ResearchService::Impl {
     request.hasMakerFeeBps=request.hasTakerFeeBps=true;
     for(const auto& fee:e.spec.fees)request.feeSchedules.push_back({fee.exchange,fee.market,fee.makerFeeBpsE8,fee.takerFeeBpsE8});
     auto context=std::make_unique<SinkContext>();context->service=this;context->experiment=&e;context->variant=variant.get();variant->simulation=std::make_unique<SimulationSession>();
-    const auto status=variant->simulation->prepare(request,*e.cut,{sink,context.get(),metrics},{e.spec.budget.maxSources,e.spec.budget.maxContexts,e.spec.budget.maxStateBytes});
+    const auto status=variant->simulation->prepare(request,*e.cut,{sink,context.get(),metrics},{e.spec.budget.maxSources,e.spec.budget.maxContexts,e.spec.budget.maxStateBytes,e.maximumDepthCoverageSourcesBySource});
     if(status==Status::NotReady)return wait("native simulation inputs: "+variant->simulation->result().error);
     if(!isOk(status)){error=variant->simulation->result().error;return false;}
     for(const auto& leg:variant->simulation->result().legs){bool found=false;for(const auto& fee:e.spec.fees)if(fee.exchange==leg.exchange&&fee.market==leg.market){found=true;break;}if(!found){error="missing explicit fee scenario for admitted virtual account";return false;}}
@@ -229,7 +255,10 @@ struct ResearchService::Impl {
    auto cut=e.cursor.cut();if(!cut||sourceIdentity(*cut)!=e.spec.sourceIdentity){fence(e,ExperimentState::Incomplete,"capture identity changed");return;}
    if(gapIntersects(e,*cut)){fence(e,ExperimentState::Incomplete,"capture gap intersects selected input");return;}
    if(cut->sources.size()>e.spec.budget.maxSources){fence(e,ExperimentState::QuotaExceeded,"whole-market source capacity exceeded");return;}
-   if(!e.cut||cut->generation!=e.cut->generation)for(auto& variant:e.variants)if(variant->simulation&&!isOk(variant->simulation->updateCut(*cut))){fence(e,ExperimentState::Incomplete,variant->simulation->result().error);return;}
+   if(!e.cut||cut->generation!=e.cut->generation){
+    if(!preflightDepthCoverage(e,*cut,error)){if(error.starts_with("waiting for ")){e.status.diagnostic=error;return;}fence(e,ExperimentState::Incomplete,error);return;}
+    for(auto& variant:e.variants)if(variant->simulation&&!isOk(variant->simulation->updateCut(*cut,e.maximumDepthCoverageSourcesBySource))){fence(e,ExperimentState::Incomplete,variant->simulation->result().error);return;}
+   }
    e.cut=std::move(cut);e.targetCut=e.cut->progress.safeMonotonicNs;
    if(e.targetCut==e.status.inputCut){if(e.cut->finalized)endInput(e);return;}
    e.atBoundary=false;
@@ -279,7 +308,7 @@ struct ResearchService::Impl {
  }
  Response range(Experiment& e,const Request& request){Response response;if(request.limit==0||request.limit>config.maxResponseRows){response.error="result range limit exceeds bound";return response;}if(!e.status.visibleGeneration){response.ok=true;return response;}
   std::vector<std::uint8_t> bytes;std::string error;const auto attempt=generationPath(e,e.status.visibleGeneration);if(!detail::readFile(visibleCutPath(e),bytes,error)){response.error=error;return response;}auto cut=decodeCut(std::move(bytes));if(cut.generation!=e.status.visibleGeneration||cut.inputCut!=e.status.visibleInputCut||cut.rows>e.spec.budget.maxResultRows||cut.bytes>e.spec.budget.maxOutputBytes)throw std::runtime_error("visible output cut does not match durable experiment state");std::uint64_t matched=0;
-  std::size_t responseBytes=0;for(std::uint64_t segment=0;segment<cut.segments;++segment){if(!detail::readFile(segmentPath(attempt,segment),bytes,error)){response.error=error;return response;}detail::Codec c(true);c.bytes=std::move(bytes);std::uint64_t hash{};c.integer(hash);if(detail::fingerprint(std::span<const std::uint8_t>(c.bytes).subspan(c.offset))!=hash)throw std::runtime_error("result segment checksum mismatch");std::uint64_t schema{};c.integer(schema);if(schema!=1)throw std::runtime_error("result segment schema mismatch");std::vector<ResultRow> rows;c.list(rows,4096,[&](auto& row){detail::code(c,row);});c.done();for(auto& row:rows){if(row.inputCut>=e.status.visibleInputCut||row.kind!=request.resultKind||(request.variant&&row.variant!=request.variant)||row.timestampNs<request.beginNs||(request.endNs&&row.timestampNs>=request.endNs)||(request.maximumInputCut&&row.inputCut>=request.maximumInputCut))continue;if(matched++<request.offset)continue;const auto estimate=row.payload.size()+row.metric.size()+row.exchange.size()+row.market.size()+row.instrument.size()+256;if(response.rows.size()>=request.limit||responseBytes+estimate>detail::kMaxWireBytes/2){response.more=true;response.nextOffset=request.offset+response.rows.size();response.ok=true;return response;}responseBytes+=estimate;response.rows.push_back(std::move(row));}}
+  std::size_t responseBytes=0;for(std::uint64_t segment=0;segment<cut.segments;++segment){if(!detail::readFile(segmentPath(attempt,segment),bytes,error)){response.error=error;return response;}detail::Codec c(true);c.bytes=std::move(bytes);std::uint64_t hash{};c.integer(hash);if(detail::fingerprint(std::span<const std::uint8_t>(c.bytes).subspan(c.offset))!=hash)throw std::runtime_error("result segment checksum mismatch");std::vector<ResultRow> rows;c.list(rows,4096,[&](auto& row){detail::code(c,row);});c.done();for(auto& row:rows){if(row.inputCut>=e.status.visibleInputCut||row.kind!=request.resultKind||(request.variant&&row.variant!=request.variant)||row.timestampNs<request.beginNs||(request.endNs&&row.timestampNs>=request.endNs)||(request.maximumInputCut&&row.inputCut>=request.maximumInputCut))continue;if(matched++<request.offset)continue;const auto estimate=row.payload.size()+row.metric.size()+row.exchange.size()+row.market.size()+row.instrument.size()+256;if(response.rows.size()>=request.limit||responseBytes+estimate>detail::kMaxWireBytes/2){response.more=true;response.nextOffset=request.offset+response.rows.size();response.ok=true;return response;}responseBytes+=estimate;response.rows.push_back(std::move(row));}}
   response.nextOffset=request.offset+response.rows.size();response.ok=true;return response;
  }
 };
@@ -309,7 +338,6 @@ bool ResearchService::restore(std::string& error){auto& s=*impl_;try{
  }catch(const std::exception&e){error=e.what();return false;}}
 Response ResearchService::dispatch(const Request& request){auto& s=*impl_;Response response;response.buildIdentity=s.config.buildIdentity;response.moduleIdentity=s.config.moduleIdentity;response.residentByteLimit=s.config.maxResidentStateBytes;response.residentVariantLimit=s.config.maxResidentVariants;try{
  if(!s.ready){response.error="research durable owner is not restored";return response;}
- if(request.protocolVersion!=kResearchProtocolVersion){response.error="research protocol mismatch";return response;}
  if(request.command==Command::Catalog){response.catalog=researchModuleCatalog();response.ok=true;return response;}
  if(request.command==Command::Create){std::string error;if(!validateExperimentSpec(request.spec,s.config,error)){response.error=error;return response;}if(s.experiments.size()>=s.config.maxExperiments){response.error="experiment catalog quota exceeded";return response;}if(s.experiments.contains(request.spec.id)){response.error="immutable experiment already exists";return response;}
   if(!s.admit(&request.spec,nullptr,error)){response.error=error;return response;}

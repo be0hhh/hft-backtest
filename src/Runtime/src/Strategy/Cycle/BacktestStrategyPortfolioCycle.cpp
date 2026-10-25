@@ -3,7 +3,7 @@
 
 #include "../../Config/BacktestRunConfig.hpp"
 #include "../Execution/BacktestStrategyIntentLowering.hpp"
-#include "../Diagnostics/BacktestStrategyTrace.hpp"
+#include "../Diagnostic/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
 #include "trading_core/Strategy/Orders/Intent/WarmupIntents.hpp"
@@ -38,7 +38,6 @@ using strategy_runtime_detail::setBacktestTradePolicy;
 using strategy_runtime_detail::backtestControlWithInputFreshness;
 using strategy_runtime_detail::backtestSimulatedUserEventSemanticMask;
 using strategy_runtime_detail::backtestTradableLegMask;
-using strategy_runtime_detail::bindBacktestStrategyStateView;
 using strategy_runtime_detail::retainCancelOutputsWhenNewOrdersBlocked;
 
 bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
@@ -55,8 +54,10 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
                    const cxet::composite::UserDataEvent* userEvent) {
   if (!footprintSupported(descriptor)) return false;
   const bool canonical = descriptor.stateDiscipline == trading_core::StrategyStateDiscipline::CanonicalEvidence;
-  if (canonical && (!scratch.canonicalPair || !scratch.canonicalPair->bound())) return false;
+  const bool genericCanonical = canonical && descriptor.runtimePolicy && !descriptor.runtimePolicy->available;
+  if (canonical && (!scratch.canonicalExecution || !scratch.canonicalExecution->bound())) return false;
   if (engines.empty()) return true;
+  if (engines.size() > trading_core::kStrategyRuntimeMaxLegs) return false;
   for (const detail::EngineState& engine : engines) if (engine.simulationEvidenceFailed) return false;
   for (const detail::EngineState& engine : engines) {
     if (!canonical && (engine.liquidated || engine.riskStopped ||
@@ -79,7 +80,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
     if (!canonical && !backtestStrategySnapshotReady(inputPolicy, engines[i].snapshot)) return true;
   }
   const trading_core::ShardControlState effectiveControl =
-      backtestControlWithInputFreshness(control, freshness);
+      genericCanonical ? control : backtestControlWithInputFreshness(control, freshness);
   if (scratch.legCount != legCount) scratch.reset(legCount);
   scratch.refreshDirty(engines, legInstruments);
   trading_core::StrategyContext ctx{};
@@ -93,13 +94,14 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   ctx.instrumentSpecs.count = legCount;
   ctx.legMarkets.legs = scratch.markets.data();
   ctx.legMarkets.count = legCount;
-  ctx.orderStates.legs = scratch.orderViews.data();
-  ctx.orderStates.count = legCount;
-  ctx.positionStates.legs = scratch.positions.data();
-  ctx.positionStates.count = legCount;
-  ctx.accountStates.legs = scratch.accounts.data();
-  ctx.accountStates.count = legCount;
-  setBacktestTradePolicy(ctx, request, legCount, freshness.tradableLegMask);
+  ctx.state.orders.legs.legs = scratch.orderViews.data();
+  ctx.state.orders.legs.count = legCount;
+  ctx.state.positions.legs.legs = scratch.positions.data();
+  ctx.state.positions.legs.count = legCount;
+  ctx.state.account.legs.legs = scratch.accounts.data();
+  ctx.state.account.legs.count = legCount;
+  setBacktestTradePolicy(ctx, request, legCount,
+      genericCanonical ? configuredTradableMask : freshness.tradableLegMask);
   const std::size_t defaultExecutionLeg =
       routeLegIndex(ctx, trading_core::kDefaultExecutionRouteHandle);
   if (defaultExecutionLeg >= legCount ||
@@ -107,9 +109,9 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
     return false;
   }
   ctx.instrumentSpec = scratch.instruments[defaultExecutionLeg];
-  ctx.orderState = scratch.orderViews[defaultExecutionLeg];
-  ctx.positionState = scratch.positions[defaultExecutionLeg];
-  ctx.accountState = scratch.accounts[defaultExecutionLeg];
+  ctx.state.orders.primary = scratch.orderViews[defaultExecutionLeg];
+  ctx.state.positions.primary = scratch.positions[defaultExecutionLeg];
+  ctx.state.account.primary = scratch.accounts[defaultExecutionLeg];
   ctx.userEvent = userEvent;
   // Admission is owned by the simulated Backtest runtime; this is not a
   // generic classifier for exchange wire events.
@@ -128,9 +130,9 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   for (std::size_t i = 0u; i < legCount; ++i) {
     scratch.warmupViews[i] = backtestWarmupView(engines[i]);
   }
-  ctx.orderPathWarmup = scratch.warmupViews[defaultExecutionLeg];
-  ctx.orderPathWarmups.routes = scratch.warmupViews.data();
-  ctx.orderPathWarmups.count = legCount;
+  ctx.state.orders.primaryWarmup = scratch.warmupViews[defaultExecutionLeg];
+  ctx.state.orders.warmups.routes = scratch.warmupViews.data();
+  ctx.state.orders.warmups.count = legCount;
   if (userEvent && eventLegIndex < legInstruments.size()) {
     recordExecutionQualityFill(engines[0], ctx, eventLegIndex, tsNs, legInstruments[eventLegIndex]);
   }
@@ -186,7 +188,6 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   }
   ctx.state.orders.executionLegs = scratch.executionViews.data();
   ctx.state.orders.executionLegCount = legCount;
-  bindBacktestStrategyStateView(ctx);
   ctx.userEventRecvMono = ctx.nowMono;
   ctx.userEventRecvUtc = ctx.nowUtc;
   ctx.initialOrderSeedAllowed = true;
@@ -207,13 +208,13 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
     // views end with this lexical owner cycle, after dispatch commits.
     trading_core::strategy::PairStrategyInputs pairInput{};
     const BacktestCanonicalPairReferences emptyReferences{};
-    if (!scratch.canonicalPair->prepareCycle(ctx, engines,
+    if (!scratch.canonicalExecution->prepareCycle(ctx, engines,
         scratch.pairReferences ? *scratch.pairReferences : emptyReferences,
         pairInput)) return false;
     trading_core::strategy::PairStrategyCycleInputs cyclePair{pairInput};
     ctx.pairInputs = &cyclePair;
-    const bool complete = scratch.canonicalPair->decideAndExecute(ctx) &&
-        scratch.canonicalPair->dispatchAndCommit(ctx, engines, tsNs);
+    const bool complete = scratch.canonicalExecution->decideAndExecute(ctx) &&
+        scratch.canonicalExecution->dispatchAndCommit(ctx, engines, tsNs);
     ctx.pairInputs = nullptr;
     return complete;
   }
@@ -222,13 +223,13 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   trading_core::StrategyExecutionTraceBatch executionTrace{};
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engines[0]);
   const bool captureRangeTrace = emitsPriceRangeTrace(descriptor);
-  const bool captureSpreadDiagnostics = emitsArbSpreadTrace(descriptor);
-  const bool captureSpreadRows = request.captureStrategySpread && captureSpreadDiagnostics;
-  if (captureIndicatorTrace || captureRangeTrace || captureSpreadDiagnostics) {
+  const bool captureSpreadDiagnostic = emitsArbSpreadTrace(descriptor);
+  const bool captureSpreadRows = request.captureStrategySpread && captureSpreadDiagnostic;
+  if (captureIndicatorTrace || captureRangeTrace || captureSpreadDiagnostic) {
     trading_core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
-  if (captureSpreadDiagnostics) {
+  if (captureSpreadDiagnostic) {
     executionTrace.clear();
     ctx.executionTrace = &executionTrace;
   }
@@ -293,7 +294,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
     descriptor.restoreAfterOrderFailure(state, before);
     if (transactionCycle) ctx.io.transactionCount = 0u;
   }
-  if (captureIndicatorTrace || captureRangeTrace || captureSpreadDiagnostics) {
+  if (captureIndicatorTrace || captureRangeTrace || captureSpreadDiagnostic) {
     std::uint32_t orderedOrderCount = 0u;
     std::uint32_t orderedCancelCount = 0u;
     for (std::size_t i = 0u; i < ctx.io.commandCount; ++i) {
@@ -305,7 +306,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
     trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount) + orderedCancelCount;
     if (captureIndicatorTrace) appendStrategyIndicator(engines[0], tsNs, trace);
     if (captureRangeTrace) appendStrategyRange(engines[0], tsNs, trace);
-    if (captureSpreadDiagnostics) recordStrategySpread(engines[0], tsNs, trace, captureSpreadRows);
+    if (captureSpreadDiagnostic) recordStrategySpread(engines[0], tsNs, trace, captureSpreadRows);
   }
   if (ctx.executionTrace) recordExecutionQualityActions(engines[0], tsNs, executionTrace);
   if (ctx.io.transactionCount != 0u) {

@@ -245,8 +245,7 @@ Status writeSweepManifest(const BacktestSweepRequest& request,
   if (!out.is_open()) return Status::IoError;
   const char q = '"';
   out << "{\n";
-  out << "  " << q << "type" << q << ": " << q << "sweep.result.v1" << q << ",\n";
-  out << "  " << q << "schema_version" << q << ": 1,\n";
+  out << "  " << q << "type" << q << ": " << q << "sweep.result" << q << ",\n";
   out << "  " << q << "mode" << q << ": " << q << "whole_session_exploration" << q << ",\n";
   out << "  " << q << "sweep_id" << q << ": " << quote(result.sweepId) << ",\n";
   out << "  " << q << "session_path" << q << ": " << quote(baseSessionPath(request).generic_string()) << ",\n";
@@ -263,9 +262,9 @@ Status writeSweepManifest(const BacktestSweepRequest& request,
   out << "  " << q << "depth_execution" << q << ": {"
       << q << "fallback_points" << q << ": " << fallbackPoints << "},\n";
   out << "  " << q << "rows" << q << ": {" << q << "path" << q << ": " << q << "sweep_results.jsonl" << q << ", "
-      << q << "row_schema" << q << ": " << q << "object.v1" << q << "},\n";
+      << q << "row_schema" << q << ": " << q << "object" << q << "},\n";
   out << "  " << q << "curves" << q << ": {" << q << "path" << q << ": " << q << "sweep_curves.jsonl" << q << ", "
-      << q << "row_schema" << q << ": " << q << "object.v1" << q << "},\n";
+      << q << "row_schema" << q << ": " << q << "object" << q << "},\n";
   out << "  " << q << "ranges" << q << ": [";
   for (std::size_t i = 0u; i < request.ranges.size(); ++i) {
     const BacktestSweepParamRange& range = request.ranges[i];

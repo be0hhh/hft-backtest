@@ -54,44 +54,6 @@ elseif(CXET_SANITIZER_PROFILE STREQUAL "thread")
 endif()
 
 find_package(Threads REQUIRED)
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
-set(HFT_BACKTEST_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-set(HFT_BACKTEST_GENERATED_STRATEGY_METADATA
-  "${HFT_BACKTEST_GENERATED_DIR}/hft_backtest/generated/StrategyMetadata.hpp")
-file(GLOB_RECURSE HFT_BACKTEST_STRATEGY_PROFILES CONFIGURE_DEPENDS
-  LIST_DIRECTORIES false
-  "${CMAKE_CURRENT_LIST_DIR}/../trading-core/StrategyProfiles/*.ini")
-list(SORT HFT_BACKTEST_STRATEGY_PROFILES)
-# Generate discoverable profile metadata; runtime admission validates canonical
-# descriptor capabilities against the captured inputs.
-set(HFT_BACKTEST_REQUIRED_STRATEGY_NAMES)
-set(HFT_BACKTEST_REQUIRED_STRATEGY_ARGS)
-foreach(required_strategy IN LISTS HFT_BACKTEST_REQUIRED_STRATEGY_NAMES)
-  list(APPEND HFT_BACKTEST_REQUIRED_STRATEGY_ARGS
-    --required-strategy "${required_strategy}")
-endforeach()
-add_custom_command(
-  OUTPUT "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}"
-  COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tools/GenerateStrategyMetadata.py"
-    --profile-root "${CMAKE_CURRENT_LIST_DIR}/../trading-core/StrategyProfiles"
-    --output "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}"
-    ${HFT_BACKTEST_REQUIRED_STRATEGY_ARGS}
-    ${HFT_BACKTEST_STRATEGY_PROFILES}
-  DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/tools/GenerateStrategyMetadata.py"
-    ${HFT_BACKTEST_STRATEGY_PROFILES}
-  COMMENT "Generating bounded hft-backtest strategy metadata"
-  VERBATIM
-)
-add_custom_target(hft_backtest_generate_strategy_metadata
-  DEPENDS "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}")
-set_property(TARGET hft_backtest_generate_strategy_metadata PROPERTY CXET_COMPILE_INPUTS
-  "${CMAKE_CURRENT_SOURCE_DIR}/tools/GenerateStrategyMetadata.py"
-  ${HFT_BACKTEST_STRATEGY_PROFILES})
-set_property(TARGET hft_backtest_generate_strategy_metadata PROPERTY CXET_COMPILE_OUTPUTS
-  "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}")
 
 add_library(hft_backtest_core STATIC
   src/Runtime/src/Accounting/BacktestAccounting.cpp
@@ -102,7 +64,6 @@ add_library(hft_backtest_core STATIC
   src/Runtime/src/Config/Strategy/BacktestStrategyRateLimits.cpp
   src/Runtime/src/Config/Strategy/BacktestStrategyValidation.cpp
   src/Runtime/src/Config/StrategyMetadata.cpp
-  "${HFT_BACKTEST_GENERATED_STRATEGY_METADATA}"
   src/Runtime/src/Run/BacktestCommon.cpp
   src/Runtime/src/Engine/BacktestEngineSetup.cpp
   src/Runtime/src/Engine/BacktestQuota.cpp
@@ -135,7 +96,7 @@ add_library(hft_backtest_core STATIC
     src/Runtime/src/Execution/Lifecycle/BacktestExecutionActivation.cpp
     src/Runtime/src/Execution/Lifecycle/BacktestExecutionPending.cpp
     src/Runtime/src/Execution/Lifecycle/BacktestExecutionFinalization.cpp
-    src/Runtime/src/Results/BacktestResultDiagnostics.cpp
+    src/Runtime/src/Results/BacktestResultDiagnostic.cpp
     src/Runtime/src/Results/BacktestResultOrderLifetimes.cpp
     src/Runtime/src/Results/BacktestResultStreams.cpp
     src/Runtime/src/Results/BacktestResultManifest.cpp
@@ -158,7 +119,7 @@ add_library(hft_backtest_core STATIC
   src/Runtime/src/Strategy/Execution/BacktestCanonicalPairSelection.cpp
   src/Runtime/src/Strategy/Inputs/BacktestStrategyInputFreshness.cpp
   src/Runtime/src/Strategy/BacktestStrategyRuntime.cpp
-  src/Runtime/src/Strategy/Diagnostics/BacktestStrategyTrace.cpp
+  src/Runtime/src/Strategy/Diagnostic/BacktestStrategyTrace.cpp
   src/Runtime/src/Strategy/Inputs/BacktestStrategyWarmup.cpp
   src/Runtime/src/Sweep/BacktestSweep.cpp
   src/Runtime/src/Sweep/BacktestSweepSearch.cpp
@@ -170,9 +131,7 @@ target_include_directories(hft_backtest_core
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src/Runtime/include"
   PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Runtime/src"
-    "${HFT_BACKTEST_GENERATED_DIR}"
 )
-add_dependencies(hft_backtest_core hft_backtest_generate_strategy_metadata)
 target_link_libraries(hft_backtest_core
   PUBLIC
     cxet::cxet_lib
@@ -199,8 +158,6 @@ target_compile_options(hft_backtest_core PRIVATE
 )
 set_target_properties(hft_backtest_core PROPERTIES
   OUTPUT_NAME hft_backtest_core
-  VERSION 0.2.0
-  SOVERSION 3
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 

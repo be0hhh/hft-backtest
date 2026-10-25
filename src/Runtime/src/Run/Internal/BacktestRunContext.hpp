@@ -88,7 +88,8 @@ void loadBacktestRunSessions(const BacktestRunRequest& request, bool binaryCorpu
     const detail::SessionLoadPlan& loadPlan, std::vector<detail::SessionData>& loadedSessions,
     const std::vector<detail::SessionData>*& sessionsView, BacktestRunResult& result, std::string& error);
 bool prepareEngineOrderBookStorage(detail::EngineState& target,
-    const trading_core::StrategyDescriptor* descriptor, const detail::SessionLoadPlan& loadPlan) noexcept;
+    const trading_core::StrategyDescriptor* descriptor, const detail::SessionLoadPlan& loadPlan,
+    const detail::SessionData* source = nullptr) noexcept;
 void prepareBacktestDepthProviders(std::vector<std::unique_ptr<detail::ExecutionDepthProvider>>& executionDepthProviders,
     detail::PreparedBacktestInput* preparedInput, const detail::SessionLoadPlan& loadPlan,
     bool binaryCorpus, bool hasExplicitSessions, const std::vector<detail::SessionData>& sessions,

@@ -3,7 +3,7 @@
 
 #include "../../Config/BacktestRunConfig.hpp"
 #include "../Execution/BacktestStrategyIntentLowering.hpp"
-#include "../Diagnostics/BacktestStrategyTrace.hpp"
+#include "../Diagnostic/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
 #include "trading_core/Strategy/Orders/Intent/WarmupIntents.hpp"
@@ -38,7 +38,6 @@ using strategy_runtime_detail::setBacktestTradePolicy;
 using strategy_runtime_detail::backtestControlWithInputFreshness;
 using strategy_runtime_detail::backtestSimulatedUserEventSemanticMask;
 using strategy_runtime_detail::backtestTradableLegMask;
-using strategy_runtime_detail::bindBacktestStrategyStateView;
 using strategy_runtime_detail::retainCancelOutputsWhenNewOrdersBlocked;
 
 bool runCycle(const trading_core::StrategyDescriptor& descriptor,
@@ -82,17 +81,17 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   ctx.instrumentSpecs.count = 1u;
   ctx.legMarkets.legs = &engine.market;
   ctx.legMarkets.count = 1u;
-  ctx.orderState.orders = scratch.orderStorage.data();
-  ctx.orderState.count = orderViewCount;
-  ctx.orderStates.legs = &ctx.orderState;
-  ctx.orderStates.count = 1u;
-  ctx.positionState = engine.position;
-  ctx.positionState.unrealizedPnl.raw = detail::observedUnrealizedPnlE8(engine);
-  ctx.positionStates.legs = &ctx.positionState;
-  ctx.positionStates.count = 1u;
-  ctx.accountState = accountStateFromEngine(engine);
-  ctx.accountStates.legs = &ctx.accountState;
-  ctx.accountStates.count = 1u;
+  ctx.state.orders.primary.orders = scratch.orderStorage.data();
+  ctx.state.orders.primary.count = orderViewCount;
+  ctx.state.orders.legs.legs = &ctx.state.orders.primary;
+  ctx.state.orders.legs.count = 1u;
+  ctx.state.positions.primary = engine.position;
+  ctx.state.positions.primary.unrealizedPnl.raw = detail::observedUnrealizedPnlE8(engine);
+  ctx.state.positions.legs.legs = &ctx.state.positions.primary;
+  ctx.state.positions.legs.count = 1u;
+  ctx.state.account.primary = accountStateFromEngine(engine);
+  ctx.state.account.legs.legs = &ctx.state.account.primary;
+  ctx.state.account.legs.count = 1u;
   setBacktestTradePolicy(ctx, request, 1u, freshness.tradableLegMask);
   ctx.userEvent = userEvent;
   // Admission is owned by the simulated Backtest runtime; this is not a
@@ -105,9 +104,9 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   ctx.nowUtc = replayUtcFromMonotonic(tsNs, engine.replayUtcOffsetNs);
   if (tsNs > engine.lastReplayMonotonicNs) engine.lastReplayMonotonicNs = tsNs;
   scratch.warmupViews[0] = backtestWarmupView(engine);
-  ctx.orderPathWarmup = scratch.warmupViews[0];
-  ctx.orderPathWarmups.routes = scratch.warmupViews.data();
-  ctx.orderPathWarmups.count = 1u;
+  ctx.state.orders.primaryWarmup = scratch.warmupViews[0];
+  ctx.state.orders.warmups.routes = scratch.warmupViews.data();
+  ctx.state.orders.warmups.count = 1u;
   if (userEvent) {
     recordExecutionQualityFill(engine, ctx, 0u, tsNs, instrument);
   }
@@ -135,7 +134,6 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   scratch.executionView = detail::simulationOrderEvidenceView(engine);
   ctx.state.orders.executionLegs = &scratch.executionView;
   ctx.state.orders.executionLegCount = 1u;
-  bindBacktestStrategyStateView(ctx);
   ctx.userEventRecvMono = ctx.nowMono;
   ctx.userEventRecvUtc = ctx.nowUtc;
   ctx.initialOrderSeedAllowed = true;
@@ -156,13 +154,13 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   trading_core::StrategyExecutionTraceBatch executionTrace{};
   const bool captureIndicatorTrace = strategyIndicatorEnabled(engine);
   const bool captureRangeTrace = emitsPriceRangeTrace(descriptor);
-  const bool captureSpreadDiagnostics = emitsArbSpreadTrace(descriptor);
-  const bool captureSpreadRows = request.captureStrategySpread && captureSpreadDiagnostics;
-  if (captureIndicatorTrace || captureRangeTrace || captureSpreadDiagnostics) {
+  const bool captureSpreadDiagnostic = emitsArbSpreadTrace(descriptor);
+  const bool captureSpreadRows = request.captureStrategySpread && captureSpreadDiagnostic;
+  if (captureIndicatorTrace || captureRangeTrace || captureSpreadDiagnostic) {
     trading_core::initStrategyDecisionTrace(trace, ctx.nowMono.raw);
     ctx.decisionTrace = &trace;
   }
-  if (captureSpreadDiagnostics) {
+  if (captureSpreadDiagnostic) {
     executionTrace.clear();
     ctx.executionTrace = &executionTrace;
   }
@@ -224,7 +222,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
     descriptor.restoreAfterOrderFailure(state, before);
     if (transactionCycle) ctx.io.transactionCount = 0u;
   }
-  if (captureIndicatorTrace || captureRangeTrace || captureSpreadDiagnostics) {
+  if (captureIndicatorTrace || captureRangeTrace || captureSpreadDiagnostic) {
     std::uint32_t orderedOrderCount = 0u;
     std::uint32_t orderedCancelCount = 0u;
     for (std::size_t i = 0u; i < ctx.io.commandCount; ++i) {
@@ -236,7 +234,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
     trace.cancelCount = static_cast<std::uint32_t>(ctx.io.cancelCount) + orderedCancelCount;
     if (captureIndicatorTrace) appendStrategyIndicator(engine, tsNs, trace);
     if (captureRangeTrace) appendStrategyRange(engine, tsNs, trace);
-    if (captureSpreadDiagnostics) recordStrategySpread(engine, tsNs, trace, captureSpreadRows);
+    if (captureSpreadDiagnostic) recordStrategySpread(engine, tsNs, trace, captureSpreadRows);
   }
   if (ctx.executionTrace) recordExecutionQualityActions(engine, tsNs, executionTrace);
   if (ctx.io.transactionCount != 0u) {

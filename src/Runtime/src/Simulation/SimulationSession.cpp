@@ -18,7 +18,7 @@
 #include "../Accounting/BacktestResultAggregation.hpp"
 #include "../Engine/BacktestEngineSetup.hpp"
 #include "../Config/BacktestRunConfig.hpp"
-#include "../Strategy/Diagnostics/BacktestStrategyTrace.hpp"
+#include "../Strategy/Diagnostic/BacktestStrategyTrace.hpp"
 #include "../Strategy/Inputs/BacktestStrategyWarmup.hpp"
 #include "../Strategy/Inputs/BacktestStrategyInstrument.hpp"
 #include "../Strategy/Internal/BacktestStrategyRuntimeHelpers.hpp"
@@ -85,12 +85,14 @@ struct SimulationSession::Impl {
   capital::risk::PortfolioRiskState risk{};
   SimulationOutputSink sink;
   SimulationLimits limits;
+  std::vector<std::uint32_t> maximumDepthCoverageSourcesBySource;
+  std::uint32_t preparedMaximumCoverageSources{};
   std::size_t residentSourceCapacity{};
   std::uint64_t preparedSourceBytes{},preparedContextBytes{};
   std::unique_ptr<BacktestCanonicalPairSelection> selection;
   StrategyIndicatorProfileInfo indicator;
   detail::SimulationReferences capturedReferences;
-  std::vector<BacktestCanonicalPairSource> canonicalSources;
+  std::vector<BacktestCanonicalSource> canonicalSources;
   std::vector<std::uint64_t> metadataVisibleMono;
   std::uint64_t referenceGeneration{},referenceBytes{},producerEpoch{},anchorMonotonic{};
   std::int64_t anchorRealtime{},authorityReplay{-1};
@@ -105,6 +107,9 @@ struct SimulationSession::Impl {
   void reject(Status status,std::string message) {result.status=status;result.error=std::move(message);}
   Status prepare(const BacktestRunRequest& requested,const hftrec::corpus::CorpusCut& cut,SimulationOutputSink output,SimulationLimits bounds) {
     request=requested;sink=output;limits=bounds;request.writeArtifacts=false;
+    maximumDepthCoverageSourcesBySource.assign(bounds.maximumDepthCoverageSourcesBySource.begin(),
+        bounds.maximumDepthCoverageSourcesBySource.end());
+    limits.maximumDepthCoverageSourcesBySource = {};
     activeInput=!cut.finalized && !cut.manifest.complete;
     if(request.makerFeeBpsE8<0 || request.takerFeeBpsE8<0 ||
         std::any_of(request.feeSchedules.begin(),request.feeSchedules.end(),[](const auto& fee) {
@@ -157,7 +162,9 @@ struct SimulationSession::Impl {
     if (result.strategy!=config.strategyType) {reject(Status::ConfigMismatch,"strategy does not match config");return result.status;}
     if (!buildSessionLoadPlan(descriptor,plan,error)) {reject(Status::Unsupported,error);return result.status;}
     wholeMarketPairs=request.corpusSources.empty() && config.portfolios.empty() &&
-        descriptor.stateDiscipline==trading_core::StrategyStateDiscipline::CanonicalEvidence;
+        descriptor.stateDiscipline==trading_core::StrategyStateDiscipline::CanonicalEvidence &&
+        descriptor.minLegs==2u && descriptor.maxLegs==2u &&
+        descriptor.runtimePolicy && descriptor.runtimePolicy->available;
     if(request.corpusSources.empty()) {
       const auto status=materializeSymbols(cut);
       if(!isOk(status)){reject(status,error);return result.status;}
@@ -178,10 +185,12 @@ struct SimulationSession::Impl {
     if(wholeMarketPairs) {
       const auto status=selectWholeMarketSources(cut,selections);if(!isOk(status)){reject(status,error);return result.status;}
     }
-    const auto inputStatus=input.prepare(cut,selections,plan,error);
+    const auto inputStatus=input.prepare(cut,selections,plan,error,maximumDepthCoverageSourcesBySource);
     if(!isOk(inputStatus)) {reject(inputStatus,error);return result.status;}
     wholeMarketPairs=request.corpusSources.empty() && config.portfolios.empty() &&
-        descriptor.stateDiscipline==trading_core::StrategyStateDiscipline::CanonicalEvidence;
+        descriptor.stateDiscipline==trading_core::StrategyStateDiscipline::CanonicalEvidence &&
+        descriptor.minLegs==2u && descriptor.maxLegs==2u &&
+        descriptor.runtimePolicy && descriptor.runtimePolicy->available;
     if(wholeMarketPairs)for(const auto& source:input.sources) {
       const auto authority=detail::requireSimulationInstrument(capturedReferences,source.selection.source,activeInput,error);
       if(!isOk(authority)){reject(authority,error);return result.status;}
@@ -207,7 +216,7 @@ struct SimulationSession::Impl {
       }
       for(auto& context:selectedContexts)for(auto& source:context.sourceIndices)source=remap[source];
       detail::SimulationInput filtered;
-      const auto status=filtered.prepare(cut,participating,plan,error);
+      const auto status=filtered.prepare(cut,participating,plan,error,maximumDepthCoverageSourcesBySource);
       if(!isOk(status)){reject(status,error);return result.status;}
       input=std::move(filtered);
     } else if(!discoverUniverseContexts(descriptor,config,input.sessions,selectedContexts,error)) {
@@ -224,26 +233,60 @@ struct SimulationSession::Impl {
       }
       if(participating.size()!=input.sessions.size()) {
         for(auto& context:selectedContexts)for(auto& source:context.sourceIndices)source=remap[source];
-        detail::SimulationInput filtered;const auto status=filtered.prepare(cut,participating,plan,error);
+        detail::SimulationInput filtered;const auto status=filtered.prepare(cut,participating,plan,error,maximumDepthCoverageSourcesBySource);
         if(!isOk(status)){reject(status,error);return result.status;}input=std::move(filtered);
       }
     }
+    const auto masksValid = [&](std::span<const std::uint16_t> masks) {
+      return masks.empty() || masks.size() == cut.sources.size();
+    };
+    if (!masksValid(bounds.sourceUnhealthyChannelMasksAtBegin) ||
+        !masksValid(bounds.sourceAdministrativeUnhealthyChannelMasksAtBegin) ||
+        !masksValid(bounds.sourceRecoveryPendingChannelMasksAtBegin)) {
+      reject(Status::CorruptData,"invalid initial captured depth overlay metadata");return result.status;
+    }
+    const auto depthBit=hftrec::corpus::binaryMarketChannelBit(hftrec::corpus::BinaryMarketChannel::Depth);
+    for (std::size_t leg=0u; leg<input.sessions.size(); ++leg) {
+      auto& session=input.sessions[leg];
+      if (!session.capturedSourceId || session.capturedSourceId > cut.sources.size()) {
+        reject(Status::CorruptData,"initial overlay source is outside captured catalog");return result.status;
+      }
+      const auto index=static_cast<std::size_t>(session.capturedSourceId-1u);
+      if (!bounds.sourceUnhealthyChannelMasksAtBegin.empty())
+        session.capturedUnhealthyChannels=bounds.sourceUnhealthyChannelMasksAtBegin[index];
+      const auto administrative=bounds.sourceAdministrativeUnhealthyChannelMasksAtBegin.empty() ? 0u : bounds.sourceAdministrativeUnhealthyChannelMasksAtBegin[index];
+      const auto pending=bounds.sourceRecoveryPendingChannelMasksAtBegin.empty() ? 0u : bounds.sourceRecoveryPendingChannelMasksAtBegin[index];
+      if (((administrative | pending) & ~static_cast<unsigned>(session.capturedUnhealthyChannels)) != 0u) {
+        reject(Status::CorruptData,"initial administrative overlay lacks total health fence");return result.status;
+      }
+      session.capturedDepthAdministrativeUnhealthy=((administrative | pending)&depthBit)!=0u;
+      session.capturedDepthRecoveryPending=(pending&depthBit)!=0u;
+      input.sources[leg].unhealthyMask=session.capturedUnhealthyChannels;
+    }
+    limits.sourceUnhealthyChannelMasksAtBegin={};
+    limits.sourceAdministrativeUnhealthyChannelMasksAtBegin={};
+    limits.sourceRecoveryPendingChannelMasksAtBegin={};
     const auto& sources=input.sessions;
     constexpr std::uint64_t maximumEnvelope=3ull*1024u*1024u*1024u;
     if(!limits.maximumStateBytes || limits.maximumStateBytes>maximumEnvelope) {
       reject(Status::InvalidArgument,"invalid simulation resident state byte budget");return result.status;
     }
-    preparedSourceBytes=sizeof(detail::EngineState)+sizeof(detail::SimulationOrderEvidenceOwner)+
+    preparedSourceBytes=sizeof(detail::EngineState)+sizeof(detail::SessionData)+sizeof(detail::SimulationInput::Source)+sizeof(detail::SimulationOrderEvidenceOwner)+
         sizeof(detail::PendingAction)*detail::kMaxOrderStates*4u+
         (sizeof(cxet::composite::UserDataEvent)+sizeof(detail::JsonFill)+sizeof(detail::JsonEquityPoint)+
          sizeof(detail::JsonRiskSnapshot)+sizeof(detail::JsonStrategyIndicatorPoint)+sizeof(detail::JsonStrategyRangePoint)+
          sizeof(detail::JsonStrategySpreadPoint)+sizeof(detail::JsonExecutionQualityAction)+sizeof(detail::JsonRateLimitUsagePoint)+
          4u*sizeof(std::uint64_t)+sizeof(std::uint32_t)+2u)*detail::kMaxOrderStates*16u+
         sizeof(detail::JsonOrder)*detail::kMaxOrderStates*8u;
-    preparedContextBytes=sizeof(UniverseState)+sizeof(MultiLegCycleScratch)+sizeof(BacktestCanonicalPairAdapter);
+    preparedContextBytes=sizeof(UniverseState)+sizeof(MultiLegCycleScratch)+sizeof(BacktestCanonicalExecutionAdapter);
+    detail::SessionData coveragePlan;
+    for (const auto& source : sources)
+      preparedMaximumCoverageSources = std::max(preparedMaximumCoverageSources, source.maximumCapturedDepthCoverageSources);
+    coveragePlan.maximumCapturedDepthCoverageSources = preparedMaximumCoverageSources;
     auto prototype=std::make_unique<detail::EngineState>();
-    if(!prepareEngineOrderBookStorage(*prototype,&descriptor,plan)) {reject(Status::IoError,"simulation depth memory planning failed");return result.status;}
+    if(!prepareEngineOrderBookStorage(*prototype,&descriptor,plan,&coveragePlan)) {reject(Status::IoError,"simulation depth memory planning failed");return result.status;}
     preparedSourceBytes+=prototype->orderBook.storageBytes()+prototype->venueOrderBook.storageBytes()+prototype->executionLiquidity.storageBytes();
+    prototype.reset();
     // Descriptor context storage is allocated as topology grows. The raw engine
     // vector reserves a bounded address-stable bank before actors borrow it.
     if(selectedContexts.size()>limits.maximumContexts ||
@@ -278,8 +321,8 @@ struct SimulationSession::Impl {
       if(!selection->bindCold(*strategy->runtimePolicy,identities,contexts.front()->inputPolicy.maxAgeNs,error)) {
         reject(Status::Unsupported,error);return result.status;
       }
-      for(std::size_t i=0;i<contexts.size();++i)if(contexts[i]->scratch->canonicalPair &&
-          !contexts[i]->scratch->canonicalPair->bindSelectionOwner(*selection,static_cast<std::uint32_t>(i))) {
+      for(std::size_t i=0;i<contexts.size();++i)if(contexts[i]->scratch->canonicalExecution &&
+          !contexts[i]->scratch->canonicalExecution->bindSelectionOwner(*selection,static_cast<std::uint32_t>(i))) {
         reject(Status::Unsupported,"canonical selection context binding failed");return result.status;
       }
     }
@@ -296,7 +339,7 @@ struct SimulationSession::Impl {
     summarize();return result.status;
   }
   Status selectWholeMarketSources(const hftrec::corpus::CorpusCut& cut,std::vector<BacktestCorpusSourceRequest>& selections) {
-    detail::SimulationInput candidates;std::vector<BacktestCanonicalPairSource> metadata;
+    detail::SimulationInput candidates;std::vector<BacktestCanonicalSource> metadata;
     std::vector<std::size_t> selectionIndices;
     using CatalogKey=std::tuple<std::string,std::string,std::string>;
     std::map<CatalogKey,const hftrec::corpus::BinaryMarketSource*> catalog;
@@ -310,7 +353,7 @@ struct SimulationSession::Impl {
       const auto entry=catalog.find({selected.exchange,selected.market,selected.canonicalSymbol});
       if(entry==catalog.end()){error="whole-market source disappeared from immutable catalog";return Status::CorruptData;}
       const auto* found=entry->second;
-      BacktestCanonicalPairSource row;
+      BacktestCanonicalSource row;
       const auto status=capturedReferences.listing(*found,row.instrument,activeInput,error);
       if(!isOk(status))return status;
       auto& source=candidates.sources.emplace_back();source.selection.source=*found;source.selection.manifest=cut.manifest;
@@ -391,6 +434,8 @@ struct SimulationSession::Impl {
       engine.capturedSourceGeneration = source.capturedSourceGeneration;
       engine.capturedDirectoryRevision = source.capturedDirectoryRevision;
       engine.capturedUnhealthyChannels = source.capturedUnhealthyChannels;
+      engine.capturedDepthAdministrativeUnhealthy = source.capturedDepthAdministrativeUnhealthy;
+      engine.capturedDepthRecoveryPending = source.capturedDepthRecoveryPending;
       engine.capturedActiveChannels = source.capturedInitiallyPresent ? source.capturedAvailableChannels : 0u;
       engine.exchange = detail::exchangeFromText(source.exchange);
       engine.market = detail::marketFromText(source.market);
@@ -398,7 +443,7 @@ struct SimulationSession::Impl {
       engine.legIndex = static_cast<std::uint32_t>(i);
       engine.tickSizeE8 = instrument.tickSizeRaw;
       engine.makerFillMinCrossTicks = request.makerFillMinCrossTicks;
-      if (!prepareEngineOrderBookStorage(engine, &descriptor, plan)) {
+      if (!prepareEngineOrderBookStorage(engine, &descriptor, plan, &source)) {
         reject(Status::IoError, "failed to prepare source depth owner"); return result.status;
       }
       engine.venueOrderBookExecutionEnabled = plan.loadDepths;
@@ -521,8 +566,8 @@ struct SimulationSession::Impl {
         reject(Status::Unsupported, error.empty() ? "strategy has unsupported binary warmup" : error); return result.status;
       }
       if(strategy->stateDiscipline==trading_core::StrategyStateDiscipline::CanonicalEvidence) {
-        context->scratch->canonicalPair=std::make_unique<BacktestCanonicalPairAdapter>();
-        std::array<BacktestCanonicalPairSource,trading_core::kStrategyRuntimeMaxLegs> metadata;
+        context->scratch->canonicalExecution=std::make_unique<BacktestCanonicalExecutionAdapter>();
+        std::array<BacktestCanonicalSource,trading_core::kStrategyRuntimeMaxLegs> metadata;
         for(std::size_t leg=0;leg<selected.sourceIndices.size();++leg) {
           const auto source=selected.sourceIndices[leg];
           metadata[leg]=canonicalSources[source];
@@ -537,7 +582,7 @@ struct SimulationSession::Impl {
         host.budgetValueRaw=request.virtualHost.strategyBudgetE8;
         host.budgetCurrency={request.virtualHost.budgetCurrency.data(),request.virtualHost.budgetCurrency.size()};
         host.marginBorrowAllowed=request.virtualHost.marginBorrowAllowed;
-        if(!context->scratch->canonicalPair->bindCold(descriptor,params,context->state.data(),context->instruments,
+        if(!context->scratch->canonicalExecution->bindCold(descriptor,params,context->state.data(),context->instruments,
              {metadata.data(),selected.sourceIndices.size()},detail::EngineView(context->routes.data(),context->count),
              static_cast<std::uint64_t>(input.sources[0].selection.manifest.replayAnchorReceiveNs),error,host)) {
           reject(Status::Unsupported,error);return result.status;
@@ -550,13 +595,22 @@ struct SimulationSession::Impl {
 
     return Status::Ok;
   }
-  Status updateCut(const hftrec::corpus::CorpusCut& cut) {
+  Status updateCut(const hftrec::corpus::CorpusCut& cut,
+      std::span<const std::uint32_t> coverageMaxima) {
     if(finished || result.riskStopped || !isOk(result.status) || !input.transaction.empty())return Status::InvalidArgument;
     if(cut.manifest.producerEpoch!=producerEpoch || cut.manifest.replayAnchorMonotonicNs!=anchorMonotonic ||
         cut.manifest.replayAnchorReceiveNs!=anchorRealtime || (cut.progress.producerEpoch && cut.progress.producerEpoch!=producerEpoch)) {
       reject(Status::CorruptData,"simulation producer/clock anchor changed after preparation");return result.status;
     }
     if(cut.generation<referenceGeneration){reject(Status::CorruptData,"simulation cut generation regressed");return result.status;}
+    if (!coverageMaxima.empty()) {
+      if (coverageMaxima.size() != cut.sources.size() ||
+          std::any_of(coverageMaxima.begin(), coverageMaxima.end(), [](std::uint32_t value) {
+            return value > cxet::market::kMaximumDepthSourceCapacity;
+          })) {reject(Status::CorruptData,"invalid cold depth coverage maxima");return result.status;}
+      maximumDepthCoverageSourcesBySource.assign(coverageMaxima.begin(), coverageMaxima.end());
+    } else if (!maximumDepthCoverageSourcesBySource.empty())
+      maximumDepthCoverageSourcesBySource.resize(cut.sources.size());
     activeInput=!cut.finalized && !cut.manifest.complete;
     if(cut.referencePayload.size()+residentSourceCapacity*sizeof(detail::EngineState)+
         input.sessions.size()*(preparedSourceBytes-sizeof(detail::EngineState))+contexts.size()*preparedContextBytes>limits.maximumStateBytes) {
@@ -592,9 +646,47 @@ struct SimulationSession::Impl {
       reject(Status::Unsupported,"declared source/state byte capacity exceeded by captured topology");return result.status;
     }
     const auto prior=input.sessions.size();const auto priorAccounts=accounts.size();
-    const auto appended=input.prepare(cut,selections,plan,error);
+    const auto appended=input.prepare(cut,selections,plan,error,maximumDepthCoverageSourcesBySource);
     if(!isOk(appended)){reject(appended,error);return result.status;}
     const auto count=input.sessions.size();
+    std::uint32_t maximumCoverage = preparedMaximumCoverageSources;
+    for (const auto& source : input.sessions)
+      maximumCoverage = std::max(maximumCoverage, source.maximumCapturedDepthCoverageSources);
+    if (maximumCoverage > preparedMaximumCoverageSources) {
+      const auto projectedBooks = (strategy->orderBookViewLevelsPerSide != 0u ? 1u : 0u) + (plan.loadDepths ? 1u : 0u);
+      preparedSourceBytes += static_cast<std::uint64_t>(maximumCoverage - preparedMaximumCoverageSources) *
+          sizeof(cxet::market::DepthCoverage) * projectedBooks;
+      preparedMaximumCoverageSources = maximumCoverage;
+    }
+    std::uint64_t replacementBytes = 0u;
+    for (std::size_t source=0u; source<prior; ++source) {
+      const auto maximum=input.sessions[source].maximumCapturedDepthCoverageSources;
+      for (const auto* book : {&engines[source].orderBook, &engines[source].venueOrderBook})
+        if (book->hasStorage() && maximum > book->coverageCapacity())
+          replacementBytes = std::max(replacementBytes, static_cast<std::uint64_t>(book->storageBytes()));
+    }
+    if (referenceBytes+residentSourceCapacity*sizeof(detail::EngineState)+
+        count*(preparedSourceBytes-sizeof(detail::EngineState))+contexts.size()*preparedContextBytes+
+        replacementBytes>limits.maximumStateBytes) {
+      reject(Status::Unsupported,"exact depth coverage exceeds resident simulation byte budget");return result.status;
+    }
+    // This is the explicit cold cut boundary. Preserve each existing projected
+    // book when a newly admitted prefix proves a larger exact coverage count.
+    const auto extendCoverage = [](trading_core::LocalOrderBookState& book, std::uint32_t maximum) {
+      if (!book.hasStorage() || maximum <= book.coverageCapacity()) return true;
+      trading_core::LocalOrderBookState replacement;
+      if (!replacement.reserveLevelsPerSide(book.capacityLevelsPerSide(), maximum) ||
+          !replacement.copyFromBounded(book)) return false;
+      book = std::move(replacement);
+      return true;
+    };
+    for (std::size_t source=0u; source<prior; ++source) {
+      const auto maximum=input.sessions[source].maximumCapturedDepthCoverageSources;
+      if (!extendCoverage(engines[source].orderBook, maximum) ||
+          !extendCoverage(engines[source].venueOrderBook, maximum)) {
+        reject(Status::IoError,"cold depth coverage extension failed");return result.status;
+      }
+    }
     engines.resize(count);instruments.resize(count);canonicalSources.resize(count);metadataVisibleMono.resize(count);
     subscribers.resize(count);accountIndices.resize(count);
     for(std::size_t source=prior;source<count;++source)if(!isOk(initializeSource(source)))return result.status;
@@ -629,7 +721,7 @@ struct SimulationSession::Impl {
         reject(Status::Unsupported,error);return result.status;
       }
       for(std::size_t index=priorContexts;index<contexts.size();++index)
-        if(!contexts[index]->scratch->canonicalPair->bindSelectionOwner(*selection,static_cast<std::uint32_t>(index))) {
+        if(!contexts[index]->scratch->canonicalExecution->bindSelectionOwner(*selection,static_cast<std::uint32_t>(index))) {
           reject(Status::Unsupported,"appended canonical selection binding failed");return result.status;
         }
     }
@@ -670,7 +762,7 @@ struct SimulationSession::Impl {
     if(authorityReplay==replay && authorityReferenceGeneration==referenceGeneration)return;
     const auto currentMono=monotonicFromReplay(replay);
     for(std::size_t source=0;source<engines.size();++source) {
-      auto candidate=instruments[source];BacktestCanonicalPairSource current;std::uint64_t visible{};
+      auto candidate=instruments[source];BacktestCanonicalSource current;std::uint64_t visible{};
       bool qualified=capturedReferences.instrument(input.sources[source].selection.source,candidate,current,visible,error,currentMono);
       const auto& bound=canonicalSources[source].sizing;
       const auto same=[](const auto& left,const auto& right) {
@@ -695,8 +787,8 @@ struct SimulationSession::Impl {
     auto& context=*contexts[index];
     refreshFinancialAuthority(replay);
     for(std::size_t leg=0;leg<std::min<std::size_t>(2u,context.count);++leg)
-      context.references.quoteReceiveUtc[leg]=context.routes[leg]->reconstructedQuoteReceiveUtc;
-    if(!context.scratch->canonicalPair || !strategy->runtimePolicy || !strategy->runtimePolicy->requiresPairSignal)return true;
+      context.references.quoteReceiveUtc[leg].raw=context.routes[leg]->reconstructedQuoteReceiveUtc;
+    if(!context.scratch->canonicalExecution || !strategy->runtimePolicy || !strategy->runtimePolicy->requiresPairSignal)return true;
     const auto mono=monotonicFromReplay(replay);
     const auto utc=replayUtcFromMonotonic(replay,context.routes[0]->replayUtcOffsetNs).raw;
     if(!capturedReferences.delivery(selectedContexts[index].sourceIndices,input,context.delivery,mono,utc,error) ||
@@ -722,6 +814,8 @@ struct SimulationSession::Impl {
   bool contextActive(std::size_t i) {
       const auto& context = *contexts[i];
       if(monotonicFromReplay(schedulerFloor)<context.metadataVisibleMono)return false;
+      if (strategy->stateDiscipline == trading_core::StrategyStateDiscipline::CanonicalEvidence &&
+          strategy->runtimePolicy && !strategy->runtimePolicy->available) return true;
       for (std::size_t leg = 0u; leg < context.count; ++leg) {
         const auto& source = *context.routes[leg];
         const auto sourceIndex=selectedContexts[i].sourceIndices[leg];
@@ -764,8 +858,8 @@ struct SimulationSession::Impl {
           const auto& context = *contexts[i];
           const auto next = std::min({
               result.riskStopped || !active ? std::numeric_limits<std::int64_t>::max() :
-                  (context.scratch->canonicalPair && context.scratch->canonicalPair->nextWakeMono().raw
-                    ? static_cast<std::int64_t>(context.scratch->canonicalPair->nextWakeMono().raw)
+                  (context.scratch->canonicalExecution && context.scratch->canonicalExecution->nextWakeMono().raw
+                    ? static_cast<std::int64_t>(context.scratch->canonicalExecution->nextWakeMono().raw)
                     : strategy_runtime_detail::nextWakeTs(descriptor, context.state.data())),
               strategy_runtime_detail::nextPendingTs(engines),
               strategy_runtime_detail::nextUserEventDeliveryTs(engines),
@@ -797,7 +891,7 @@ struct SimulationSession::Impl {
           }
           const bool riskBreached=evaluateRisk(privateDue);
           if (!engine.userEventServiceFlags[head] &&
-              ((!riskBreached && contextActive(contextIndex)) || contexts[contextIndex]->scratch->canonicalPair)) {
+              ((!riskBreached && contextActive(contextIndex)) || contexts[contextIndex]->scratch->canonicalExecution)) {
             auto& context = *contexts[contextIndex];
             refreshAccounts();
             if(!prepareContextReferences(contextIndex,privateDue))return false;
@@ -901,7 +995,7 @@ struct SimulationSession::Impl {
           const auto preparedInstrument = prepareBacktestStrategyInstrument(
               sources[event.legIndex].instrument, candidate, error);
           if (!isOk(preparedInstrument)) { reject(preparedInstrument, error); return false; }
-          BacktestCanonicalPairSource typedCandidate;std::uint64_t visible{};
+          BacktestCanonicalSource typedCandidate;std::uint64_t visible{};
           if(!capturedReferences.instrument(input.sources[event.legIndex].selection.source,candidate,typedCandidate,visible,error)) {
             reject(Status::Unsupported,error);return false;
           }
@@ -1022,7 +1116,7 @@ struct SimulationSession::Impl {
             const auto found=std::find(indices.begin(),indices.end(),proof.source);
             if(found==indices.end())return false;
             const auto& scratch=*owner.contexts[index]->scratch;
-            if(scratch.canonicalPair)return scratch.canonicalPair->released(
+            if(scratch.canonicalExecution)return scratch.canonicalExecution->released(
                 static_cast<std::size_t>(found-indices.begin()),context,intent,cut);
             // Snapshot state owns no retained canonical execution references;
             // completed runCycle has consumed this cut before flush.
@@ -1120,9 +1214,10 @@ Status SimulationSession::advance(std::span<const hftrec::corpus::BinaryMarketRe
     return owner.result.status;
   } catch (...) {owner.reject(Status::IoError,"simulation bounded advancement failed");return owner.result.status;}
 }
-Status SimulationSession::updateCut(const hftrec::corpus::CorpusCut& cut) noexcept {
+Status SimulationSession::updateCut(const hftrec::corpus::CorpusCut& cut,
+    std::span<const std::uint32_t> maximumDepthCoverageSourcesBySource) noexcept {
   if(!impl_)return Status::InvalidArgument;
-  try {return impl_->updateCut(cut);}catch(...) {impl_->reject(Status::IoError,"simulation topology update allocation failed");return impl_->result.status;}
+  try {return impl_->updateCut(cut, maximumDepthCoverageSourcesBySource);}catch(...) {impl_->reject(Status::IoError,"simulation topology update allocation failed");return impl_->result.status;}
 }
 void SimulationSession::pause() noexcept {if(impl_) impl_->paused=true;}
 void SimulationSession::resume() noexcept {if(impl_ && !impl_->finished && isOk(impl_->result.status)) impl_->paused=false;}

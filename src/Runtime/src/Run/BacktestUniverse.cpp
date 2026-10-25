@@ -8,6 +8,7 @@
 #include <fstream>
 #include <map>
 #include <limits>
+#include <vector>
 
 namespace hft_backtest::run_detail {
 namespace {
@@ -74,11 +75,27 @@ void runBinaryUniverse(BacktestRunResult& result,const BacktestRunRequest& reque
       cut.progress.producerEpoch=cut.manifest.producerEpoch;
       cut.finalized=true;
     }
+    std::vector<std::uint32_t> maximumCoverage(cut.sources.size());
+    corpus::BinaryMarketRecord preflightRecord{}; bool preflightAvailable=false;
+    do {
+      const auto read=cursor.next(preflightRecord,preflightAvailable,error);
+      if(!hftrec::isOk(read)){result.status=detail::binary_corpus::convertStatus(read);result.error=error;return;}
+      if(preflightAvailable && !detail::binary_corpus::includeDepthCoverageMaximum(preflightRecord,maximumCoverage)) {
+        result.status=Status::CorruptData;result.error="invalid exact depth coverage preflight";return;
+      }
+    } while(preflightAvailable);
+    const auto replayOpened=cursor.open(selection,metadata,error);
+    if(!hftrec::isOk(replayOpened)){result.status=detail::binary_corpus::convertStatus(replayOpened);result.error=error;return;}
     ArchiveOutput output;
     output.root=result.resultPath;
     SimulationSession session;
     const SimulationOutputSink sink=request.writeArtifacts?SimulationOutputSink{ArchiveOutput::write,&output}:SimulationOutputSink{};
-    const auto prepared=session.prepare(request,cut,sink);
+    SimulationLimits simulationLimits;
+    simulationLimits.maximumDepthCoverageSourcesBySource=maximumCoverage;
+    simulationLimits.sourceUnhealthyChannelMasksAtBegin=metadata.sourceUnhealthyChannelMasksAtBegin;
+    simulationLimits.sourceAdministrativeUnhealthyChannelMasksAtBegin=metadata.sourceAdministrativeUnhealthyChannelMasksAtBegin;
+    simulationLimits.sourceRecoveryPendingChannelMasksAtBegin=metadata.sourceRecoveryPendingChannelMasksAtBegin;
+    const auto prepared=session.prepare(request,cut,sink,simulationLimits);
     if(!isOk(prepared)){result=session.result();return;}
     for(std::size_t leg=0;leg<session.result().legs.size();++leg) {
       const auto& admitted=session.result().legs[leg];

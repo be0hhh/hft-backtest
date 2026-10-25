@@ -323,7 +323,7 @@ Status loadSession(const std::filesystem::path& sessionPath,
   }
   hftrec::capture::SessionManifest recorderManifest{};
   if (!hftrec::isOk(hftrec::capture::parseManifestJson(manifest, recorderManifest))) {
-    error = "malformed or incompatible recorder manifest.json; current captured-arrival v3 contract is required";
+    error = "malformed or incompatible recorder manifest.json; current captured-arrival contract is required";
     return Status::CorruptData;
   }
   // Recorder owns immutable historical channel tags and manifest counts.

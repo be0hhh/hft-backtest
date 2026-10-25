@@ -1,9 +1,11 @@
+find_package(Threads REQUIRED)
+
 cxet_add_offline_suite(hft_backtest_offline_quota OWNER hft-backtest EXPECTED 8
   SOURCES Quota/QuotaConsumerCases.cpp
   LIBRARIES hft_backtest::core hftrec::corpus_contract trading_core::strategy
   INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../src/Runtime/src"
   LABELS quota-consumer)
-cxet_add_offline_suite(hft_backtest_offline_trade OWNER hft-backtest EXPECTED 29
+cxet_add_offline_suite(hft_backtest_offline_trade OWNER hft-backtest EXPECTED 33
   SOURCES Replay/TradeReplayCases.cpp
   LIBRARIES hft_backtest::core hftrec::corpus_contract trading_core::strategy
   INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../src/Runtime/src"
@@ -20,7 +22,7 @@ cxet_add_offline_suite(hft_backtest_offline_execution OWNER hft-backtest EXPECTE
   LIBRARIES hft_backtest::core hftrec::corpus_contract trading_core::strategy
   INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../src/Runtime/src"
   LABELS trade execution simulation)
-cxet_add_offline_suite(hft_backtest_offline_canonical_pair OWNER hft-backtest EXPECTED 11
+cxet_add_offline_suite(hft_backtest_offline_canonical_pair OWNER hft-backtest EXPECTED 13
   SOURCES Execution/CanonicalPairAdapterCases.cpp
   LIBRARIES hft_backtest::core hftrec::corpus_contract trading_core::strategy
   INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../../src/Runtime/src"

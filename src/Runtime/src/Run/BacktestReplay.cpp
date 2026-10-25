@@ -8,7 +8,7 @@
 #include "../Config/Strategy/BacktestStrategyConfig.hpp"
 #include "../Strategy/Inputs/BacktestStrategyWarmup.hpp"
 #include "../Strategy/BacktestStrategyRuntime.hpp"
-#include "../Strategy/Diagnostics/BacktestStrategyTrace.hpp"
+#include "../Strategy/Diagnostic/BacktestStrategyTrace.hpp"
 #include "../Input/Binary/BinaryCorpusLoader.hpp"
 #include "../Input/Session/SessionLoader.hpp"
 #include "BacktestRunError.hpp"

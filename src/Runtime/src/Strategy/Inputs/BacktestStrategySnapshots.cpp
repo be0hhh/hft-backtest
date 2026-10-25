@@ -3,7 +3,7 @@
 
 #include "../../Config/BacktestRunConfig.hpp"
 #include "../Execution/BacktestStrategyIntentLowering.hpp"
-#include "../Diagnostics/BacktestStrategyTrace.hpp"
+#include "../Diagnostic/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
 #include "trading_core/Strategy/Orders/Intent/WarmupIntents.hpp"
@@ -291,6 +291,7 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     const detail::DepthRow& depth = session.depths[event.index];
     auto& depthBook = strategyVisible ? engine.strategyDepthBook : engine.venueDepthBook;
     const auto& previous = depthBook.arrival();
+    const auto previousPublication = depthBook.book() ? depthBook.book()->projection().publicationSequence : 0u;
     const bool depthIdentityChanged = previous.producerEpoch != 0u &&
         (previous.producerEpoch != depth.arrival.producerEpoch ||
          previous.sourceId != depth.arrival.sourceId ||
@@ -298,7 +299,9 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
          previous.sessionEpoch != depth.arrival.sessionEpoch);
     if (!depthBook.apply(depth.levels, depth.tsNs, depth.arrival,
             depth.resetBookBeforeApply, depth.capturedSequence,
-            depth.capturedPublicationSequence)) {
+            depth.capturedPublicationSequence, depth.capturedSourcePosition,
+            depth.nativeEvidence, depth.capturedComposedCut, depth.capturedState,
+            depth.capturedFailure, depth.capturedCoverage)) {
       engine.depthReplayFailed = true;
       trading_core::clearOrderBookSnapshot(snapshot);
       return;
@@ -310,16 +313,33 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
       (void)trading_core::configureLocalOrderBookTick(orderBook, instrument.tickSizeRaw);
     }
     if (orderBook.hasStorage()) {
-      if (!detail::refreshReplayDepthProjection(orderBook, depthBook.view(), selectedSymbol)) {
+      if (!detail::refreshReplayDepthProjection(orderBook, depthBook.view(depth.capturedCoverage), selectedSymbol)) {
         engine.depthReplayFailed = true;
         trading_core::clearOrderBookSnapshot(snapshot);
         return;
       }
     }
-    if (!strategyVisible) {
+    const bool unavailable = depth.capturedComposedCut &&
+        (depth.capturedState == cxet::market::DepthSourceState::Gap ||
+         depth.capturedState == cxet::market::DepthSourceState::Empty);
+    if (!strategyVisible && unavailable) {
+      engine.executionLiquidity.reset();
+    } else if (!strategyVisible) {
       engine.executionLiquidity.publish(depth.levels, depth.resetBookBeforeApply || depthIdentityChanged);
     }
-    trading_core::bindOrderBookSnapshot(snapshot, orderBook);
+    if (unavailable) trading_core::clearOrderBookSnapshot(snapshot);
+    else trading_core::bindOrderBookSnapshot(snapshot, orderBook);
+    if (strategyVisible && engine.capturedDepthRecoveryPending && !unavailable &&
+        (depth.capturedState == cxet::market::DepthSourceState::Healthy ||
+         depth.capturedState == cxet::market::DepthSourceState::Partial) &&
+        depth.arrival.sourceGeneration == engine.capturedSourceGeneration &&
+        event.deliveryTsNs >= engine.replayNotBeforeNs &&
+        (depthIdentityChanged || depth.capturedPublicationSequence > previousPublication)) {
+      engine.capturedUnhealthyChannels &= static_cast<std::uint16_t>(~hftrec::corpus::binaryMarketChannelBit(
+          hftrec::corpus::BinaryMarketChannel::Depth));
+      engine.capturedDepthRecoveryPending = false;
+      engine.capturedDepthAdministrativeUnhealthy = false;
+    }
     changed = true;
   } else if (event.kind == detail::kTimelineKindTrade) {
     const auto& row = session.trades[event.index];
@@ -368,7 +388,21 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     detail::recordSpotValuationMark(engine, strategyVisible);
     detail::refreshSimulationDerivativeCollateral(engine,strategyVisible);
     if (strategyVisible) {
-      recordBacktestStrategySourceDelivery(engine, event);
+      const auto nativeEvidence = event.kind == detail::kTimelineKindDepth
+          ? session.depths[event.index].nativeEvidence
+          : event.kind == detail::kTimelineKindTrade
+              ? session.trades[event.index].nativeEvidence
+              : event.kind == detail::kTimelineKindBookTicker
+                  ? session.bookTickers[event.index].nativeEvidence
+                  : cxet::api::market::MarketNativeEvidence{};
+      recordBacktestStrategySourceDelivery(engine, event, nativeEvidence);
+      if (event.kind == detail::kTimelineKindDepth && session.depths[event.index].capturedComposedCut &&
+          (session.depths[event.index].capturedState == cxet::market::DepthSourceState::Gap ||
+           session.depths[event.index].capturedState == cxet::market::DepthSourceState::Empty)) {
+        auto& evidence = engine.strategySourceEvidence[cxet::api::market::publicMarketDataStreamIndex(
+            cxet::api::market::PublicMarketDataStream::Orderbook)];
+        evidence.available = evidence.continuous = false;
+      }
     }
     detail::bumpContextRevision(engine);
   }

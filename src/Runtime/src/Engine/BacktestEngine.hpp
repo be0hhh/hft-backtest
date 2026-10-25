@@ -34,8 +34,11 @@
 #include <memory>
 #include <span>
 #include <string>
+
 #include <string_view>
 #include <vector>
+
+namespace trading_core::strategy { class StrategyCloseGrant; }
 
 namespace hft_backtest::detail {
 
@@ -57,10 +60,17 @@ class ReplayDepthBook final {
   [[nodiscard]] bool apply(std::span<const PriceLevelRow> levels,
       std::int64_t exchangeTsNs, const hftrec::replay::EventArrival& arrival,
       bool snapshot, cxet::market::DepthSequence capturedSequence = {},
-      std::uint64_t capturedPublicationSequence = 0u) noexcept;
+      std::uint64_t capturedPublicationSequence = 0u,
+      bool capturedSourcePosition = false,
+      cxet::api::market::MarketNativeEvidence nativeEvidence = {},
+      bool composedCut = false,
+      cxet::market::DepthSourceState capturedState = cxet::market::DepthSourceState::Healthy,
+      cxet::market::DepthFailure capturedFailure = cxet::market::DepthFailure::None,
+      std::span<const cxet::market::DepthCoverage> capturedCoverage = {}) noexcept;
   [[nodiscard]] bool restore(const cxet::runtime::market::LocalOrderBookCheckpointView& checkpoint,
       const hftrec::replay::EventArrival& arrival, bool sourcePosition) noexcept;
-  [[nodiscard]] cxet::api::market::PublicMarketOrderBookView view() const noexcept;
+  [[nodiscard]] cxet::api::market::PublicMarketOrderBookView view(
+      std::span<const cxet::market::DepthCoverage> coverage = {}) const noexcept;
   [[nodiscard]] const cxet::runtime::market::LocalOrderBook* book() const noexcept {
     return books_.book(1u);
   }
@@ -296,7 +306,7 @@ struct JsonStrategySpreadPoint {
   std::uint8_t reasonRaw{0u};
 };
 
-struct JsonStrategySpreadDiagnostics {
+struct JsonStrategySpreadDiagnostic {
   std::uint64_t rows{0u};
   std::int64_t minEdgeAfterCostBpsE8{0};
   std::int64_t maxEdgeAfterCostBpsE8{0};
@@ -445,7 +455,7 @@ struct EngineState {
   std::vector<JsonStrategyIndicatorPoint> strategyIndicator{};
   std::vector<JsonStrategyRangePoint> strategyRange{};
   std::vector<JsonStrategySpreadPoint> strategySpread{};
-  JsonStrategySpreadDiagnostics strategySpreadDiagnostics{};
+  JsonStrategySpreadDiagnostic strategySpreadDiagnostic{};
   std::vector<JsonExecutionQualityAction> executionQuality{};
   std::vector<JsonRateLimitUsagePoint> rateLimitUsage{};
   std::string strategyIndicatorProfile{};
@@ -490,6 +500,8 @@ struct EngineState {
   std::array<std::int64_t,
              cxet::api::market::kPublicMarketDataStreamCount>
       strategySourceDeliveryTsNs{};
+  std::array<trading_core::StrategyInputEvidence,
+             cxet::api::market::kPublicMarketDataStreamCount> strategySourceEvidence{};
   // Difference between the captured realtime clock and the replay monotonic
   // coordinate at the most recently delivered market-data boundary.
   std::uint64_t reconstructedQuoteReceiveUtc{};
@@ -517,6 +529,13 @@ struct EngineState {
   std::size_t lastDeliveredUserEvent{std::numeric_limits<std::size_t>::max()};
   std::uint32_t activeContextIndex{};
   bool capturedSourceManaged{false};
+  bool capturedDepthRecoveryPending{false};
+  bool capturedDepthAdministrativeUnhealthy{false};
+  // Generic canonical commands qualify their named channel dependencies in
+  // the adapter. Private cancellation remains independent of market liveness.
+  bool genericCommandInputAdmission{false};
+  // Borrowed only across one synchronous canonical simulator submission.
+  trading_core::strategy::StrategyCloseGrant* scopedCloseGrant{};
   bool capturedSourceMember{true};
   std::uint64_t capturedSourceGeneration{};
   std::uint64_t capturedDirectoryRevision{};

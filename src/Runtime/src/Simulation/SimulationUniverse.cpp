@@ -20,7 +20,7 @@ Status requireSimulationInstrument(const SimulationReferences& references,
   return active?Status::NotReady:Status::Unsupported;
 }
 Status discoverSimulationUniverse(const trading_core::StrategyDescriptor& descriptor,
-    const SimulationInput& input,std::span<const BacktestCanonicalPairSource> metadata,
+    const SimulationInput& input,std::span<const BacktestCanonicalSource> metadata,
     std::size_t maximumContexts,std::vector<run_detail::UniverseContextSelection>& contexts,std::string& error) {
   using namespace trading_core;
   contexts.clear();

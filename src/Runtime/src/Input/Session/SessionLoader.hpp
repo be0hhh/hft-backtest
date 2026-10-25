@@ -31,6 +31,7 @@ struct TradeRow {
   std::int64_t tsNs{0};
   std::int64_t ingestSeq{0};
   hftrec::replay::EventArrival arrival{};
+  cxet::api::market::MarketNativeEvidence nativeEvidence{};
   // Current binary corpus preserves its declared native key. Legacy JSON
   // has no shape field and retains the existing unavailable-identity path.
   cxet::api::market::PublicMarketEventIdentity nativeIdentity{
@@ -47,6 +48,7 @@ struct BookTickerRow {
   std::int64_t tsNs{0};
   std::int64_t ingestSeq{0};
   hftrec::replay::EventArrival arrival{};
+  cxet::api::market::MarketNativeEvidence nativeEvidence{};
   bool bidPresent{true};
   bool askPresent{true};
   // A caught-up parser consumer refreshes receive evidence for this retained
@@ -64,6 +66,16 @@ struct DepthRow {
   // the local ordering coordinate used by legacy text corpora.
   cxet::market::DepthSequence capturedSequence{};
   std::uint64_t capturedPublicationSequence{0u};
+  cxet::api::market::MarketNativeEvidence nativeEvidence{};
+  // Cold reader-owned storage, bounded by kMaximumDepthSourceCapacity. A
+  // malformed or oversized tail refuses the complete application transaction.
+  std::vector<cxet::market::DepthCoverage> capturedCoverage{};
+  std::uint64_t sourceReceiveRealtimeNs{0u};
+  std::uint64_t sourceFreshnessMonotonicNs{0u};
+  bool capturedSourcePosition{false};
+  bool capturedComposedCut{false};
+  cxet::market::DepthSourceState capturedState{cxet::market::DepthSourceState::Healthy};
+  cxet::market::DepthFailure capturedFailure{cxet::market::DepthFailure::None};
   // Snapshot plus replay deltas were committed by the parser as one local
   // recovery transaction. The venue-side replay must apply that recovery at
   // its captured application arrival, not reorder its parts by their distinct
@@ -161,6 +173,10 @@ struct SessionData {
   std::uint64_t capturedDirectoryRevision{};
   std::uint16_t capturedAvailableChannels{};
   std::uint16_t capturedUnhealthyChannels{};
+  bool capturedDepthAdministrativeUnhealthy{};
+  bool capturedDepthRecoveryPending{};
+  // Exact cold-preflight maximum for this selected source; not a global cap.
+  std::uint32_t maximumCapturedDepthCoverageSources{};
   std::vector<std::string> warnings{};
 };
 

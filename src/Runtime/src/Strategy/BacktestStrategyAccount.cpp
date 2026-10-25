@@ -4,7 +4,7 @@
 
 #include "../Config/BacktestRunConfig.hpp"
 #include "Execution/BacktestStrategyIntentLowering.hpp"
-#include "Diagnostics/BacktestStrategyTrace.hpp"
+#include "Diagnostic/BacktestStrategyTrace.hpp"
 
 #include "trading_core/Strategy/Context/StrategyContextView.hpp"
 #include "trading_core/Strategy/Orders/Intent/WarmupIntents.hpp"

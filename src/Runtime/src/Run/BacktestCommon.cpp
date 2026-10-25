@@ -25,6 +25,14 @@ std::int64_t midpointE8(std::int64_t high, std::int64_t low) noexcept {
 
 bool refreshReplayDepthProjection(trading_core::LocalOrderBookState& out,
     const cxet::api::market::PublicMarketOrderBookView& source, const Symbol& symbol) noexcept {
+  if (!source.ready && source.bidCount == 0u && source.askCount == 0u &&
+      source.bidOrigins.empty() && source.askOrigins.empty() && !source.feedCoverage.empty() &&
+      out.hasStorage() && source.feedCoverage.size() <= out.coverageCapacity()) {
+    const auto config = out.config;
+    out.reset(); out.config = config; out.symbol = symbol; out.ts = source.lastEventTs;
+    out.coverage = cxet::api::market::PublicMarketOrderBookCoverage::Unavailable;
+    return out.copyFeedCoverage(source.feedCoverage, source.conflictingCoverage);
+  }
   const bool acceptedEmpty = source.ready && out.hasStorage() &&
       source.bidCount == 0u && source.askCount == 0u &&
       source.bidOrigins.empty() && source.askOrigins.empty() &&
@@ -41,9 +49,8 @@ bool ReplayDepthBook::prepare() noexcept {
   const std::array<std::uint32_t, 1u> capacities{
       cxet::market::kMaximumDepthLevelsPerSide};
   cxet::runtime::market::LocalOrderBookMemoryPlan plan{};
-  if (!cxet::runtime::market::planLocalOrderBookMemory(capacities,
-          std::numeric_limits<std::size_t>::max(), &plan) ||
-      !books_.initialize(capacities, plan.requiredBytes)) return false;
+  if (!cxet::runtime::market::planLocalOrderBookMemory(capacities, &plan) ||
+      !books_.initialize(capacities)) return false;
   scratch_.reset(new (std::nothrow) IndexedMutation[
       cxet::market::kMaximumDepthSnapshotMutations]);
   if (!scratch_) { books_.reset(); return false; }
@@ -59,15 +66,29 @@ void ReplayDepthBook::reset() noexcept {
 bool ReplayDepthBook::apply(std::span<const PriceLevelRow> levels,
     std::int64_t exchangeTsNs, const hftrec::replay::EventArrival& arrival,
     bool snapshot, cxet::market::DepthSequence capturedSequence,
-    std::uint64_t capturedPublicationSequence) noexcept {
+    std::uint64_t capturedPublicationSequence, bool capturedSourcePosition,
+    cxet::api::market::MarketNativeEvidence nativeEvidence, bool composedCut,
+    cxet::market::DepthSourceState capturedState, cxet::market::DepthFailure capturedFailure,
+    std::span<const cxet::market::DepthCoverage> capturedCoverage) noexcept {
   auto* owner = books_.book(1u);
   if (!owner || !scratch_ ||
-      levels.size() > cxet::market::kMaximumDepthSnapshotMutations) return false;
+      levels.size() > cxet::market::kMaximumDepthSnapshotMutations ||
+      !cxet::api::market::validMarketNativeEvidence(nativeEvidence)) return false;
   const bool identityChanged = arrival_.producerEpoch != 0u &&
       (arrival_.producerEpoch != arrival.producerEpoch ||
        arrival_.sourceId != arrival.sourceId ||
        arrival_.sourceGeneration != arrival.sourceGeneration ||
        arrival_.sessionEpoch != arrival.sessionEpoch);
+  using State = cxet::market::DepthSourceState;
+  if (composedCut && (!snapshot || !capturedSourcePosition || capturedCoverage.empty() ||
+      capturedPublicationSequence == 0u || capturedSequence.lastUpdateId == 0u ||
+      (capturedState != State::Healthy && capturedState != State::Partial &&
+       capturedState != State::Gap && capturedState != State::Empty) ||
+      (capturedState == State::Empty && !levels.empty()) ||
+      (capturedState != State::Gap && capturedFailure != cxet::market::DepthFailure::None) ||
+      static_cast<std::uint8_t>(capturedFailure) > static_cast<std::uint8_t>(cxet::market::DepthFailure::ConsumerBookRejected) ||
+      (!identityChanged && owner->projection().publicationSequence != 0u &&
+       capturedPublicationSequence <= owner->projection().publicationSequence))) return false;
   if (identityChanged) owner->reset();
   std::size_t count = 0u;
   for (std::size_t index = 0u; index < levels.size(); ++index) {
@@ -117,9 +138,15 @@ bool ReplayDepthBook::apply(std::span<const PriceLevelRow> levels,
   }
   using cxet::runtime::market::LocalOrderBookStatus;
   LocalOrderBookStatus result{};
-  if (snapshot) {
+  if (composedCut && capturedState == State::Gap) {
+    owner->markGap(); result = LocalOrderBookStatus::Gap;
+  } else if (composedCut && capturedState == State::Empty) {
+    owner->reset(); result = LocalOrderBookStatus::Applied;
+  } else if (snapshot) {
     result = owner->stageSnapshot(sequence, mutations.first(unique));
     if (result == LocalOrderBookStatus::RebaseStaged) result = owner->commitRebase();
+    if (result == LocalOrderBookStatus::RebaseCommitted && composedCut && capturedState == State::Partial)
+      owner->markPartial();
   } else if (unique == 0u) {
     owner->markGap(); return false;
   } else {
@@ -129,17 +156,18 @@ bool ReplayDepthBook::apply(std::span<const PriceLevelRow> levels,
   }
   if (result != LocalOrderBookStatus::Applied &&
       result != LocalOrderBookStatus::Partial &&
-      result != LocalOrderBookStatus::RebaseCommitted) {
+      result != LocalOrderBookStatus::RebaseCommitted &&
+      !(composedCut && capturedState == State::Gap && result == LocalOrderBookStatus::Gap)) {
     owner->markGap(); return false;
   }
-  sourcePosition_ = localPosition;
+  sourcePosition_ = localPosition || capturedSourcePosition;
   arrival_ = arrival;
   owner->commitProjection({arrival.sourceGeneration, arrival.sessionEpoch,
       capturedPublicationSequence != 0u ? capturedPublicationSequence : sequence.lastUpdateId,
       arrival.receiveMonotonicNs,
       static_cast<std::uint64_t>(exchangeTsNs > 0 ? exchangeTsNs : 0),
-      localPosition ? cxet::market::DepthEventSourcePosition : 0u,
-      cxet::market::DepthFailure::None});
+      sourcePosition_ ? cxet::market::DepthEventSourcePosition : 0u,
+      composedCut ? capturedFailure : cxet::market::DepthFailure::None, nativeEvidence});
   return true;
 }
 
@@ -153,7 +181,8 @@ bool ReplayDepthBook::restore(
   return true;
 }
 
-cxet::api::market::PublicMarketOrderBookView ReplayDepthBook::view() const noexcept {
+cxet::api::market::PublicMarketOrderBookView ReplayDepthBook::view(
+    std::span<const cxet::market::DepthCoverage> coverage) const noexcept {
   cxet::api::market::PublicMarketOrderBookView result{};
   const auto* owner = books_.book(1u);
   if (!owner) return result;
@@ -166,9 +195,11 @@ cxet::api::market::PublicMarketOrderBookView ReplayDepthBook::view() const noexc
   result.lastEventId.raw = owner->projection().publicationSequence;
   result.ready = owner->state() == cxet::market::DepthSourceState::Healthy ||
                  owner->state() == cxet::market::DepthSourceState::Partial;
-  result.coverage = owner->state() == cxet::market::DepthSourceState::Healthy
+  result.coverage = !result.ready ? cxet::api::market::PublicMarketOrderBookCoverage::Unavailable
+      : owner->state() == cxet::market::DepthSourceState::Healthy
       ? cxet::api::market::PublicMarketOrderBookCoverage::SnapshotAligned
       : cxet::api::market::PublicMarketOrderBookCoverage::DeltaOnly;
+  result.feedCoverage = coverage;
   return result;
 }
 

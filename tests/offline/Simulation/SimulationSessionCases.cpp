@@ -6,9 +6,11 @@
 #include "cxet/Canon/Subtypes.hpp"
 #include "cxet/Canon/PositionAndExchange.hpp"
 #include "trading_core/Algorithm/Signals/Basis/DeliveryReferenceModel.hpp"
+#include "trading_core/Algorithm/Signals/Basis/CentralBankCarry.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -191,7 +193,7 @@ struct Fixture {
   }
   corpus::BinaryMarketRecord added(std::size_t leg,std::uint64_t when,std::uint64_t seq) const {
     auto record=quote(leg,when,seq);auto& header=record.header;
-    header.channel=corpus::BinaryMarketChannel::SourceLifecycle;header.sourceFlags=0u;
+    header.channel=corpus::BinaryMarketChannel::SourceLifecycle;header.sourceFlags=0u;header.frameSequence=0u;
     header.payloadBytes=sizeof(corpus::BinaryMarketSourceLifecyclePayload);record.payload={};
     auto& payload=*corpus::binaryMarketPayload<corpus::BinaryMarketSourceLifecyclePayload>(&record);
     payload.source=cut.sources[leg];payload.source.initiallyPresent=1u;
@@ -315,7 +317,7 @@ void wholeMarketPairsAndDynamicAppendPreservePortfolio() {
 void latestMarginChangeAndWithdrawalFenceDelayedActivation() {
   for(bool missing:{false,true}) {
     Fixture fixture;fixture.request.orderLatencyUs=2'000'000u;SimulationSession session;
-    CXET_CHECK(hft_backtest::isOk(session.prepare(fixture.request,fixture.cut)));
+    Transcript transcript;CXET_CHECK(hft_backtest::isOk(session.prepare(fixture.request,fixture.cut,transcript.sink())));
     const std::array records{fixture.quote(0u,mono+100u,1u),fixture.quote(1u,mono+100u,2u),
         fixture.quote(0u,mono+60'000'000'100u,3u),fixture.quote(1u,mono+60'000'000'100u,4u),
         fixture.quote(0u,mono+60'000'001'100u,5u),fixture.quote(1u,mono+60'000'001'100u,6u)};
@@ -326,7 +328,29 @@ void latestMarginChangeAndWithdrawalFenceDelayedActivation() {
     CXET_CHECK(hft_backtest::isOk(session.updateCut(changed)));
     CXET_CHECK(hft_backtest::isOk(session.advance({},mono+64'000'000'000u,progress)));
     CXET_CHECK(session.result().legs.size()==2u && session.result().legs[1].fills==0u);
-    CXET_CHECK(session.result().orders==2u);
+    CXET_CHECK(session.result().orders==3u && session.result().fills==1u);
+    const auto& spot=session.result().legs[0];const auto& future=session.result().legs[1];
+    CXET_CHECK(spot.orders==2u && spot.fills==1u && spot.openPositionQtyE8==E &&
+        spot.walletBalanceE8==9'900*E && !spot.feesPaidE8);
+    CXET_CHECK(future.orders==1u && !future.openPositionQtyE8 && future.walletBalanceE8==10'000*E && !future.feesPaidE8);
+    const auto accounts=session.accountSummaries();CXET_CHECK(accounts.size()==2u);
+    CXET_CHECK(accounts[0].market==canon::kMarketTypeSpot.raw && accounts[0].walletBalanceE8==9'900*E &&
+        accounts[0].observedWalletBalanceE8==9'900*E && accounts[1].market==canon::kMarketTypeFutures.raw &&
+        accounts[1].walletBalanceE8==10'000*E && accounts[1].observedWalletBalanceE8==10'000*E);
+    // The spot ACK and futures refusal arrive at activation T; the spot fill
+    // follows at T+1ns. Underfill recovery cancels the still-observed spot ACK,
+    // whose venue slot is already filled. Missing is not another placement.
+    const auto placed=std::to_string(records[4].header.receiveRealtimeNs);
+    const auto activated=std::to_string(records[4].header.receiveRealtimeNs+2'000'000'000u);
+    const std::array expected{
+        "[1,0,"+placed+","+activated+",1,1,2,3,0,"+std::to_string(E)+",0,1]\n", // buy market, filled
+        "[2,0,"+placed+","+activated+",1,0,2,6,0,"+std::to_string(E)+",1,1]\n", // sell market, rejected
+        "[3,1,"+activated+","+activated+",3,0,0,5,0,0,0,1]\n"}; // cancel id1, Missing
+    std::array<std::string,3u> orders{};std::size_t count{};
+    for(const auto& row:transcript.rows)if(const auto at=row.find(":orders:");at!=std::string::npos){
+      CXET_CHECK(count<orders.size());orders[count++]=row.substr(at+8u);
+    }
+    CXET_CHECK(count==orders.size() && orders==expected);
   }
 }
 void initialMissingReferenceWaitIsTypedAndRetryable() {
@@ -394,9 +418,18 @@ void researchEofCommitsFinalSnapshotWithoutLiquidation() {
   spec.strategyBudgetE8=10'000*E;spec.budgetCurrency="RUB";spec.valuationQuoteAssetId=1u;
   spec.fees={{"binance","spot",0,0},{"binance","futures",0,0}};
   CXET_CHECK(expandExperimentGrid(spec,error));Request request;request.command=Command::Create;request.spec=spec;
-  CXET_CHECK(service.dispatch(request).ok);request.experimentId=spec.id;request.command=Command::Start;
-  CXET_CHECK(service.dispatch(request).ok);service.step();request.command=Command::Status;
-  const auto status=service.dispatch(request);CXET_CHECK(status.ok&&status.experiments[0].state==ExperimentState::Stopped);
+  const auto created=service.dispatch(request);
+  if(!created.ok)std::fprintf(stderr,"research EOF Create refused: %.512s\n",created.error.c_str());
+  CXET_CHECK(created.ok);request.experimentId=spec.id;request.command=Command::Start;
+  const auto started=service.dispatch(request);
+  if(!started.ok)std::fprintf(stderr,"research EOF Start refused: %.512s\n",started.error.c_str());
+  CXET_CHECK(started.ok);service.step();request.command=Command::Status;
+  const auto status=service.dispatch(request);
+  const auto* experiment=status.experiments.empty()?nullptr:&status.experiments[0];
+  if(!status.ok||!experiment||experiment->state!=ExperimentState::Stopped)std::fprintf(stderr,
+      "research EOF Status ok=%u state=%u error=%.512s diagnostic=%.512s\n",static_cast<unsigned>(status.ok),
+      experiment?static_cast<unsigned>(experiment->state):255u,status.error.c_str(),experiment?experiment->diagnostic.c_str():"");
+  CXET_CHECK(status.ok&&status.experiments[0].state==ExperimentState::Stopped);
   request.command=Command::Range;request.resultKind=ResultKind::Exposure;request.limit=4096u;
   const auto rows=service.dispatch(request);CXET_CHECK(rows.ok);
   std::size_t finalSnapshots=0u;

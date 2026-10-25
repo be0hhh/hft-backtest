@@ -36,11 +36,17 @@ void clearRows(SessionData& session) noexcept {
 
 Status SimulationInput::prepare(const corpus::CorpusCut& cut,
     std::span<const BacktestCorpusSourceRequest> requests, const SessionLoadPlan& plan,
-    std::string& error) {
+    std::string& error, std::span<const std::uint32_t> maximumDepthCoverageSourcesBySource) {
   if (cut.sources.empty() || cut.sources.size()>corpus::kBinaryMarketMaximumSources || plan.requireCandles) {
     error="simulation requires a bounded catalog and available strategy channels";return Status::Unsupported;
   }
   if(cut.sources.size()<sourceLegs.size()) {error="captured source catalog shrank";return Status::CorruptData;}
+  if ((!maximumDepthCoverageSourcesBySource.empty() &&
+       maximumDepthCoverageSourcesBySource.size() != cut.sources.size()) ||
+      std::any_of(maximumDepthCoverageSourcesBySource.begin(), maximumDepthCoverageSourcesBySource.end(),
+          [](std::uint32_t count) { return count > cxet::market::kMaximumDepthSourceCapacity; })) {
+    error="invalid exact depth coverage preflight maxima";return Status::CorruptData;
+  }
   sourceLegs.resize(cut.sources.size(),std::numeric_limits<std::size_t>::max());
   for (const auto& captured:cut.sources) {
     if (!captured.sourceId || captured.sourceId>sourceLegs.size()) {error="invalid captured source id";return Status::CorruptData;}
@@ -51,6 +57,14 @@ Status SimulationInput::prepare(const corpus::CorpusCut& cut,
       return selected.exchange==exchange && selected.market==market && selected.canonicalSymbol==symbol;
     })) continue;
     if(sourceLegs[captured.sourceId-1u]!=std::numeric_limits<std::size_t>::max()) {
+      if (!maximumDepthCoverageSourcesBySource.empty()) {
+        if (maximumDepthCoverageSourcesBySource[captured.sourceId-1u] <
+            sessions[sourceLegs[captured.sourceId-1u]].maximumCapturedDepthCoverageSources) {
+          error="captured depth coverage preflight regressed";return Status::CorruptData;
+        }
+        sessions[sourceLegs[captured.sourceId-1u]].maximumCapturedDepthCoverageSources =
+            maximumDepthCoverageSourcesBySource[captured.sourceId-1u];
+      }
       const auto& bound=sources[sourceLegs[captured.sourceId-1u]].selection.source;
       if(bound.venueId!=captured.venueId || bound.marketRaw!=captured.marketRaw ||
           bound.canonicalSymbolId!=captured.canonicalSymbolId || bound.quoteAssetId!=captured.quoteAssetId ||
@@ -74,6 +88,8 @@ Status SimulationInput::prepare(const corpus::CorpusCut& cut,
     auto& session=sessions.emplace_back();
     const auto status=binary_corpus::initializeBinaryMarketSession(request,source.selection,plan,session,error);
     if (!isOk(status)) return status;
+    if (!maximumDepthCoverageSourcesBySource.empty())
+      session.maximumCapturedDepthCoverageSources = maximumDepthCoverageSourcesBySource[captured.sourceId-1u];
   }
   if(sessions.empty()) {error="simulation selection has no captured sources";return Status::ConfigMismatch;}
   return Status::Ok;
@@ -107,19 +123,25 @@ Status SimulationInput::append(const corpus::BinaryMarketRecord& record,
       error="captured application transaction is incomplete";return Status::CorruptData;
     }
   }
-  constexpr auto maxRecords=cxet::market::kMaximumDepthTransactionMutations / corpus::kBinaryMarketDepthLevelsPerRecord +
-      cxet::market::kMaximumDepthTransactionParts;
-  if (transaction.size()>=maxRecords) {error="captured transaction exceeds canonical bound";return Status::Unsupported;}
+  if (transaction.size()>=binary_corpus::kMaximumDepthApplicationRecords) {
+    error="captured transaction exceeds canonical bound";return Status::Unsupported;
+  }
   transaction.push_back(record);
   if (header.channel==corpus::BinaryMarketChannel::Depth) {
-    const auto* depth=binary_corpus::checkedPayload<corpus::BinaryMarketDepthChunkPayload>(record);
-    if (!depth || !depth->partCount || !depth->transactionPartCount ||
-        depth->partIndex>=depth->partCount || depth->transactionPartIndex>=depth->transactionPartCount ||
-        depth->transactionPartCount>cxet::market::kMaximumDepthTransactionParts) {
-      error="invalid depth transaction shape";return Status::CorruptData;
+    if ((header.flags & corpus::BinaryMarketRecordDepthCoverage)!=0u) {
+      const auto* coverage=binary_corpus::checkedPayload<corpus::BinaryMarketDepthCoveragePayload>(record);
+      if (!coverage || !corpus::validBinaryMarketDepthCoveragePayload(*coverage)) {
+        error="invalid depth coverage transaction shape";return Status::CorruptData;
+      }
+    } else {
+      const auto* depth=binary_corpus::checkedPayload<corpus::BinaryMarketDepthChunkPayload>(record);
+      if (!depth || !depth->partCount || !depth->transactionPartCount ||
+          depth->partIndex>=depth->partCount || depth->transactionPartIndex>=depth->transactionPartCount ||
+          depth->transactionPartCount>cxet::market::kMaximumDepthTransactionParts) {
+        error="invalid depth transaction shape";return Status::CorruptData;
+      }
     }
-    if (depth->partIndex+1u!=depth->partCount ||
-        depth->transactionPartIndex+1u!=depth->transactionPartCount) return Status::Ok;
+    if ((header.flags & corpus::BinaryMarketRecordDepthTransactionEnd)==0u) return Status::Ok;
   }
   const auto status=decode(events,error);
   transaction.clear();return status;
@@ -130,6 +152,10 @@ Status SimulationInput::decode(std::vector<TimelineEvent>& events,std::string& e
   auto& selection=source.selection;
   selection.records.swap(transaction);
   const auto first=selection.records.front().header;
+  if (first.channel==corpus::BinaryMarketChannel::Depth &&
+      !binary_corpus::completeDepthApplication(selection.records)) {
+    error="incomplete captured depth application transaction";return Status::CorruptData;
+  }
     auto& session = sessions[leg];
     if (first.channel == corpus::BinaryMarketChannel::SourceLifecycle) {
       const auto* lifecycle = binary_corpus::checkedPayload<corpus::BinaryMarketSourceLifecyclePayload>(selection.records[0]);
@@ -187,9 +213,16 @@ Status SimulationInput::decode(std::vector<TimelineEvent>& events,std::string& e
       if (!isOk(updated)) return updated;
     } else {
       const auto bit = corpus::binaryMarketChannelBit(first.channel);
-      const bool unhealthy = std::any_of(selection.records.begin(), selection.records.end(), observedUnhealthy);
+      const bool composed = corpus::binaryMarketDepthRecordIsComposedCut(selection.records.front());
+      const auto* composedPayload = composed
+          ? corpus::binaryMarketPayload<corpus::BinaryMarketDepthChunkPayload>(&selection.records.front()) : nullptr;
+      const bool unhealthy = composedPayload
+          ? composedPayload->state == corpus::BinaryMarketDepthState::Gap || composedPayload->state == corpus::BinaryMarketDepthState::Empty
+          : std::any_of(selection.records.begin(), selection.records.end(), observedUnhealthy);
       const bool previous = (source.unhealthyMask & bit) != 0u;
-      if (unhealthy || previous) {
+      const bool canRecover = first.channel != corpus::BinaryMarketChannel::Depth ||
+          binary_corpus::depthRecordCanRecoverSource(selection.records.front());
+      if (unhealthy || (previous && canRecover)) {
         // Keep the exact observed record, including native depth Gap payload.
         // It supplies readiness evidence and never installs unhealthy prices.
         const auto arrival = binary_corpus::makeArrival(selection.manifest, first);
@@ -201,7 +234,7 @@ Status SimulationInput::decode(std::vector<TimelineEvent>& events,std::string& e
         if (unhealthy) source.unhealthyMask |= bit;
         else source.unhealthyMask &= static_cast<std::uint16_t>(~bit);
       }
-      if (unhealthy) {
+      if (unhealthy && !composed) {
         binary_corpus::includeEvidence(session, first);
       } else {
         const auto status = binary_corpus::decodeBinaryMarketRecords(

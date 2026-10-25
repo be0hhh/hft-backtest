@@ -2,6 +2,7 @@
 #include "../Engine/BacktestEngine.hpp"
 #include "capital/Finance.hpp"
 #include "capital/AccountState/AccountState.hpp"
+#include "capital/AccountState/CapitalFunding.hpp"
 #include "trading_core/Contracts/Numeric/Integer/WideDivision.hpp"
 
 #include <algorithm>
@@ -108,8 +109,8 @@ bool funded(const EngineState& engine, bool observed, std::int64_t ownPending,
   available.currency = engine.simulationOrders->collateral.currency;
   available.freeCapitalE8 = free; available.epoch = 1u;
   available.known = available.fresh = true;
-  std::int64_t usable{};
-  return capital::accounting::availableCapital(available, usable) && required <= usable;
+  const auto usable = capital::accounting::availableCapital(available);
+  return usable.status == capital::accounting::CapitalAvailabilityStatus::Available && required <= usable.amountE8;
 }
 bool projectedAffordable(const EngineState& engine, const SpotOrderReservation& row,
     const OpenOrder& order, const capital::FinancialState& after,

@@ -5,17 +5,20 @@
 #include "../../Engine/BacktestEngine.hpp"
 #include "trading_core/Strategy/StrategyInstance.hpp"
 #include "trading_core/Strategy/Orders/Execution/PairStrategyInputs.hpp"
+#include "trading_core/Strategy/Orders/Execution/StrategyExecution.hpp"
 #include "trading_core/Algorithm/Signals/Basis/DeliveryValuation.hpp"
 
 #include <array>
+#include <memory>
 #include <string>
+#include <vector>
 
 namespace hft_backtest {
 class BacktestCanonicalPairSelection;
 
 // Captured typed evidence; symbol spelling never supplies economic identity,
 // native lots, settlement or currency conversion authority.
-struct BacktestCanonicalPairSource final {
+struct BacktestCanonicalSource final {
   cxet::api::InstrumentUniverseRow instrument{};
   capital::sizing::PairSizingLeg sizing{};
   bool feesKnown{};
@@ -30,12 +33,12 @@ struct BacktestCanonicalPairReferences final {
   std::array<TimeNs, 2u> quoteReceiveUtc{};
 };
 
-class BacktestCanonicalPairAdapter final {
+class BacktestCanonicalExecutionAdapter final {
  public:
   [[nodiscard]] bool bindCold(const trading_core::StrategyDescriptor&,
       const trading_core::StrategyParamStorage&, void* initializedState,
       std::span<const trading_core::StrategyInstrumentSpec>,
-      std::span<const BacktestCanonicalPairSource>, detail::EngineView,
+      std::span<const BacktestCanonicalSource>, detail::EngineView,
       std::uint64_t nowUtc, std::string& error,
       const trading_core::StrategyRuntimeConfiguration& configuration = {}) noexcept;
   [[nodiscard]] bool prepareCycle(trading_core::StrategyContext&,
@@ -54,26 +57,43 @@ class BacktestCanonicalPairAdapter final {
   [[nodiscard]] trading_core::StrategyResult result() const noexcept { return result_; }
 
  private:
+  [[nodiscard]] bool bindGenericCold(const trading_core::StrategyDescriptor&,
+      const trading_core::StrategyParamStorage&, void*,
+      std::span<const trading_core::StrategyInstrumentSpec>,
+      std::span<const BacktestCanonicalSource>, detail::EngineView,
+      std::uint64_t, std::string&) noexcept;
   trading_core::StrategyInstance instance_{};
   trading_core::StrategyRetainedInstrumentState retained_{};
-  trading_core::strategy::PairExecutionPool pool_{};
-  std::array<trading_core::strategy::PairExecutionPool::Row, 64u> poolRows_{};
-  std::array<BacktestCanonicalPairSource, 2u> sources_{};
-  std::array<trading_core::strategy::PairDispatchObservation, 8u> feedback_{};
+  struct PairResources {
+    trading_core::strategy::PairExecutionPool pool{};
+    std::array<trading_core::strategy::PairExecutionPool::Row, 64u> rows{};
+  };
+  std::unique_ptr<PairResources> pairResources_{};
+  std::vector<BacktestCanonicalSource> sources_{};
+  std::vector<trading_core::strategy::StrategyExecutionLeg> legs_{};
+  std::vector<trading_core::strategy::StrategyExecutionSlot> slots_{};
+  std::vector<trading_core::strategy::StrategyExecutionLegGate> gates_{};
+  std::vector<trading_core::StrategyLegInputView> inputViews_{};
+  std::vector<trading_core::OrderCommissionSchedule> feeSchedules_{};
+  std::uint64_t feeQualificationMono_{};
+  std::uint64_t marketMaximumAgeNs_{};
+  std::vector<trading_core::strategy::StrategyDispatchObservation> feedback_{};
+  std::vector<trading_core::StrategyCommandResult> commandResults_{};
   std::size_t feedbackCount_{};
+  std::size_t resultCount_{};
   capital::sizing::PreparedPairLotsSizing preparedLots_{};
   trading_core::StrategyResolvedPairParameters parameters_{};
   trading_core::StrategyParamStorage params_{};
   const trading_core::StrategyDescriptor* descriptor_{};
   BacktestCanonicalPairSelection* selection_{};
   std::uint32_t selectionIndex_{};
-  std::array<std::uint64_t, 2u> consumedCuts_{};
+  std::vector<std::uint64_t> consumedCuts_{};
   std::array<std::uint64_t, 2u> privateFillCuts_{};
   std::array<std::uint64_t, 2u> finalFillCommands_{};
   std::uint32_t filledOrders_{};
   trading_core::StrategyResult result_{};
   std::uint32_t contextIndex_{};
-  bool cyclePrepared_{}, dispatchCommitted_{};
+  bool cyclePrepared_{}, dispatchCommitted_{}, pairPolicy_{};
 };
 
 } // namespace hft_backtest

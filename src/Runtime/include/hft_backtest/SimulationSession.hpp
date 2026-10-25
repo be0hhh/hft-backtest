@@ -25,6 +25,12 @@ struct SimulationLimits {
   std::size_t maximumSources{256u};
   std::size_t maximumContexts{128u};
   std::uint64_t maximumStateBytes{256ull*1024u*1024u};
+  // Cold validated prefix maxima, indexed by captured sourceId-1. Copied at
+  // prepare; values describe admitted rows and never imply native continuity.
+  std::span<const std::uint32_t> maximumDepthCoverageSourcesBySource{};
+  std::span<const std::uint16_t> sourceUnhealthyChannelMasksAtBegin{};
+  std::span<const std::uint16_t> sourceAdministrativeUnhealthyChannelMasksAtBegin{};
+  std::span<const std::uint16_t> sourceRecoveryPendingChannelMasksAtBegin{};
 };
 struct SimulationAccountSummary {
   std::uint32_t accountId{},quoteAssetId{};
@@ -58,7 +64,8 @@ class HFT_BACKTEST_API SimulationSession final {
       // Exclusive authoritative prefix: no future input has receive < safe.
       std::uint64_t safeMonotonicNs, SimulationAdvance& progress) noexcept;
   // Append cold topology/reference facts while preserving all resident actors.
-  [[nodiscard]] Status updateCut(const hftrec::corpus::CorpusCut& cut) noexcept;
+  [[nodiscard]] Status updateCut(const hftrec::corpus::CorpusCut& cut,
+      std::span<const std::uint32_t> maximumDepthCoverageSourcesBySource = {}) noexcept;
   void pause() noexcept;
   void resume() noexcept;
   // End input without manufacturing orders, cancellation or position closure.

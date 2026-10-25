@@ -8,7 +8,7 @@
 #include "../Config/Strategy/BacktestStrategyConfig.hpp"
 #include "../Strategy/Inputs/BacktestStrategyWarmup.hpp"
 #include "../Strategy/BacktestStrategyRuntime.hpp"
-#include "../Strategy/Diagnostics/BacktestStrategyTrace.hpp"
+#include "../Strategy/Diagnostic/BacktestStrategyTrace.hpp"
 #include "../Input/Binary/BinaryCorpusLoader.hpp"
 #include "../Input/Session/SessionLoader.hpp"
 #include "BacktestRunError.hpp"
@@ -185,14 +185,21 @@ void loadBacktestRunSessions(const BacktestRunRequest& request, bool binaryCorpu
 }
 
 bool prepareEngineOrderBookStorage(detail::EngineState& target,
-    const trading_core::StrategyDescriptor* descriptor, const detail::SessionLoadPlan& loadPlan) noexcept {
+    const trading_core::StrategyDescriptor* descriptor, const detail::SessionLoadPlan& loadPlan,
+    const detail::SessionData* source) noexcept {
+
+  std::size_t maximumCoverageSources = source ? source->maximumCapturedDepthCoverageSources : 0u;
+  if (source) for (const auto& depth : source->depths)
+    maximumCoverageSources = std::max(maximumCoverageSources, depth.capturedCoverage.size());
+  if (maximumCoverageSources > cxet::market::kMaximumDepthSourceCapacity) return false;
+  const auto coverageCapacity = static_cast<std::uint32_t>(maximumCoverageSources);
 
   if (descriptor->orderBookViewLevelsPerSide != 0u) {
     CountVal strategyDepth{};
     strategyDepth.raw =
         descriptor->orderBookViewLevelsPerSide;
     if (!target.orderBook.reserveLevelsPerSide(
-            strategyDepth)) {
+            strategyDepth, coverageCapacity)) {
       return false;
     }
     target.orderBook.config.maxStoredLevelsPerSide =
@@ -203,7 +210,7 @@ bool prepareEngineOrderBookStorage(detail::EngineState& target,
     CountVal executionDepth{};
     executionDepth.raw = static_cast<std::uint32_t>(
         rawdata::kMaxOrderbookLevels);
-    if (!target.venueOrderBook.reserveLevelsPerSide(executionDepth)) {
+    if (!target.venueOrderBook.reserveLevelsPerSide(executionDepth, coverageCapacity)) {
       return false;
     }
     target.venueOrderBook.config.maxStoredLevelsPerSide =

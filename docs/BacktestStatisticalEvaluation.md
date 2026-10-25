@@ -852,7 +852,7 @@ regime split has no hidden catastrophic regime
 
 ```json
 {
-  "strategy": "adaptive_order_flow_v1",
+  "strategy": "adaptive_order_flow",
   "strategy_hash": "...",
   "dataset_id": "...",
   "session_id": "...",
@@ -976,7 +976,7 @@ Core principles:
 - Implement PBO for parameter/strategy families.
 - Implement PSR/DSR to adjust Sharpe for finite samples, skew, kurtosis, and multiple testing.
 - Implement SPA or Reality Check against explicit benchmarks.
-- Add MAE/MFE diagnostics to understand entry/exit quality.
+- Add MAE/MFE diagnostic to understand entry/exit quality.
 - Add regime split to detect hidden catastrophic regimes.
 
 A strategy can only be promoted from research candidate to execution-development candidate if:

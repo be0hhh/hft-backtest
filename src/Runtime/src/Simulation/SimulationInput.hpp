@@ -17,7 +17,8 @@ class SimulationInput final {
   std::size_t transactionLeg{};
   std::size_t priorLeg{std::numeric_limits<std::size_t>::max()};
   [[nodiscard]] Status prepare(const hftrec::corpus::CorpusCut&,
-      std::span<const BacktestCorpusSourceRequest>,const SessionLoadPlan&,std::string&);
+      std::span<const BacktestCorpusSourceRequest>,const SessionLoadPlan&,std::string&,
+      std::span<const std::uint32_t> maximumDepthCoverageSourcesBySource = {});
   [[nodiscard]] Status append(const hftrec::corpus::BinaryMarketRecord&,
       std::vector<TimelineEvent>&,std::string&);
  private:

@@ -96,12 +96,21 @@ std::uint64_t backtestSourceFreshLegMask(
 
 void recordBacktestStrategySourceDelivery(
     detail::EngineState& engine,
-    const detail::TimelineEvent& event) noexcept {
+    const detail::TimelineEvent& event,
+    cxet::api::market::MarketNativeEvidence nativeEvidence) noexcept {
   cxet::api::market::PublicMarketDataStream stream{};
   if (!timelinePublicMarketStream(event.kind, stream)) return;
   detail::setStrategySourceDeliveryTimestamp(
       engine, stream,
       event.deliveryTsNs > 0 ? event.deliveryTsNs : event.tsNs);
+  const auto index = cxet::api::market::publicMarketDataStreamIndex(stream);
+  if (index < engine.strategySourceEvidence.size()) {
+    const auto receive = event.deliveryTsNs > 0 ? event.deliveryTsNs : event.tsNs;
+    engine.strategySourceEvidence[index] = {
+        static_cast<std::uint64_t>(receive > 0 ? receive : 0), event.sourceGeneration,
+        event.frameSequence ? event.frameSequence : event.shardSequence,
+        event.sourceGeneration != 0u, true, nativeEvidence};
+  }
 }
 
 }  // namespace hft_backtest

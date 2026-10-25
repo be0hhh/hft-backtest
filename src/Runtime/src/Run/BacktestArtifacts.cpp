@@ -8,7 +8,7 @@
 #include "../Config/Strategy/BacktestStrategyConfig.hpp"
 #include "../Strategy/Inputs/BacktestStrategyWarmup.hpp"
 #include "../Strategy/BacktestStrategyRuntime.hpp"
-#include "../Strategy/Diagnostics/BacktestStrategyTrace.hpp"
+#include "../Strategy/Diagnostic/BacktestStrategyTrace.hpp"
 #include "../Input/Binary/BinaryCorpusLoader.hpp"
 #include "../Input/Session/SessionLoader.hpp"
 #include "BacktestRunError.hpp"
@@ -41,8 +41,8 @@ namespace hft_backtest::run_detail {
 void refreshArtifactCounters(BacktestArtifactContext& context, const detail::EngineState& engine) noexcept {
   auto& result = context.result;
 
-  result.strategySpreadRows = engine.strategySpreadDiagnostics.rows != 0u
-      ? engine.strategySpreadDiagnostics.rows
+  result.strategySpreadRows = engine.strategySpreadDiagnostic.rows != 0u
+      ? engine.strategySpreadDiagnostic.rows
       : engine.strategySpread.size();
 }
 

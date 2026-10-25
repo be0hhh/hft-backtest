@@ -35,7 +35,7 @@
       descriptor.stateDiscipline = trading_core::StrategyStateDiscipline::Snapshot;
       descriptor.footprint = trading_core::strategyRuntimeFootprint<Projection>(0u, 0u, 0u, 0u, 0u);
       descriptor.runCycle = +[](void* state, trading_core::StrategyContext& ctx) noexcept {
-        auto& out = *static_cast<Projection*>(state); out.qty = ctx.positionState.netQty.raw; out.wallet = ctx.accountState.walletBalanceE8; return true;
+        auto& out = *static_cast<Projection*>(state); out.qty = ctx.state.positions.primary.netQty.raw; out.wallet = ctx.state.account.primary.walletBalanceE8; return true;
       };
       descriptor.captureState = +[](const void* state, trading_core::StrategyStateSnapshot& out) noexcept {
         const auto& captured = *static_cast<const Projection*>(state);

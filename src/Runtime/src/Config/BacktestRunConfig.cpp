@@ -132,8 +132,17 @@ bool buildSessionLoadPlan(const trading_core::StrategyDescriptor& descriptor,
   out.loadTrades = false;
   out.loadBookTickers = false;
   out.loadDepths = false;
+  if (descriptor.legInputRequirementCount > descriptor.legInputRequirements.size()) {
+    error="invalid strategy leg input declarations";return false;
+  }
   out.loadCandles = descriptor.seedHistory != nullptr || descriptor.loadCandleHistory;
   out.requireCandles = descriptor.seedHistory != nullptr || descriptor.requireCandleHistory;
+  for (std::size_t leg = 0u; leg < descriptor.legInputRequirementCount; ++leg) {
+    if (descriptor.legInputRequirements[leg].required.raw &
+        (trading_core::kStrategyInputPriceLimit.raw | trading_core::kStrategyInputFunding.raw | trading_core::kStrategyInputCandle.raw)) {
+      error="required scalar/candle replay input has no recorded causal adapter";return false;
+    }
+  }
   if (descriptor.resolveTradeHistory && descriptor.seedTrades) out.loadTrades = true;
   const std::size_t streamCount = trading_core::strategy::descriptorStreamCount(descriptor);
   for (std::size_t i = 0u; i < streamCount; ++i) {
@@ -145,6 +154,12 @@ bool buildSessionLoadPlan(const trading_core::StrategyDescriptor& descriptor,
       out.loadBookTickers=true;out.requireBookTickers=out.requireBookTickers || required;
     } else if (stream == cxet::api::market::PublicMarketDataStream::Orderbook) {
       out.loadDepths=true;out.requireDepths=out.requireDepths || required;
+    } else if (!required &&
+        (stream == cxet::api::market::PublicMarketDataStream::PriceLimit ||
+         stream == cxet::api::market::PublicMarketDataStream::Funding)) {
+      // Optional scalar inputs stay unavailable; no current value is substituted
+      // for a historical observation absent from the supported replay adapter.
+      continue;
     } else {
       error="strategy requires unsupported market data stream for backtest";return false;
     }

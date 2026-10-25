@@ -59,14 +59,14 @@ constexpr const char* kToxicFlowStrategyIndicatorRowSchema =
     "toxic_buy_pressure_score,toxic_sell_pressure_score,toxic_confidence_pct]";
 
 constexpr std::int64_t kBpsE8Scale = 100000000ll;
-constexpr std::size_t kMaxDecisionDiagnostics = 8u;
+constexpr std::size_t kMaxDecisionDiagnostic = 8u;
 
 struct DecisionCount {
   std::uint8_t decisionKind{0u};
   std::uint8_t reasonRaw{0u};
   std::uint64_t count{0u};
 };
-struct SignalDiagnostics {
+struct SignalDiagnostic {
   std::uint64_t strategySpreadRows{0u};
   std::int64_t minEdgeAfterCostBpsE8{0};
   std::int64_t maxEdgeAfterCostBpsE8{0};
@@ -75,7 +75,7 @@ struct SignalDiagnostics {
   bool hasEntryEdgeBps{false};
   std::vector<DecisionCount> decisionCounts{};
 };
-struct ExecutionDiagnostics {
+struct ExecutionDiagnostic {
   std::uint64_t orderCommands{0u};
   std::uint64_t cancelCommands{0u};
   std::uint64_t postOnlyOrders{0u};
@@ -86,7 +86,7 @@ struct ExecutionDiagnostics {
   std::array<std::uint64_t, kFillReasonCount> fillReasonCounts{};
   std::array<std::uint64_t, 2> fillLiquidityCounts{};
 };
-struct RateLimitDiagnostics {
+struct RateLimitDiagnostic {
   std::uint64_t rejectedOrders{0u};
   std::uint64_t rejectedCancels{0u};
   std::uint64_t usageRows{0u};
@@ -120,18 +120,18 @@ std::int64_t absI64(std::int64_t value) noexcept;
 std::int64_t ratioPctE8(std::uint64_t numerator, std::uint64_t denominator) noexcept;
 std::int64_t ratioPctE8(std::int64_t numerator, std::int64_t denominator) noexcept;
 void sortAndTrimDecisionCounts(std::vector<DecisionCount>& counts);
-SignalDiagnostics collectSignalDiagnostics(const EngineState& engine,
+SignalDiagnostic collectSignalDiagnostic(const EngineState& engine,
                                            const std::filesystem::path& configPath);
-ExecutionDiagnostics collectExecutionDiagnostics(const EngineState& engine) noexcept;
-void mergeRateLimitRejects(RateLimitDiagnostics& out, const EngineState& engine) noexcept;
-RateLimitDiagnostics collectRateLimitDiagnostics(const EngineState& engine,
+ExecutionDiagnostic collectExecutionDiagnostic(const EngineState& engine) noexcept;
+void mergeRateLimitRejects(RateLimitDiagnostic& out, const EngineState& engine) noexcept;
+RateLimitDiagnostic collectRateLimitDiagnostic(const EngineState& engine,
                                                  const std::vector<EngineState>* legEngines) noexcept;
-std::uint64_t rejectedCommandCount(const RateLimitDiagnostics& rateLimits) noexcept;
+std::uint64_t rejectedCommandCount(const RateLimitDiagnostic& rateLimits) noexcept;
 std::string zeroActivityReason(const BacktestRunResult& result,
-                               const SignalDiagnostics& signal,
-                               const RateLimitDiagnostics& rateLimits);
+                               const SignalDiagnostic& signal,
+                               const RateLimitDiagnostic& rateLimits);
 void writeDecisionCounts(std::ostream& out, const std::vector<DecisionCount>& counts);
-void writeDiagnosticsObject(std::ostream& out,
+void writeDiagnosticObject(std::ostream& out,
                             const BacktestRunResult& result,
                             const EngineState& engine,
                             const std::vector<EngineState>* legEngines,

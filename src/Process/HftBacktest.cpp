@@ -237,10 +237,6 @@ bool parseDecimalE8(const char* text, std::int64_t& out) noexcept {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (hft_backtest::hft_backtest_api_version() != hft_backtest::kBacktestApiVersion) {
-    std::cerr << "Backtest runtime ABI mismatch\n";
-    return 1;
-  }
   hft_backtest::BacktestRunRequest request{};
   std::int64_t corpusBeginReceiveNs = 0;
   std::int64_t corpusEndReceiveNs = 0;

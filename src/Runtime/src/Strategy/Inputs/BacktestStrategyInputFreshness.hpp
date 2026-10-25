@@ -30,6 +30,7 @@ struct BacktestStrategyInputPolicy {
 
 void recordBacktestStrategySourceDelivery(
     detail::EngineState& engine,
-    const detail::TimelineEvent& event) noexcept;
+    const detail::TimelineEvent& event,
+    cxet::api::market::MarketNativeEvidence nativeEvidence = {}) noexcept;
 
 }  // namespace hft_backtest

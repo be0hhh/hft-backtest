@@ -3,6 +3,7 @@
 #include "../BinaryCorpusLoader.hpp"
 
 #include "hftrec/CorpusContract/BinaryMarketCorpusReader.hpp"
+#include "hftrec/CorpusContract/BinaryMarketDepthTransaction.hpp"
 #include "cxet/Primitives/Buf/CanonConstants.hpp"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -19,6 +21,23 @@ namespace hft_backtest::detail::binary_corpus {
 namespace corpus = hftrec::corpus;
 
 inline constexpr std::uint8_t kCanonicalScaleDigits = 8u;
+inline constexpr std::size_t kMaximumDepthApplicationRecords =
+    cxet::market::kMaximumDepthTransactionMutations / corpus::kBinaryMarketDepthLevelsPerRecord +
+    cxet::market::kMaximumDepthTransactionParts +
+    (cxet::market::kMaximumDepthSourceCapacity + corpus::kBinaryMarketDepthCoveragePerRecord - 1u) /
+        corpus::kBinaryMarketDepthCoveragePerRecord;
+
+[[nodiscard]] inline bool completeDepthApplication(
+    std::span<const corpus::BinaryMarketRecord> records) noexcept {
+  if (records.empty() || records.size() > kMaximumDepthApplicationRecords) return false;
+  corpus::BinaryMarketDepthTransactionState state{};
+  for (std::size_t index = 0u; index < records.size(); ++index) {
+    if (records[index].header.channel != corpus::BinaryMarketChannel::Depth ||
+        !corpus::advanceBinaryMarketDepthTransaction(records[index], state) ||
+        (!state.active() && index + 1u != records.size())) return false;
+  }
+  return !state.active();
+}
 
 template <typename Payload>
 [[nodiscard]] const Payload* checkedPayload(
@@ -33,6 +52,26 @@ template <typename Payload>
     return nullptr;
   }
   return payload;
+}
+
+[[nodiscard]] inline bool includeDepthCoverageMaximum(const corpus::BinaryMarketRecord& record,
+    std::span<std::uint32_t> maximumBySource) noexcept {
+  if (record.header.channel != corpus::BinaryMarketChannel::Depth ||
+      (record.header.flags & corpus::BinaryMarketRecordDepthCoverage) == 0u) return true;
+  const auto* payload = checkedPayload<corpus::BinaryMarketDepthCoveragePayload>(record);
+  if (!record.header.sourceId || record.header.sourceId > maximumBySource.size() ||
+      !payload || !corpus::validBinaryMarketDepthCoveragePayload(*payload)) return false;
+  auto& maximum = maximumBySource[record.header.sourceId - 1u];
+  maximum = std::max(maximum, payload->totalCoverageCount);
+  return true;
+}
+
+[[nodiscard]] inline bool depthRecordCanRecoverSource(const corpus::BinaryMarketRecord& record) noexcept {
+  if (corpus::binaryMarketDepthRecordIsComposedCut(record)) {
+    const auto state = corpus::binaryMarketPayload<corpus::BinaryMarketDepthChunkPayload>(&record)->state;
+    return state == corpus::BinaryMarketDepthState::Healthy || state == corpus::BinaryMarketDepthState::Partial;
+  }
+  return corpus::binaryMarketDepthRecordIsNativeRebaseSnapshot(record);
 }
 
 struct DepthRebaseCursor final {
@@ -59,6 +98,9 @@ struct BinaryDecodeState final {
   corpus::BinaryMarketBookTickerPayload retainedBboPayload{};
   std::uint16_t retainedBboPresenceFlags{};
   DepthRebaseCursor depthRebase{};
+  std::uint64_t composedPublicationSequence{};
+  std::uint64_t composedSourceGeneration{};
+  std::uint64_t composedSessionEpoch{};
 };
 [[nodiscard]] Status decodeBinaryMarketRecords(const corpus::BinaryMarketSelection& selection,
     BinaryDecodeState& state, SessionData& output, std::string& error);
@@ -120,6 +162,13 @@ void includeEvidence(SessionData& output,
     const corpus::BinaryMarketSelection& selection,
     std::size_t& recordIndex,
     std::int64_t ingestSequence,
+    SessionData& output,
+    std::string& error);
+
+[[nodiscard]] bool appendDepthTransaction(
+    const corpus::BinaryMarketSelection& selection,
+    std::size_t& recordIndex,
+    BinaryDecodeState& state,
     SessionData& output,
     std::string& error);
 

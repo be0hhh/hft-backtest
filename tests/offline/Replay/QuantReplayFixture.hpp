@@ -219,7 +219,7 @@ struct QuantFixture {
       depthHeader.eventSequence = depthHeader.frameSequence = depthHeader.shardSequence = 3u;
       depthHeader.receiveMonotonicNs = depthHeader.receiveRealtimeNs = 300u; depthHeader.exchangeTimestampNs = 299;
       depthHeader.channel = corpus::BinaryMarketChannel::Depth;
-      depthHeader.flags = corpus::BinaryMarketRecordTraderReplayCompatible | corpus::BinaryMarketRecordDepthSnapshot | corpus::BinaryMarketRecordDepthRebase;
+      depthHeader.flags = corpus::BinaryMarketRecordTraderReplayCompatible | corpus::BinaryMarketRecordDepthSnapshot | corpus::BinaryMarketRecordDepthRebase | corpus::BinaryMarketRecordDepthTransactionEnd;
       depthHeader.payloadBytes = sizeof(corpus::BinaryMarketDepthChunkPayload);
       auto& depth = *corpus::binaryMarketPayload<corpus::BinaryMarketDepthChunkPayload>(&record); depth = {};
       depth.totalLevelCount = depth.levelCount = 2u; depth.partCount = depth.transactionPartCount = 1u;
