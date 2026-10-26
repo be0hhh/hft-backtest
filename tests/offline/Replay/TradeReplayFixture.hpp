@@ -206,7 +206,6 @@ struct BinaryTradeFixture {
       payload.frameKind = corpus::BinaryMarketDepthFrameKind::State;
       payload.state = corpus::BinaryMarketDepthState::Gap; payload.failure = 7u;
       payload.partCount = payload.transactionPartCount = 1u;
-      payload.sourceReceiveRealtimeNs = payload.sourceFreshnessMonotonicNs = 250u;
       CXET_CHECK(writer.append(record) == hftrec::Status::Ok);
     }
     CXET_CHECK(writer.finalize(corpus::BinaryMarketStopReason::Requested, 10'000) == hftrec::Status::Ok);

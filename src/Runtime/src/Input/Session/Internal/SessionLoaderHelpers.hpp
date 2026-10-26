@@ -99,8 +99,6 @@ bool validateManifestChannel(std::string_view name,
                              bool enabled,
                              std::uint64_t count,
                              std::string_view path,
-                             std::string_view rowSchema,
-                             std::string_view expectedRowSchema,
                              const hftrec::capture::ChannelRuntimeHealth* runtime,
                              std::vector<std::string>& warnings,
                              std::string& error);

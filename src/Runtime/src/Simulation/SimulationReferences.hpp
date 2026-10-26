@@ -1,6 +1,6 @@
 #pragma once
 #include "SimulationInput.hpp"
-#include "../Strategy/Execution/BacktestCanonicalExecutionAdapter.hpp"
+#include "../Strategy/Execution/BacktestCanonicalPairAdapter.hpp"
 #include "hftrec/CorpusContract/RecorderReference.hpp"
 #include "trading_core/Algorithm/Signals/Basis/DeliveryValuationReference.hpp"
 namespace hft_backtest::detail {

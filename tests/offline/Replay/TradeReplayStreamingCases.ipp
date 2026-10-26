@@ -100,6 +100,7 @@
                                cxet::api::market::PublicMarketDataStream::Funding}) {
         descriptor = supported;
         descriptor.streamCount = 2u; descriptor.streams[1] = stream;
+        descriptor.optionalStreamMask = 0u;
         detail::SessionLoadPlan plan{}; std::string error;
         CXET_CHECK(!hft_backtest::buildSessionLoadPlan(descriptor, plan, error));
         descriptor.optionalStreamMask = 2u;

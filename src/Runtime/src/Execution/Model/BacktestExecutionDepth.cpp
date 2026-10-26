@@ -341,8 +341,7 @@ ExecutionDepthOpenStatus ExecutionDepthProvider::open(
   if (!manifest.orderbookEnabled || manifest.depthCount == 0u) {
     return ExecutionDepthOpenStatus::Absent;
   }
-  if (manifest.depthRowSchema != hftrec::capture::kDepthRowSchemaCurrent ||
-      manifest.depthPath.empty() || manifest.depthSidecarPath.empty()) {
+  if (manifest.depthPath.empty() || manifest.depthSidecarPath.empty()) {
     failed_ = true;
     failureReason_ = "depth_contract_mismatch";
     return ExecutionDepthOpenStatus::Failed;

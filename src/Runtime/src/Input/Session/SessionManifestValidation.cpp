@@ -45,8 +45,6 @@ bool validateManifestChannel(std::string_view name,
                              bool enabled,
                              std::uint64_t count,
                              std::string_view path,
-                             std::string_view rowSchema,
-                             std::string_view expectedRowSchema,
                              const hftrec::capture::ChannelRuntimeHealth* runtime,
                              std::vector<std::string>& warnings,
                              std::string& error) {
@@ -58,7 +56,7 @@ bool validateManifestChannel(std::string_view name,
     error += " channel";
     return false;
   }
-  if (path.empty() || rowSchema != expectedRowSchema) {
+  if (path.empty()) {
     error = "unsupported captured-arrival ";
     error += name;
     error += " channel contract";
@@ -132,15 +130,15 @@ bool validateCurrentRecorderManifest(const hftrec::capture::SessionManifest& man
 
   if (!validateManifestChannel("trades", plan.loadTrades, plan.requireTrades,
           manifest.tradesEnabled, manifest.tradesCount, manifest.tradesPath,
-          manifest.tradesRowSchema, hftrec::capture::kTradesRowSchemaCurrent, &manifest.tradesRuntime,
+          &manifest.tradesRuntime,
           warnings, error)) return false;
   if (!validateManifestChannel("bookticker", plan.loadBookTickers, plan.requireBookTickers,
           manifest.bookTickerEnabled, manifest.bookTickerCount, manifest.bookTickerPath,
-          manifest.bookTickerRowSchema, hftrec::capture::kBookTickerRowSchemaCurrent, &manifest.bookTickerRuntime,
+          &manifest.bookTickerRuntime,
           warnings, error)) return false;
   if (!validateManifestChannel("depth", plan.loadDepths, plan.requireDepths,
           manifest.orderbookEnabled, manifest.depthCount, manifest.depthPath,
-          manifest.depthRowSchema, hftrec::capture::kDepthRowSchemaCurrent, &manifest.depthRuntime,
+          &manifest.depthRuntime,
           warnings, error)) return false;
   if (plan.loadDepths && manifest.orderbookEnabled && manifest.depthSidecarPath.empty()) {
     error = "captured-arrival depth sidecar path is missing";
@@ -151,10 +149,8 @@ bool validateCurrentRecorderManifest(const hftrec::capture::SessionManifest& man
     const bool enabled = useDetailed || manifest.candlesEnabled;
     const std::uint64_t count = useDetailed ? manifest.candles2Count : manifest.candlesCount;
     const std::string& path = useDetailed ? manifest.candles2Path : manifest.candlesPath;
-    const std::string& schema = useDetailed ? manifest.candles2RowSchema : manifest.candlesRowSchema;
-    const std::string_view expected = hftrec::capture::kCandlesRowSchemaCurrent;
     if (!validateManifestChannel("candles", true, plan.requireCandles, enabled, count, path,
-                                 schema, expected, nullptr, warnings, error)) return false;
+                                 nullptr, warnings, error)) return false;
   }
   return true;
 }
