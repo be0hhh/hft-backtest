@@ -147,6 +147,8 @@ struct ActorFixture {
   std::array<hft_backtest::BacktestCanonicalSource, 2u> sources{};
   std::array<trading_core::StrategyInstrumentSpec, 2u> instruments{};
   std::array<trading_core::StrategyMarketSnapshot, 2u> market{};
+  std::array<trading_core::StrategyMarketLegView, 2u> marketViews{};
+  trading_core::StrategyIoStorage ioStorage{};
   std::array<trading_core::StrategyOrderEvidenceView, 2u> evidence{};
   std::array<trading_core::OrderIntent, 2u> orders{};
   std::array<trading_core::CancelIntent, 2u> cancels{};
@@ -255,9 +257,13 @@ struct ActorFixture {
     centralBank.currentActivationRealtimeNs = centralBank.currentObservedRealtimeNs = utc;
     centralBank.currentState = trading_core::DeliveryValuationCentralBankState::Ready;
     shard.strategyId.raw = shard.shardId.raw = 1u; context.shard = &shard;
-    context.marketData = {market.data(), 2u}; context.instrumentSpecs = {instruments.data(), 2u};
+    for (std::size_t leg = 0u; leg < market.size(); ++leg)
+      marketViews[leg] = {&market[leg], market[leg].orderBookMaxLevelsPerSide};
+    context.marketData = {marketViews.data(), 2u}; context.instrumentSpecs = {instruments.data(), 2u};
     context.state.orders.executionLegs = evidence.data(); context.state.orders.executionLegCount = 2u;
-    context.io.orderOut = orders; context.io.cancelOut = cancels;
+    const auto results = adapter.commandResults();
+    ioStorage = {orders.data(), cancels.data(), nullptr, nullptr, results.data()};
+    CXET_CHECK(context.io.bind(ioStorage, orders.size(), cancels.size(), 0u, 0u, results.size()));
     context.tradableLegMask = 3u; context.primaryLegIndex = 0u;
   }
   void cycle(std::uint64_t mono) {

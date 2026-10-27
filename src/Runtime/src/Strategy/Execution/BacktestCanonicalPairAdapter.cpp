@@ -200,8 +200,8 @@ bool BacktestCanonicalExecutionAdapter::prepareCycle(StrategyContext& context,
     const auto& engine = engines[leg];
     auto& view = inputViews_[leg]; view = {};
     view.legId = static_cast<std::uint32_t>(leg + 1u);
-    view.market = context.marketData.snapshots && leg < context.marketData.count
-        ? &context.marketData.snapshots[leg] : nullptr;
+    view.market = context.marketData.legs && leg < context.marketData.count
+        ? &context.marketData.legs[leg] : nullptr;
     view.candle = context.candles.get(leg);
     const auto evidence = [&](cxet::api::market::PublicMarketDataStream stream) noexcept {
       auto value = engine.strategySourceEvidence[cxet::api::market::publicMarketDataStreamIndex(stream)];
@@ -398,19 +398,25 @@ bool BacktestCanonicalExecutionAdapter::decideAndExecute(StrategyContext& contex
   const StrategyExecutionCycleInputs executionInput{gates_, {}, {feedback_.data(), feedbackCount_}};
   const auto* previousExecution = context.executionInputs;
   context.executionInputs = &executionInput;
-  context.io.commandResults = {commandResults_.data(), commandResults_.size()};
   context.io.resultCount = resultCount_;
   const bool produced = instance_.runCycle(0u, context);
   if (produced && descriptor_->executeCycle) (void)instance_.executeCycle(0u, context);
   context.executionInputs = previousExecution;
-  if (context.io.orderOut.data() != expected.orderOut.data() ||
-      context.io.cancelOut.data() != expected.cancelOut.data() ||
-      context.io.commandOut.data() != expected.commandOut.data() ||
-      context.io.transactionOut.data() != expected.transactionOut.data() ||
-      context.io.commandResults.data() != commandResults_.data() ||
+  if (context.io.storage() != expected.storage() ||
+      context.io.orderOut().size() != expected.orderOut().size() ||
+      context.io.cancelOut().size() != expected.cancelOut().size() ||
+      context.io.commandOut().size() != expected.commandOut().size() ||
+      context.io.transactionOut().size() != expected.transactionOut().size() ||
+      context.io.commandResults().size() != expected.commandResults().size() ||
+      context.io.orderOut().data() != expected.orderOut().data() ||
+      context.io.cancelOut().data() != expected.cancelOut().data() ||
+      context.io.commandOut().data() != expected.commandOut().data() ||
+      context.io.transactionOut().data() != expected.transactionOut().data() ||
+      context.io.commandResults().data() != commandResults_.data() ||
+      context.io.commandResults().size() != commandResults_.size() ||
       context.io.capacityExceeded || context.io.transactionCount ||
-      context.io.orderCount > context.io.orderOut.size() || context.io.cancelCount > context.io.cancelOut.size() ||
-      context.io.commandCount > context.io.commandOut.size() ||
+      context.io.orderCount > context.io.orderOut().size() || context.io.cancelCount > context.io.cancelOut().size() ||
+      context.io.commandCount > context.io.commandOut().size() ||
       !StrategyInstance::directCapabilitiesDeclared(*descriptor_, context.io)) return false;
   // The actor has consumed the previous feedback; new dispatch replaces it.
   feedbackCount_ = 0u;
@@ -437,15 +443,15 @@ bool BacktestCanonicalExecutionAdapter::dispatchAndCommit(StrategyContext& conte
   };
   // Complete structural validation precedes the first simulated side effect.
   for (std::size_t i = 0u; i < context.io.orderCount; ++i)
-    if (!validOrderIntent(context.io.orderOut[i], false) ||
-        !validRoute(context.io.orderOut[i].routeHandle, context.io.orderOut[i].strategyLegId) ||
-        !freshLocal(context.io.orderOut[i].clientIntentId)) return false;
+    if (!validOrderIntent(context.io.orderOut()[i], false) ||
+        !validRoute(context.io.orderOut()[i].routeHandle, context.io.orderOut()[i].strategyLegId) ||
+        !freshLocal(context.io.orderOut()[i].clientIntentId)) return false;
   for (std::size_t i = 0u; i < context.io.cancelCount; ++i)
-    if (!validCancelIntent(context.io.cancelOut[i]) ||
-        !validRoute(context.io.cancelOut[i].routeHandle, context.io.cancelOut[i].strategyLegId) ||
-        !freshLocal(context.io.cancelOut[i].clientIntentId)) return false;
+    if (!validCancelIntent(context.io.cancelOut()[i]) ||
+        !validRoute(context.io.cancelOut()[i].routeHandle, context.io.cancelOut()[i].strategyLegId) ||
+        !freshLocal(context.io.cancelOut()[i].clientIntentId)) return false;
   for (std::size_t i = 0u; i < context.io.commandCount; ++i) {
-    const auto& command = context.io.commandOut[i];
+    const auto& command = context.io.commandOut()[i];
     const auto& order = command.kind == StrategyCommandIntentKind::WarmupOrder
         ? command.warmup.order : command.order;
     if (command.kind == StrategyCommandIntentKind::Order || command.kind == StrategyCommandIntentKind::WarmupOrder ||
@@ -540,14 +546,20 @@ bool BacktestCanonicalExecutionAdapter::dispatchAndCommit(StrategyContext& conte
       ~ScopedGrant() { engine.scopedCloseGrant = nullptr; }
     } scoped{engine};
     if (claim == StrategyCloseClaimResult::Granted) engine.scopedCloseGrant = &grant;
+    const StrategyIoStorage ioStorage{warmup ? nullptr : &order, nullptr, warmup, nullptr, nullptr};
     StrategyIo io{};
-    if (warmup) { io.commandOut = {warmup, 1u}; io.commandCount = 1u; }
-    else { io.orderOut = {&order, 1u}; io.orderCount = 1u; }
+    if (!io.bind(ioStorage, warmup ? 0u : 1u, 0u, warmup ? 1u : 0u, 0u, 0u))
+      return StrategyCommandResultStatus::Refused;
+    if (warmup) io.commandCount = 1u;
+    else io.orderCount = 1u;
     return submit(order.routeHandle.raw - 1u, order.strategyLegId,
         order.clientIntentId, order.clientIntentId, false, io);
   };
   const auto cancel = [&](CancelIntent& intent) noexcept {
-    StrategyIo io{}; io.cancelOut = {&intent, 1u}; io.cancelCount = 1u;
+    const StrategyIoStorage ioStorage{nullptr, &intent, nullptr, nullptr, nullptr};
+    StrategyIo io{};
+    if (!io.bind(ioStorage, 0u, 1u, 0u, 0u, 0u)) return StrategyCommandResultStatus::Refused;
+    io.cancelCount = 1u;
     return submit(intent.routeHandle.raw - 1u, intent.strategyLegId,
         intent.clientIntentId, intent.targetClientIntentId, true, io);
   };
@@ -555,7 +567,7 @@ bool BacktestCanonicalExecutionAdapter::dispatchAndCommit(StrategyContext& conte
   // The explicit stream retains source order; direct outputs keep the existing
   // simulator convention of cancellation before placement after that stream.
   for (std::size_t i = 0u; i < context.io.commandCount; ++i) {
-    auto& command = context.io.commandOut[i];
+    auto& command = context.io.commandOut()[i];
     auto& order = command.kind == StrategyCommandIntentKind::WarmupOrder ? command.warmup.order : command.order;
     const bool cancelOnly = command.kind == StrategyCommandIntentKind::Cancel;
     const auto route = cancelOnly ? command.cancel.routeHandle : order.routeHandle;
@@ -621,9 +633,9 @@ bool BacktestCanonicalExecutionAdapter::dispatchAndCommit(StrategyContext& conte
         result.commandId = feedback_[observation].commandId;
     ++resultCount_;
   }
-  for (std::size_t i = 0u; i < context.io.cancelCount; ++i) (void)cancel(context.io.cancelOut[i]);
-  for (std::size_t i = 0u; i < context.io.orderCount; ++i) (void)place(context.io.orderOut[i]);
-  context.io.commandResults = {commandResults_.data(), commandResults_.size()}; context.io.resultCount = resultCount_;
+  for (std::size_t i = 0u; i < context.io.cancelCount; ++i) (void)cancel(context.io.cancelOut()[i]);
+  for (std::size_t i = 0u; i < context.io.orderCount; ++i) (void)place(context.io.orderOut()[i]);
+  context.io.resultCount = resultCount_;
   if (!descriptor_->commitPreparedDispatch(retained_.state)) return false;
   for (std::size_t leg = 0u; leg < engines.size(); ++leg) {
     consumedCuts_[leg] = engines[leg].simulationOrders->deliveryCut;

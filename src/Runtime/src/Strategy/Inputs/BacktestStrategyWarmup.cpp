@@ -162,7 +162,7 @@ bool applyBacktestWarmupGate(trading_core::StrategyContext& ctx,
                              detail::EngineView engines,
                              std::size_t engineCount,
                              const BacktestRunRequest& request) noexcept {
-  if (engines.empty() || engineCount == 0u || ctx.io.commandOut.size() == 0u) return false;
+  if (engines.empty() || engineCount == 0u || ctx.io.commandOut().size() == 0u) return false;
   std::size_t warmupLegs[trading_core::kStrategyRuntimeMaxLegs]{};
   trading_core::OrderIntent warmupTemplates[trading_core::kStrategyRuntimeMaxLegs]{};
   std::size_t warmupRouteCount = 0u;
@@ -178,9 +178,9 @@ bool applyBacktestWarmupGate(trading_core::StrategyContext& ctx,
     warmupTemplates[warmupRouteCount] = intent;
     ++warmupRouteCount;
   };
-  for (std::size_t i = 0u; i < ctx.io.orderCount; ++i) addWarmupTemplate(ctx.io.orderOut[i]);
+  for (std::size_t i = 0u; i < ctx.io.orderCount; ++i) addWarmupTemplate(ctx.io.orderOut()[i]);
   for (std::size_t i = 0u; i < ctx.io.commandCount; ++i) {
-    const trading_core::StrategyCommandIntent& command = ctx.io.commandOut[i];
+    const trading_core::StrategyCommandIntent& command = ctx.io.commandOut()[i];
     if (command.kind == trading_core::StrategyCommandIntentKind::Order) addWarmupTemplate(command.order);
   }
   if (warmupRouteCount == 0u) return false;
@@ -213,11 +213,11 @@ bool applyBacktestWarmupGate(trading_core::StrategyContext& ctx,
     holdWithoutNewWarmup = true;
   }
   if (failOpen || (warmupCommandCount == 0u && !holdWithoutNewWarmup)) return false;
-  if (warmupCommandCount > ctx.io.commandOut.size()) return false;
+  if (warmupCommandCount > ctx.io.commandOut().size()) return false;
   ctx.io.cancelCount = 0u;
   ctx.io.orderCount = 0u;
   ctx.io.commandCount = warmupCommandCount;
-  for (std::size_t i = 0u; i < warmupCommandCount; ++i) ctx.io.commandOut[i] = warmupCommands[i];
+  for (std::size_t i = 0u; i < warmupCommandCount; ++i) ctx.io.commandOut()[i] = warmupCommands[i];
   return true;
 }
 

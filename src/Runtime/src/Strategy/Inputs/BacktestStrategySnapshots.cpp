@@ -158,7 +158,7 @@ void MultiLegCycleScratch::refreshLeg(std::size_t leg,
                                       std::span<const StrategyInstrumentSpec> legInstruments) noexcept {
   if (leg >= legCount || leg >= engines.size()) return;
   const detail::EngineState& engine = engines[leg];
-  snapshots[leg] = engine.snapshot;
+  marketViews[leg] = {&engine.snapshot, engine.snapshot.orderBookMaxLevelsPerSide};
   candles[leg] = engine.candle;
   executionViews[leg] = detail::simulationOrderEvidenceView(engine);
   orderViews[leg].orders = orderStorage[leg].data();

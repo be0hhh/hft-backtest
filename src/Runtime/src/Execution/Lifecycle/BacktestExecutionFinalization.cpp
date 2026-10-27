@@ -34,8 +34,9 @@ bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t or
   intent.positionReduction = trading_core::PositionReductionIntent::Reduce;
 
   std::array<trading_core::OrderIntent, 1> orders{intent};
+  const trading_core::StrategyIoStorage ioStorage{orders.data(), nullptr, nullptr, nullptr, nullptr};
   trading_core::StrategyIo io{};
-  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
+  if (!io.bind(ioStorage, orders.size(), 0u, 0u, 0u, 0u)) return false;
   io.orderCount = orders.size();
   applyIntents(engine, io, tsNs, orderLatencyUs, 0u);
   applyDueActions(engine, delayedTs(tsNs, orderLatencyUs));
@@ -56,8 +57,9 @@ bool forceClosePosition(EngineState& engine, std::int64_t tsNs, BacktestLatencyR
   intent.positionReduction = trading_core::PositionReductionIntent::Reduce;
 
   std::array<trading_core::OrderIntent, 1> orders{intent};
+  const trading_core::StrategyIoStorage ioStorage{orders.data(), nullptr, nullptr, nullptr, nullptr};
   trading_core::StrategyIo io{};
-  io.orderOut = Span<trading_core::OrderIntent>(orders.data(), orders.size());
+  if (!io.bind(ioStorage, orders.size(), 0u, 0u, 0u, 0u)) return false;
   io.orderCount = orders.size();
   applyIntents(engine, io, tsNs, latency);
   return true;
@@ -76,8 +78,9 @@ void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, std::uint64_t canc
   }
   if (cancelCount == 0) return;
 
+  const trading_core::StrategyIoStorage ioStorage{nullptr, cancels.data(), nullptr, nullptr, nullptr};
   trading_core::StrategyIo io{};
-  io.cancelOut = Span<trading_core::CancelIntent>(cancels.data(), cancelCount);
+  if (!io.bind(ioStorage, 0u, cancelCount, 0u, 0u, 0u)) return;
   io.cancelCount = cancelCount;
   applyIntents(engine, io, tsNs, 0u, cancelLatencyUs);
   applyDueActions(engine, delayedTs(tsNs, cancelLatencyUs));
@@ -96,8 +99,9 @@ void cancelOpenOrders(EngineState& engine, std::int64_t tsNs, BacktestLatencyRun
   }
   if (cancelCount == 0) return;
 
+  const trading_core::StrategyIoStorage ioStorage{nullptr, cancels.data(), nullptr, nullptr, nullptr};
   trading_core::StrategyIo io{};
-  io.cancelOut = Span<trading_core::CancelIntent>(cancels.data(), cancelCount);
+  if (!io.bind(ioStorage, 0u, cancelCount, 0u, 0u, 0u)) return;
   io.cancelCount = cancelCount;
   const std::uint64_t maxCancelLatencyUs = latencyProfileMaxUs(latency.config.cancelOrder);
   applyIntents(engine, io, tsNs, latency);

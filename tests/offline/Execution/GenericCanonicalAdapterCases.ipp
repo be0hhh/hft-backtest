@@ -99,7 +99,7 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
   std::vector<hft_backtest::BacktestCanonicalSource> sources(count);
   std::vector<StrategyInstrumentSpec> instruments(count);
   std::vector<StrategyOrderEvidenceView> evidence(count);
-  std::vector<StrategyMarketSnapshot> market(count);
+  std::vector<StrategyMarketLegView> market(count);
   for (std::size_t leg = 0u; leg < count; ++leg) {
     owners.push_back(std::make_unique<detail::EngineState>()); auto& engine = *owners.back(); routes.push_back(&engine);
     engine.legIndex = static_cast<std::uint32_t>(leg); engine.exchange.raw = 1u; engine.market = canon::kMarketTypeSpot;
@@ -121,7 +121,7 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
     snapshot.lastBookTicker.bid.px.raw = 99 * ActorFixture::scale; snapshot.lastBookTicker.ask.px.raw = 100 * ActorFixture::scale;
     snapshot.reconstructedBookTicker = snapshot.lastBookTicker;
     snapshot.lastBookTickerRecvMono.raw = snapshot.reconstructedBookTickerRecvMono.raw = 1'000'000'000u;
-    market[leg] = snapshot;
+    market[leg] = {&snapshot, snapshot.orderBookMaxLevelsPerSide};
     CXET_CHECK(detail::prepareSimulationOrderEvidence(engine)); evidence[leg] = detail::simulationOrderEvidenceView(engine);
   }
   alignas(kStrategyRuntimeStateAlign) GenericActor state{};
@@ -144,7 +144,10 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
   context.nowMono.raw = 1'000'000'000u; context.tradableLegMask = (std::uint64_t{1u} << count) - 1u;
   context.marketData = {market.data(), count}; context.instrumentSpecs = {instruments.data(), count};
   context.state.orders.executionLegs = evidence.data(); context.state.orders.executionLegCount = count;
-  context.io.commandOut = output->commands;
+  const auto results = adapter.commandResults();
+  const StrategyIoStorage ioStorage{
+      nullptr, nullptr, output->commands.data(), nullptr, results.data()};
+  CXET_CHECK(context.io.bind(ioStorage, 0u, 0u, output->commands.size(), 0u, results.size()));
   strategy::PairStrategyInputs pair{};
   CXET_CHECK(adapter.prepareCycle(context, engines, {}, pair));
   CXET_CHECK(context.pairInputs == nullptr && adapter.decideAndExecute(context));
@@ -152,7 +155,7 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
   CXET_CHECK(adapter.dispatchAndCommit(context, engines, 1'000'000'000u));
   CXET_CHECK(context.io.resultCount == count * 2u);
   for (std::size_t i = 0u; i < context.io.resultCount; ++i)
-    CXET_CHECK(context.io.commandResults[i].status == StrategyCommandResultStatus::Accepted);
+    CXET_CHECK(context.io.commandResults()[i].status == StrategyCommandResultStatus::Accepted);
   for (const auto& engine : owners) CXET_CHECK(engine->orders.size() == 2u);
   context.io.clear(); ++context.nowMono.raw;
   CXET_CHECK(adapter.prepareCycle(context, engines, {}, pair) && adapter.decideAndExecute(context));
@@ -162,16 +165,16 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
     auto order = output->commands[1].order;
     order.clientIntentId.raw = 100u;
     CXET_CHECK(context.io.pushOrderedOrder(order));
-    context.io.commandOut[0].inputDependencies[0] = {1u, kStrategyInputPriceLimit};
-    context.io.commandOut[0].inputDependencyCount = 1u;
+    context.io.commandOut()[0].inputDependencies[0] = {1u, kStrategyInputPriceLimit};
+    context.io.commandOut()[0].inputDependencyCount = 1u;
     order.clientIntentId.raw = 101u;
     CXET_CHECK(context.io.pushOrderedOrder(order, 1u));
     order.clientIntentId.raw = 102u;
     CXET_CHECK(context.io.pushOrderedOrder(order));
     CXET_CHECK(adapter.dispatchAndCommit(context, engines, static_cast<std::int64_t>(context.nowMono.raw)));
-    CXET_CHECK(context.io.commandResults[0].status == StrategyCommandResultStatus::DependencyBlocked);
-    CXET_CHECK(context.io.commandResults[1].status == StrategyCommandResultStatus::DependencyBlocked);
-    CXET_CHECK(context.io.commandResults[2].status == StrategyCommandResultStatus::Accepted);
+    CXET_CHECK(context.io.commandResults()[0].status == StrategyCommandResultStatus::DependencyBlocked);
+    CXET_CHECK(context.io.commandResults()[1].status == StrategyCommandResultStatus::DependencyBlocked);
+    CXET_CHECK(context.io.commandResults()[2].status == StrategyCommandResultStatus::Accepted);
     CXET_CHECK(owners[0]->orders.size() == 3u);
     auto& engine = *owners[0]; auto& canonical = *engine.simulationOrders->store;
     CXET_CHECK(canonical.sequence() == 1u);
@@ -203,7 +206,7 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
       const auto before = engine.orders.size();
       CXET_CHECK(context.io.pushOrderedOrder(close));
       CXET_CHECK(adapter.dispatchAndCommit(context, engines, static_cast<std::int64_t>(context.nowMono.raw)));
-      CXET_CHECK(context.io.commandResults[0].status == (variant == 3u
+      CXET_CHECK(context.io.commandResults()[0].status == (variant == 3u
           ? StrategyCommandResultStatus::Accepted : StrategyCommandResultStatus::Refused));
       CXET_CHECK(engine.orders.size() == before + (variant == 3u ? 1u : 0u));
       CXET_CHECK(engine.scopedCloseGrant == nullptr);
@@ -221,8 +224,8 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
     CXET_CHECK(context.io.pushOrderedOrder(stale));
     const auto before = engine.orders.size();
     CXET_CHECK(adapter.dispatchAndCommit(context, engines, static_cast<std::int64_t>(context.nowMono.raw)));
-    CXET_CHECK(context.io.commandResults[0].status == StrategyCommandResultStatus::Refused);
-    CXET_CHECK(context.io.commandResults[1].status == StrategyCommandResultStatus::Accepted);
+    CXET_CHECK(context.io.commandResults()[0].status == StrategyCommandResultStatus::Refused);
+    CXET_CHECK(context.io.commandResults()[1].status == StrategyCommandResultStatus::Accepted);
     CXET_CHECK(engine.orders.size() == before + 1u);
   } else {
     // Two replacements in the same ordered stream preserve their own old/new
@@ -243,8 +246,8 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
     }
     CXET_CHECK(adapter.dispatchAndCommit(context, engines, static_cast<std::int64_t>(context.nowMono.raw)));
     CXET_CHECK(context.io.resultCount == 2u &&
-        context.io.commandResults[0].status == StrategyCommandResultStatus::Accepted &&
-        context.io.commandResults[1].status == StrategyCommandResultStatus::Accepted);
+        context.io.commandResults()[0].status == StrategyCommandResultStatus::Accepted &&
+        context.io.commandResults()[1].status == StrategyCommandResultStatus::Accepted);
     const auto view = detail::simulationOrderEvidenceView(*owners[1]);
     for (const auto id : {Id{100u}, Id{102u}}) {
       const auto* replacement = strategy::canonicalOrderEvidenceIdentity(view, id, view.expectedGeneration);

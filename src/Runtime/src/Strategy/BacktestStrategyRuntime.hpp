@@ -59,7 +59,7 @@ struct MultiLegCycleScratch {
       commandBuf{};
   std::array<trading_core::StrategyTransactionIntent,
              trading_core::kStrategyRuntimeMaxTransactions> transactionBuf{};
-  std::array<trading_core::StrategyMarketSnapshot, trading_core::kStrategyRuntimeMaxLegs> snapshots{};
+  std::array<trading_core::StrategyMarketLegView, trading_core::kStrategyRuntimeMaxLegs> marketViews{};
   std::array<trading_core::StrategyCandleSnapshot, trading_core::kStrategyRuntimeMaxLegs> candles{};
   std::array<std::array<trading_core::StrategyOrderState, detail::kMaxOrderStates>, trading_core::kStrategyRuntimeMaxLegs> orderStorage{};
   std::array<trading_core::StrategyOrderStateView, trading_core::kStrategyRuntimeMaxLegs> orderViews{};

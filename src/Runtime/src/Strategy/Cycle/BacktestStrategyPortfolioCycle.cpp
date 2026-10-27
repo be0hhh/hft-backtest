@@ -86,7 +86,7 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   trading_core::StrategyContext ctx{};
   ctx.shard = &shard;
   ctx.control = &effectiveControl;
-  ctx.marketData.snapshots = scratch.snapshots.data();
+  ctx.marketData.legs = scratch.marketViews.data();
   ctx.marketData.count = legCount;
   ctx.candles.candles = scratch.candles.data();
   ctx.candles.count = legCount;
@@ -193,15 +193,13 @@ bool runCycleMulti(const trading_core::StrategyDescriptor& descriptor,
   ctx.initialOrderSeedAllowed = true;
   const trading_core::StrategyRuntimeFootprint& footprint =
       descriptor.footprint;
-  ctx.io.orderOut = Span<trading_core::OrderIntent>(
-      scratch.orderBuf.data(), footprint.maxOrders);
-  ctx.io.cancelOut = Span<trading_core::CancelIntent>(
-      scratch.cancelBuf.data(), footprint.maxCancels);
-  ctx.io.commandOut = Span<trading_core::StrategyCommandIntent>(
-      scratch.commandBuf.data(),
-      trading_core::strategyRuntimeCommandCapacity(footprint));
-  ctx.io.transactionOut = Span<trading_core::StrategyTransactionIntent>(
-      scratch.transactionBuf.data(), footprint.maxTransactions);
+  const auto commandResults = canonical ? scratch.canonicalExecution->commandResults()
+      : Span<trading_core::StrategyCommandResult>{};
+  const trading_core::StrategyIoStorage ioStorage{scratch.orderBuf.data(),
+      scratch.cancelBuf.data(), scratch.commandBuf.data(), scratch.transactionBuf.data(), commandResults.data()};
+  if (!ctx.io.bind(ioStorage, footprint.maxOrders, footprint.maxCancels,
+      trading_core::strategyRuntimeCommandCapacity(footprint), footprint.maxTransactions,
+      commandResults.size())) return false;
   ctx.io.clear();
   if (canonical) {
     // Public instance APIs own actor state. All borrowed financial/execution

@@ -70,8 +70,9 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   trading_core::StrategyContext ctx{};
   ctx.shard = &shard;
   ctx.control = &effectiveControl;
-  ctx.snapshot = &engine.snapshot;
-  ctx.marketData.snapshots = &engine.snapshot;
+  const trading_core::StrategyMarketLegView marketView{
+      &engine.snapshot, engine.snapshot.orderBookMaxLevelsPerSide};
+  ctx.marketData.legs = &marketView;
   ctx.marketData.count = 1;
   ctx.candle = engine.candle;
   ctx.candles.candles = &engine.candle;
@@ -93,6 +94,7 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   ctx.state.account.legs.legs = &ctx.state.account.primary;
   ctx.state.account.legs.count = 1u;
   setBacktestTradePolicy(ctx, request, 1u, freshness.tradableLegMask);
+  if (!trading_core::strategy::bindDefaultExecutionMarketAliases(ctx)) return false;
   ctx.userEvent = userEvent;
   // Admission is owned by the simulated Backtest runtime; this is not a
   // generic classifier for exchange wire events.
@@ -139,15 +141,10 @@ bool runCycle(const trading_core::StrategyDescriptor& descriptor,
   ctx.initialOrderSeedAllowed = true;
   const trading_core::StrategyRuntimeFootprint& footprint =
       descriptor.footprint;
-  ctx.io.orderOut = Span<trading_core::OrderIntent>(
-      scratch.orderBuf.data(), footprint.maxOrders);
-  ctx.io.cancelOut = Span<trading_core::CancelIntent>(
-      scratch.cancelBuf.data(), footprint.maxCancels);
-  ctx.io.commandOut = Span<trading_core::StrategyCommandIntent>(
-      scratch.commandBuf.data(),
-      trading_core::strategyRuntimeCommandCapacity(footprint));
-  ctx.io.transactionOut = Span<trading_core::StrategyTransactionIntent>(
-      scratch.transactionBuf.data(), footprint.maxTransactions);
+  const trading_core::StrategyIoStorage ioStorage{scratch.orderBuf.data(),
+      scratch.cancelBuf.data(), scratch.commandBuf.data(), scratch.transactionBuf.data(), nullptr};
+  if (!ctx.io.bind(ioStorage, footprint.maxOrders, footprint.maxCancels,
+      trading_core::strategyRuntimeCommandCapacity(footprint), footprint.maxTransactions, 0u)) return false;
   ctx.io.clear();
   recordInputCoverage(engine);
   trading_core::StrategyDecisionTrace trace{};

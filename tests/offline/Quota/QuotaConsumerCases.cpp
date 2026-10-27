@@ -51,7 +51,8 @@ trading_core::OrderIntent order(std::uint64_t id) {
 void submit(detail::EngineState& engine, std::uint64_t id, std::int64_t now) {
   std::array<trading_core::OrderIntent, 1> orders{order(id)};
   trading_core::StrategyIo io{};
-  io.orderOut = {orders.data(), orders.size()};
+  const trading_core::StrategyIoStorage ioStorage{orders.data(), nullptr, nullptr, nullptr, nullptr};
+  CXET_CHECK(io.bind(ioStorage, orders.size(), 0u, 0u, 0u, 0u));
   io.orderCount = 1;
   detail::applyIntents(engine, io, now, 1000000, 1000000);
 }
@@ -80,7 +81,8 @@ void unsupportedIocDoesNotBecomeRestingOrder() {
   std::array<trading_core::OrderIntent, 1> orders{order(1u)};
   orders[0].limitTimeInForcePolicy = trading_core::LimitTimeInForcePolicy::Ioc;
   trading_core::StrategyIo io{};
-  io.orderOut = {orders.data(), orders.size()};
+  const trading_core::StrategyIoStorage ioStorage{orders.data(), nullptr, nullptr, nullptr, nullptr};
+  CXET_CHECK(io.bind(ioStorage, orders.size(), 0u, 0u, 0u, 0u));
   io.orderCount = 1u;
   detail::applyIntents(*engine, io, 100, 1000000, 1000000);
   CXET_CHECK(engine->orders.size() == 1u);
@@ -110,7 +112,8 @@ void depletedQuotaRefusesOrderAndCancel() {
   cancels[0].clientIntentId.raw = 3;
   cancels[0].targetClientIntentId.raw = 1;
   trading_core::StrategyIo io{};
-  io.cancelOut = {cancels.data(), cancels.size()};
+  const trading_core::StrategyIoStorage ioStorage{nullptr, cancels.data(), nullptr, nullptr, nullptr};
+  CXET_CHECK(io.bind(ioStorage, 0u, cancels.size(), 0u, 0u, 0u));
   io.cancelCount = 1;
   detail::applyIntents(*engine, io, 102, 1000000, 1000000);
   CXET_CHECK(engine->orders.back().status == detail::kRecordStatusRejected);
@@ -146,7 +149,8 @@ void unsupportedReplaceRefusesWholeCycleWithoutQuotaCharge() {
   CXET_CHECK(applyRateLimitSchedule(*engine, policy(), error));
   std::array<trading_core::StrategyCommandIntent, 2> commands{};
   trading_core::StrategyContext context{};
-  context.io.commandOut = {commands.data(), commands.size()};
+  const trading_core::StrategyIoStorage ioStorage{nullptr, nullptr, commands.data(), nullptr, nullptr};
+  CXET_CHECK(context.io.bind(ioStorage, 0u, 0u, commands.size(), 0u, 0u));
   CXET_CHECK(context.io.pushOrderedOrder(order(1)));
   auto replacement = order(3);
   trading_core::CancelIntent cancel{};

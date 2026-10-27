@@ -47,10 +47,10 @@ namespace {
 
 [[nodiscard]] bool strategyIoCountsValid(
     const trading_core::StrategyIo& io) noexcept {
-  return !io.capacityExceeded && io.orderCount <= io.orderOut.size() &&
-      io.cancelCount <= io.cancelOut.size() &&
-      io.commandCount <= io.commandOut.size() &&
-      io.transactionCount <= io.transactionOut.size();
+  return !io.capacityExceeded && io.orderCount <= io.orderOut().size() &&
+      io.cancelCount <= io.cancelOut().size() &&
+      io.commandCount <= io.commandOut().size() &&
+      io.transactionCount <= io.transactionOut().size();
 }
 
 struct TransactionOrderSimulation final {
@@ -148,7 +148,7 @@ bool validateOutput(trading_core::StrategyContext& context) noexcept {
   // This simulator has no paired physical-send model. Reject the entire
   // cycle before applying any leg rather than silently dropping Replace.
   for (std::size_t index = 0u; index < context.io.commandCount; ++index)
-    if (context.io.commandOut[index].kind == trading_core::StrategyCommandIntentKind::Replace)
+    if (context.io.commandOut()[index].kind == trading_core::StrategyCommandIntentKind::Replace)
       return false;
   return true;
 }
@@ -172,7 +172,7 @@ bool bindTransactionLegs(trading_core::StrategyContext& context) noexcept {
          transactionIndex < io.transactionCount;
          ++transactionIndex) {
       trading_core::StrategyTransactionIntent& transaction =
-          io.transactionOut[transactionIndex];
+          io.transactionOut()[transactionIndex];
       if (transaction.transactionId.raw != order.transactionId.raw) continue;
       const std::size_t legCount =
           static_cast<std::size_t>(transaction.legCount) <
@@ -191,10 +191,10 @@ bool bindTransactionLegs(trading_core::StrategyContext& context) noexcept {
   };
 
   for (std::size_t index = 0u; index < io.orderCount; ++index) {
-    bindOrder(io.orderOut[index]);
+    bindOrder(io.orderOut()[index]);
   }
   for (std::size_t index = 0u; index < io.commandCount; ++index) {
-    const trading_core::StrategyCommandIntent& command = io.commandOut[index];
+    const trading_core::StrategyCommandIntent& command = io.commandOut()[index];
     if (command.kind == trading_core::StrategyCommandIntentKind::Order) {
       bindOrder(command.order);
     } else if (command.kind ==
@@ -212,9 +212,9 @@ StrategyTransactionAdmission transactionAdmission(
     bool newOrderEmissionBlocked) noexcept {
   const trading_core::StrategyIo& io = context.io;
   StrategyTransactionAdmission admission{};
-  if (io.transactionCount > io.transactionOut.size() ||
+  if (io.transactionCount > io.transactionOut().size() ||
       io.transactionCount > trading_core::kStrategyRuntimeMaxTransactions ||
-      io.orderCount > io.orderOut.size()) {
+      io.orderCount > io.orderOut().size()) {
     for (std::size_t transactionIndex = 0u;
          transactionIndex < io.transactionCount && transactionIndex < 64u;
          ++transactionIndex) {
@@ -225,11 +225,11 @@ StrategyTransactionAdmission transactionAdmission(
   }
   for (std::size_t orderIndex = 0u;
        orderIndex < io.orderCount; ++orderIndex) {
-    const trading_core::OrderIntent& order = io.orderOut[orderIndex];
+    const trading_core::OrderIntent& order = io.orderOut()[orderIndex];
     std::size_t transactionIndex = io.transactionCount;
     for (std::size_t candidate = 0u;
          candidate < io.transactionCount; ++candidate) {
-      if (io.transactionOut[candidate].transactionId.raw ==
+      if (io.transactionOut()[candidate].transactionId.raw ==
           order.transactionId.raw) {
         transactionIndex = candidate;
         break;
@@ -264,7 +264,7 @@ StrategyTransactionAdmission transactionAdmission(
     if ((admission.localFaultMask &
          (std::uint64_t{1u} << transactionIndex)) != 0u) {
       failedTouchedLegMask |=
-          io.transactionOut[transactionIndex].touchedLegMask;
+          io.transactionOut()[transactionIndex].touchedLegMask;
     }
   }
   for (std::size_t transactionIndex = 0u;
@@ -272,7 +272,7 @@ StrategyTransactionAdmission transactionAdmission(
     const std::uint64_t transactionBit =
         std::uint64_t{1u} << transactionIndex;
     if ((admission.localFaultMask & transactionBit) == 0u &&
-        (io.transactionOut[transactionIndex].touchedLegMask &
+        (io.transactionOut()[transactionIndex].touchedLegMask &
          failedTouchedLegMask) != 0u) {
       admission.deferredMask |= transactionBit;
     }
@@ -292,43 +292,40 @@ void applyToSingleLeg(detail::EngineState& engine,
              trading_core::kStrategyRuntimeMaxCommands +
                  2u * trading_core::kStrategyRuntimeMaxDesiredOrders>
       commands{};
+  const trading_core::StrategyIoStorage filteredStorage{
+      orders.data(), cancels.data(), commands.data(), nullptr, nullptr};
   trading_core::StrategyIo filtered{};
-  filtered.orderOut =
-      Span<trading_core::OrderIntent>(orders.data(), orders.size());
-  filtered.cancelOut =
-      Span<trading_core::CancelIntent>(cancels.data(), cancels.size());
-  filtered.commandOut = Span<trading_core::StrategyCommandIntent>(
-      commands.data(), commands.size());
+  if (!filtered.bind(filteredStorage, orders.size(), cancels.size(), commands.size(), 0u, 0u)) return;
   filtered.requestRateLimitSnapshot = io.requestRateLimitSnapshot;
 
   for (std::size_t index = 0u;
        index < io.commandCount &&
-       filtered.commandCount < filtered.commandOut.size();
+       filtered.commandCount < filtered.commandOut().size();
        ++index) {
     if (!commandIntentTradable(
-            request, context, io.commandOut[index],
+            request, context, io.commandOut()[index],
             context.tradableLegMask)) {
       continue;
     }
-    filtered.commandOut[filtered.commandCount++] = io.commandOut[index];
+    filtered.commandOut()[filtered.commandCount++] = io.commandOut()[index];
   }
   for (std::size_t index = 0u;
        index < io.cancelCount &&
-       filtered.cancelCount < filtered.cancelOut.size();
+       filtered.cancelCount < filtered.cancelOut().size();
        ++index) {
-    if (!cancelIntentRouteExists(context, io.cancelOut[index])) continue;
-    filtered.cancelOut[filtered.cancelCount++] = io.cancelOut[index];
+    if (!cancelIntentRouteExists(context, io.cancelOut()[index])) continue;
+    filtered.cancelOut()[filtered.cancelCount++] = io.cancelOut()[index];
   }
   for (std::size_t index = 0u;
        index < io.orderCount &&
-       filtered.orderCount < filtered.orderOut.size();
+       filtered.orderCount < filtered.orderOut().size();
        ++index) {
     if (!orderIntentTradable(
-            request, context, io.orderOut[index],
+            request, context, io.orderOut()[index],
             context.tradableLegMask)) {
       continue;
     }
-    filtered.orderOut[filtered.orderCount++] = io.orderOut[index];
+    filtered.orderOut()[filtered.orderCount++] = io.orderOut()[index];
   }
   detail::applyIntents(engine, filtered, tsNs, latency);
 }
@@ -339,15 +336,15 @@ void applyToLegs(detail::EngineView engines,
                  const BacktestRunRequest& request) {
   const trading_core::StrategyIo& io = context.io;
   for (std::size_t index = 0u; index < io.commandCount; ++index) {
-    const trading_core::StrategyCommandIntent& command = io.commandOut[index];
+    const trading_core::StrategyCommandIntent& command = io.commandOut()[index];
     if (command.kind == trading_core::StrategyCommandIntentKind::Cancel) {
       const std::size_t leg =
           routeLegIndex(context, command.cancel.routeHandle);
       if (leg >= engines.size()) continue;
       std::array<trading_core::CancelIntent, 1u> cancel{command.cancel};
+      const trading_core::StrategyIoStorage oneStorage{nullptr, cancel.data(), nullptr, nullptr, nullptr};
       trading_core::StrategyIo one{};
-      one.cancelOut =
-          Span<trading_core::CancelIntent>(cancel.data(), cancel.size());
+      if (!one.bind(oneStorage, 0u, 1u, 0u, 0u, 0u)) return;
       one.cancelCount = 1u;
       detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
     } else if (command.kind ==
@@ -359,9 +356,9 @@ void applyToLegs(detail::EngineView engines,
         continue;
       }
       std::array<trading_core::OrderIntent, 1u> order{command.order};
+      const trading_core::StrategyIoStorage oneStorage{order.data(), nullptr, nullptr, nullptr, nullptr};
       trading_core::StrategyIo one{};
-      one.orderOut =
-          Span<trading_core::OrderIntent>(order.data(), order.size());
+      if (!one.bind(oneStorage, 1u, 0u, 0u, 0u, 0u)) return;
       one.orderCount = 1u;
       detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
     } else if (command.kind ==
@@ -373,33 +370,35 @@ void applyToLegs(detail::EngineView engines,
         continue;
       }
       std::array<trading_core::StrategyCommandIntent, 1u> warmup{command};
+      const trading_core::StrategyIoStorage oneStorage{nullptr, nullptr, warmup.data(), nullptr, nullptr};
       trading_core::StrategyIo one{};
-      one.commandOut = Span<trading_core::StrategyCommandIntent>(
-          warmup.data(), warmup.size());
+      if (!one.bind(oneStorage, 0u, 0u, 1u, 0u, 0u)) return;
       one.commandCount = 1u;
       detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
     }
   }
   for (std::size_t index = 0u; index < io.cancelCount; ++index) {
     const std::size_t leg =
-        routeLegIndex(context, io.cancelOut[index].routeHandle);
+        routeLegIndex(context, io.cancelOut()[index].routeHandle);
     if (leg >= engines.size()) continue;
+    const trading_core::StrategyIoStorage oneStorage{
+        nullptr, &io.cancelOut()[index], nullptr, nullptr, nullptr};
     trading_core::StrategyIo one{};
-    one.cancelOut = Span<trading_core::CancelIntent>(
-        const_cast<trading_core::CancelIntent*>(&io.cancelOut[index]), 1u);
+    if (!one.bind(oneStorage, 0u, 1u, 0u, 0u, 0u)) return;
     one.cancelCount = 1u;
     detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
   }
   for (std::size_t index = 0u; index < io.orderCount; ++index) {
     const std::size_t leg =
-        routeLegIndex(context, io.orderOut[index].routeHandle);
+        routeLegIndex(context, io.orderOut()[index].routeHandle);
     if (!routeTradable(request, engines.size(), leg) || leg >= 64u ||
         (context.tradableLegMask & (std::uint64_t{1u} << leg)) == 0u) {
       continue;
     }
+    const trading_core::StrategyIoStorage oneStorage{
+        &io.orderOut()[index], nullptr, nullptr, nullptr, nullptr};
     trading_core::StrategyIo one{};
-    one.orderOut = Span<trading_core::OrderIntent>(
-        const_cast<trading_core::OrderIntent*>(&io.orderOut[index]), 1u);
+    if (!one.bind(oneStorage, 1u, 0u, 0u, 0u, 0u)) return;
     one.orderCount = 1u;
     detail::applyIntents(engines[leg], one, tsNs, engines[leg].latency);
   }
@@ -418,9 +417,9 @@ bool applyTransactionCycle(
       !descriptor.allocateClientId) {
     return false;
   }
-  if (io.transactionCount > io.transactionOut.size() ||
+  if (io.transactionCount > io.transactionOut().size() ||
       io.transactionCount > trading_core::kStrategyRuntimeMaxTransactions ||
-      io.orderCount > io.orderOut.size() ||
+      io.orderCount > io.orderOut().size() ||
       io.orderCount > trading_core::kStrategyRuntimeMaxOrders ||
       !trading_core::validStrategyTransactionalIoShape(io) ||
       !trading_core::validStrategyTransactionBindings(context)) {
@@ -439,14 +438,14 @@ bool applyTransactionCycle(
     if ((admission.localFaultMask &
          (std::uint64_t{1u} << transactionIndex)) != 0u) {
       failedTouchedLegMask |=
-          io.transactionOut[transactionIndex].touchedLegMask;
+          io.transactionOut()[transactionIndex].touchedLegMask;
     }
   }
   for (std::size_t transactionIndex = 0u;
        transactionIndex < io.transactionCount;
        ++transactionIndex) {
     const trading_core::StrategyTransactionIntent& transaction =
-        io.transactionOut[transactionIndex];
+        io.transactionOut()[transactionIndex];
     if (transaction.recordKind !=
         trading_core::StrategyTransactionRecordKind::Proposed) {
       // Backtest has no authoritative recovery owner. A strategy-produced
@@ -503,7 +502,7 @@ bool applyTransactionCycle(
       std::size_t acceptedOrderCount = 0u;
       for (std::size_t orderIndex = 0u;
            orderIndex < io.orderCount; ++orderIndex) {
-        const trading_core::OrderIntent& order = io.orderOut[orderIndex];
+        const trading_core::OrderIntent& order = io.orderOut()[orderIndex];
         if (order.transactionId.raw != transaction.transactionId.raw) {
           continue;
         }
@@ -529,9 +528,10 @@ bool applyTransactionCycle(
         std::array<std::size_t,
                    trading_core::kStrategyRuntimeMaxLegs> firstRecords{};
         firstRecords[routeLeg] = engines[routeLeg].orders.size();
+        const trading_core::StrategyIoStorage oneStorage{
+            const_cast<trading_core::OrderIntent*>(&order), nullptr, nullptr, nullptr, nullptr};
         trading_core::StrategyIo one{};
-        one.orderOut = Span<trading_core::OrderIntent>(
-            const_cast<trading_core::OrderIntent*>(&order), 1u);
+        if (!one.bind(oneStorage, 1u, 0u, 0u, 0u, 0u)) return false;
         one.orderCount = 1u;
         detail::applyIntents(
             engines[routeLeg], one, tsNs, engines[routeLeg].latency);
@@ -577,11 +577,11 @@ bool applyTransactionCycle(
     if (!reportReady[transactionIndex]) continue;
     if (!trading_core::validStrategyEmitReportForTransaction(
             reports[transactionIndex],
-            io.transactionOut[transactionIndex])) {
+            io.transactionOut()[transactionIndex])) {
       reportsValid = false;
       transactionEmitFailed = true;
       failedTouchedLegMask |=
-          io.transactionOut[transactionIndex].touchedLegMask;
+          io.transactionOut()[transactionIndex].touchedLegMask;
     }
   }
 
@@ -596,14 +596,14 @@ bool applyTransactionCycle(
            (std::uint64_t{1u} << orderIndex)) == 0u) {
         continue;
       }
-      const trading_core::OrderIntent& order = io.orderOut[orderIndex];
+      const trading_core::OrderIntent& order = io.orderOut()[orderIndex];
       if (order.orderType == canon::OrderType::Market) continue;
       const trading_core::StrategyTransactionIntent* owner = nullptr;
       for (std::size_t transactionIndex = 0u;
            transactionIndex < io.transactionCount; ++transactionIndex) {
-        if (io.transactionOut[transactionIndex].transactionId.raw ==
+        if (io.transactionOut()[transactionIndex].transactionId.raw ==
             order.transactionId.raw) {
-          owner = &io.transactionOut[transactionIndex];
+          owner = &io.transactionOut()[transactionIndex];
           break;
         }
       }
@@ -620,8 +620,9 @@ bool applyTransactionCycle(
       cleanup.targetClientIntentId = order.clientIntentId;
       cleanup.targetOrderType = order.orderType;
       cleanup.routeHandle = order.routeHandle;
+      const trading_core::StrategyIoStorage oneStorage{nullptr, &cleanup, nullptr, nullptr, nullptr};
       trading_core::StrategyIo one{};
-      one.cancelOut = Span<trading_core::CancelIntent>(&cleanup, 1u);
+      if (!one.bind(oneStorage, 0u, 1u, 0u, 0u, 0u)) return false;
       one.cancelCount = 1u;
       detail::applyIntents(
           engines[leg], one, tsNs, engines[leg].latency);

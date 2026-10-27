@@ -452,7 +452,7 @@ void applyIntentsImpl(EngineState& engine,
   };
 
   for (std::size_t i = 0u; i < io.commandCount; ++i) {
-    const trading_core::StrategyCommandIntent& command = io.commandOut[i];
+    const trading_core::StrategyCommandIntent& command = io.commandOut()[i];
     if (command.kind == trading_core::StrategyCommandIntentKind::Cancel) {
       (void)submitCancelIntent(engine, command.cancel, tsNs, cancelActiveTs(command.cancel));
     } else if (command.kind == trading_core::StrategyCommandIntentKind::Order ||
@@ -462,11 +462,11 @@ void applyIntentsImpl(EngineState& engine,
   }
 
   for (std::size_t i = 0u; i < io.cancelCount; ++i) {
-    const trading_core::CancelIntent& intent = io.cancelOut[i];
+    const trading_core::CancelIntent& intent = io.cancelOut()[i];
     (void)submitCancelIntent(engine, intent, tsNs, cancelActiveTs(intent));
   }
   for (std::size_t i = 0u; i < io.orderCount; ++i) {
-    const trading_core::OrderIntent& intent = io.orderOut[i];
+    const trading_core::OrderIntent& intent = io.orderOut()[i];
     (void)submitOrderIntent(engine, intent, tsNs, orderActiveTs(intent));
   }
   if (hasIntents) bumpContextRevision(engine);

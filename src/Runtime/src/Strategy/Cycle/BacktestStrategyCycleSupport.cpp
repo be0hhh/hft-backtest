@@ -47,19 +47,19 @@ void retainCancelOutputsWhenNewOrdersBlocked(
     trading_core::StrategyIo& io) noexcept {
   io.orderCount = 0u;
   const std::size_t readableCommands =
-      io.commandCount < io.commandOut.size()
+      io.commandCount < io.commandOut().size()
           ? io.commandCount
-          : io.commandOut.size();
+          : io.commandOut().size();
   std::size_t writeIndex = 0u;
   for (std::size_t readIndex = 0u;
        readIndex < readableCommands;
        ++readIndex) {
-    if (io.commandOut[readIndex].kind !=
+    if (io.commandOut()[readIndex].kind !=
         trading_core::StrategyCommandIntentKind::Cancel) {
       continue;
     }
     if (writeIndex != readIndex) {
-      io.commandOut[writeIndex] = io.commandOut[readIndex];
+      io.commandOut()[writeIndex] = io.commandOut()[readIndex];
     }
     ++writeIndex;
   }

@@ -51,6 +51,9 @@ class BacktestCanonicalExecutionAdapter final {
       detail::EngineView, std::int64_t tsNs) noexcept;
   [[nodiscard]] bool released(std::size_t leg, std::uint32_t contextIndex, Id,
       std::uint64_t deliveredCut) const noexcept;
+  [[nodiscard]] Span<trading_core::StrategyCommandResult> commandResults() noexcept {
+    return {commandResults_.data(), commandResults_.size()};
+  }
   [[nodiscard]] bool bound() const noexcept { return descriptor_ != nullptr; }
   [[nodiscard]] bool bindSelectionOwner(BacktestCanonicalPairSelection&, std::uint32_t index) noexcept;
   [[nodiscard]] TimeNs nextWakeMono() const noexcept;
