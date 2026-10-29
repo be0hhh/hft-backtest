@@ -8,17 +8,23 @@
 namespace hft_backtest::detail {
 namespace {
 
+void observeExcursion(std::int64_t& peak,
+                      BacktestExcursionMetrics& metrics,
+                      std::int64_t pnl) noexcept {
+  if (pnl > peak) peak = pnl;
+  const std::int64_t drawdown =
+      peak > pnl ? trading_core::saturatingSubI64(peak, pnl) : 0;
+  if (drawdown > metrics.maxDrawdownE8) metrics.maxDrawdownE8 = drawdown;
+  if (pnl > metrics.mfeE8) metrics.mfeE8 = pnl;
+  if (pnl < metrics.maeE8) metrics.maeE8 = pnl;
+}
+
 BacktestExcursionMetrics calculateFromPnlSeries(const std::vector<std::int64_t>& series) noexcept {
   BacktestExcursionMetrics out{};
   // PnL starts at zero before the first recorded observation.
   std::int64_t peak = 0;
   for (const std::int64_t pnl : series) {
-    if (pnl > peak) peak = pnl;
-    const std::int64_t drawdown =
-        peak > pnl ? trading_core::saturatingSubI64(peak, pnl) : 0;
-    if (drawdown > out.maxDrawdownE8) out.maxDrawdownE8 = drawdown;
-    if (pnl > out.mfeE8) out.mfeE8 = pnl;
-    if (pnl < out.maeE8) out.maeE8 = pnl;
+    observeExcursion(peak, out, pnl);
   }
   return out;
 }
@@ -59,19 +65,15 @@ BacktestExcursionMetrics calculateExcursionMetrics(const EngineState& engine) no
   BacktestExcursionMetrics out{};
   // Include the initial zero-PnL account baseline even without an explicit row.
   std::int64_t peak = 0;
-  auto observe = [&](std::int64_t pnl) noexcept {
-    if (pnl > peak) peak = pnl;
-    const std::int64_t drawdown =
-        peak > pnl ? trading_core::saturatingSubI64(peak, pnl) : 0;
-    if (drawdown > out.maxDrawdownE8) out.maxDrawdownE8 = drawdown;
-    if (pnl > out.mfeE8) out.mfeE8 = pnl;
-    if (pnl < out.maeE8) out.maeE8 = pnl;
-  };
   if (!engine.riskSnapshots.empty()) {
-    for (const JsonRiskSnapshot& row : engine.riskSnapshots) observe(row.netTotalPnlE8);
+    for (const JsonRiskSnapshot& row : engine.riskSnapshots) {
+      observeExcursion(peak, out, row.netTotalPnlE8);
+    }
     return out;
   }
-  for (const JsonEquityPoint& row : engine.equityPoints) observe(row.netTotalPnlE8);
+  for (const JsonEquityPoint& row : engine.equityPoints) {
+    observeExcursion(peak, out, row.netTotalPnlE8);
+  }
   return out;
 }
 
