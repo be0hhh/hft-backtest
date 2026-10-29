@@ -11,13 +11,9 @@
 #include <utility>
 
 #include "../Internal/BacktestExecutionHelpers.hpp"
-
-namespace hft_backtest::detail::execution_detail {
-
-}  // namespace hft_backtest::detail::execution_detail
+#include "trading_core/Strategy/Events/UserEventView.hpp"
 
 namespace hft_backtest::detail {
-using execution_detail::boundedPositionMagnitude;
 using execution_detail::nextOrderId;
 
 bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t orderLatencyUs) {
@@ -30,7 +26,7 @@ bool forceClosePosition(EngineState& engine, std::int64_t tsNs, std::uint64_t or
   intent.clientIntentId.raw = nextOrderId(engine);
   intent.side = engine.netQtyRaw > 0 ? Side::Sell() : Side::Buy();
   intent.orderType = canon::OrderType::Market;
-  intent.qty.raw = boundedPositionMagnitude(engine.netQtyRaw);
+  intent.qty.raw = trading_core::strategy::absAmountRaw(engine.netQtyRaw);
   intent.positionReduction = trading_core::PositionReductionIntent::Reduce;
 
   std::array<trading_core::OrderIntent, 1> orders{intent};
@@ -53,7 +49,7 @@ bool forceClosePosition(EngineState& engine, std::int64_t tsNs, BacktestLatencyR
   intent.clientIntentId.raw = nextOrderId(engine);
   intent.side = engine.netQtyRaw > 0 ? Side::Sell() : Side::Buy();
   intent.orderType = canon::OrderType::Market;
-  intent.qty.raw = boundedPositionMagnitude(engine.netQtyRaw);
+  intent.qty.raw = trading_core::strategy::absAmountRaw(engine.netQtyRaw);
   intent.positionReduction = trading_core::PositionReductionIntent::Reduce;
 
   std::array<trading_core::OrderIntent, 1> orders{intent};

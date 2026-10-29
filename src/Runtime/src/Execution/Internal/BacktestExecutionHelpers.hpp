@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../BacktestTime.hpp"
 #include "../../Engine/BacktestEngine.hpp"
 
 #include "../Model/BacktestExecutionDepth.hpp"
@@ -71,11 +72,9 @@ std::int64_t rateLimitCooldownTsNs(const trading_core::execution::PermitDecision
 bool beginRateLimitCooldown(EngineState& engine,
                             const trading_core::execution::PermitDecision& decision,
                             std::int64_t tsNs) noexcept;
-TimeNs timeNsFromI64Local(std::int64_t value) noexcept;
 std::int64_t remainingPctE4(std::int64_t remaining, std::int64_t limit) noexcept;
 bool sameRateLimitUsagePoint(const JsonRateLimitUsagePoint& lhs,
                              const JsonRateLimitUsagePoint& rhs) noexcept;
-std::int64_t boundedPositionMagnitude(std::int64_t netQtyRaw) noexcept;
 std::int64_t reduceOnlyPositionCloseQty(const EngineState& engine, const OpenOrder& order) noexcept;
 std::int64_t fillableOrderQty(const EngineState& engine,
                               const OpenOrder& order,

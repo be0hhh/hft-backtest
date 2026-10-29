@@ -294,12 +294,6 @@ bool beginRateLimitCooldown(EngineState& engine,
   return notify;
 }
 
-TimeNs timeNsFromI64Local(std::int64_t value) noexcept {
-  TimeNs out{};
-  out.raw = static_cast<std::uint64_t>(value > 0 ? value : 0);
-  return out;
-}
-
 std::int64_t remainingPctE4(std::int64_t remaining, std::int64_t limit) noexcept {
   if (limit <= 0) return 0;
   if (remaining <= 0) return 0;
@@ -325,7 +319,6 @@ bool sameRateLimitUsagePoint(const JsonRateLimitUsagePoint& lhs,
 namespace hft_backtest::detail {
 using execution_detail::remainingPctE4;
 using execution_detail::sameRateLimitUsagePoint;
-using execution_detail::timeNsFromI64Local;
 
 void appendRateLimitUsageSnapshot(EngineState& engine, std::int64_t tsNs) {
   if (!engine.quotaOwner().configured()) return;
@@ -334,7 +327,7 @@ void appendRateLimitUsageSnapshot(EngineState& engine, std::int64_t tsNs) {
                                      engine.exchange,
                                      engine.market,
                                      1u,
-                                     timeNsFromI64Local(tsNs),
+                                     timeNsFromI64(tsNs),
                                      book);
   JsonRateLimitUsagePoint best{};
   bool found = false;

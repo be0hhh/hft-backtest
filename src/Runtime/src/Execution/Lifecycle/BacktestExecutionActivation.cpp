@@ -15,20 +15,9 @@
 #include "../Internal/BacktestExecutionHelpers.hpp"
 #include "../../Strategy/Inputs/BacktestStrategyWarmup.hpp"
 #include "trading_core/Strategy/Orders/Evidence/OrderDecisionCursor.hpp"
+#include "trading_core/Strategy/Events/UserEventView.hpp"
 
 namespace hft_backtest::detail::execution_detail {
-
-std::int64_t boundedPositionMagnitude(std::int64_t netQtyRaw) noexcept {
-  if (netQtyRaw >= 0) return netQtyRaw;
-  // Unsigned modulo arithmetic obtains the magnitude without negating
-  // INT64_MIN in the signed domain.
-  const std::uint64_t magnitude =
-      std::uint64_t{0} - static_cast<std::uint64_t>(netQtyRaw);
-  const std::uint64_t limit = static_cast<std::uint64_t>(
-      std::numeric_limits<std::int64_t>::max());
-  return magnitude > limit ? std::numeric_limits<std::int64_t>::max()
-                           : static_cast<std::int64_t>(magnitude);
-}
 
 std::int64_t reduceOnlyPositionCloseQty(const EngineState& engine, const OpenOrder& order) noexcept {
   if (!order.reduceOnly) return std::numeric_limits<std::int64_t>::max();
@@ -38,7 +27,7 @@ std::int64_t reduceOnlyPositionCloseQty(const EngineState& engine, const OpenOrd
     return engine.netQtyRaw;
   }
   if (order.state.side.raw != Side::Buy().raw) return 0;
-  return boundedPositionMagnitude(engine.netQtyRaw);
+  return trading_core::strategy::absAmountRaw(engine.netQtyRaw);
 }
 
 std::int64_t fillableOrderQty(const EngineState& engine,

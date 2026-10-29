@@ -122,7 +122,7 @@ bool submitCancelIntent(EngineState& engine,
     return false;
   }
   const trading_core::execution::PermitDecision rateLimitDecision =
-      engine.quotaOwner().admit(trading_core::RateLimitActionKind::CancelOrder, timeNsFromI64Local(tsNs));
+      engine.quotaOwner().admit(trading_core::RateLimitActionKind::CancelOrder, timeNsFromI64(tsNs));
   if (!rateLimitDecision.ok()) {
     recordRateLimitReject(engine, 3u, tsNs);
     const bool notify = beginRateLimitCooldown(engine, rateLimitDecision, tsNs);
@@ -290,7 +290,7 @@ bool submitCancelIntent(EngineState& engine,
               : trading_core::RateLimitActionKind::ReduceOnlyMarketOrder)
           : (intent.orderType == canon::OrderType::Limit
               ? trading_core::RateLimitActionKind::LimitOrder
-          : trading_core::RateLimitActionKind::MarketOrder)), timeNsFromI64Local(tsNs));
+          : trading_core::RateLimitActionKind::MarketOrder)), timeNsFromI64(tsNs));
   if (!rateLimitDecision.ok()) {
     recordRateLimitReject(engine, 1u, tsNs);
     const bool notify = beginRateLimitCooldown(engine, rateLimitDecision, tsNs);
@@ -389,16 +389,16 @@ bool submitCancelIntent(EngineState& engine,
   slot.warmupCancelAfterAck = warmup && warmupCancelAfterAck;
   slot.warmupCancelRequested = false;
   slot.warmupCancelTimeoutTsNs = warmup && warmupCancelTimeoutMs != 0u ? addMs(activeTs, warmupCancelTimeoutMs) : 0;
-  engine.lastOrderPathCommandMono = timeNsFromI64Local(tsNs);
+  engine.lastOrderPathCommandMono = timeNsFromI64(tsNs);
   if (warmup) {
     engine.lastOrderPathAckMono = TimeNs{};
-    engine.lastOrderPathWarmupMono = timeNsFromI64Local(tsNs);
+    engine.lastOrderPathWarmupMono = timeNsFromI64(tsNs);
     engine.warmupClientIntentId = intent.clientIntentId;
     engine.warmupContextIndex = engine.activeContextIndex;
     engine.lastWarmupSkipReason = 0u;
     engine.warmupInFlight = true;
   } else if (!service) {
-    engine.lastOrderPathCommandMono = timeNsFromI64Local(tsNs);
+    engine.lastOrderPathCommandMono = timeNsFromI64(tsNs);
     engine.lastWarmupSkipReason = 0u;
   }
   slot.triggerSourcePriceRaw = 0;

@@ -180,12 +180,6 @@ void MultiLegCycleScratch::refreshDirty(detail::ConstEngineView engines,
 }
 
 
-TimeNs timeNsFromI64(std::int64_t value) noexcept {
-  TimeNs out{};
-  if (value > 0) out.raw = static_cast<std::uint64_t>(value);
-  return out;
-}
-
 TimeNs replayUtcFromMonotonic(std::int64_t monotonicNs,
                               std::int64_t utcOffsetNs) noexcept {
   TimeNs out{};

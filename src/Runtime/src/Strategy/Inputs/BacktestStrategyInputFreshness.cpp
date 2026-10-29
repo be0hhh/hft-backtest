@@ -1,16 +1,12 @@
 #include "BacktestStrategyInputFreshness.hpp"
 
+#include "../../BacktestTime.hpp"
+
 #include "trading_core/Strategy/StrategyInputFreshness.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
 namespace hft_backtest {
 namespace {
-
-[[nodiscard]] TimeNs backtestMonoFromTs(std::int64_t tsNs) noexcept {
-  TimeNs out{};
-  if (tsNs > 0) out.raw = static_cast<std::uint64_t>(tsNs);
-  return out;
-}
 
 [[nodiscard]] bool timelinePublicMarketStream(
     std::uint8_t kind,
@@ -65,7 +61,7 @@ std::uint64_t backtestSourceFreshLegMask(
     std::size_t legCount,
     std::int64_t tsNs) noexcept {
   if (engines.empty() || legCount == 0u) return 0u;
-  const TimeNs nowMono = backtestMonoFromTs(tsNs);
+  const TimeNs nowMono = timeNsFromI64(tsNs);
   std::uint64_t out = 0u;
   for (std::size_t i = 0u; i < legCount && i < 64u; ++i) {
     bool legFresh = true;
@@ -82,7 +78,7 @@ std::uint64_t backtestSourceFreshLegMask(
           stream == cxet::api::market::PublicMarketDataStream::BookTicker
           ? (engines[i].snapshot.hasReconstructedBbo.raw == trading_core::kAlgoFlagTrue.raw
                  ? engines[i].snapshot.reconstructedBookTickerRecvMono : TimeNs{})
-          : backtestMonoFromTs(detail::strategySourceDeliveryTimestamp(engines[i], stream));
+          : timeNsFromI64(detail::strategySourceDeliveryTimestamp(engines[i], stream));
       if (!trading_core::strategy::strategyInputSourceTimestampFresh(
               recvMono, nowMono, inputPolicy.maxAgeNs)) {
         legFresh = false;
