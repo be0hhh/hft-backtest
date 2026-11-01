@@ -221,7 +221,7 @@ bool BacktestCanonicalExecutionAdapter::prepareCycle(StrategyContext& context,
     view.depthEvidence = evidence(cxet::api::market::PublicMarketDataStream::Orderbook);
     if (engine.feePolicyKnown) {
       auto& fee = feeSchedules_[leg];
-      fee = {OrderCommissionModel::Rate, engine.makerFeeBpsE8, engine.takerFeeBpsE8};
+      fee = {capital::fees::OrderCommissionModel::Rate, engine.makerFeeBpsE8, engine.takerFeeBpsE8};
       view.fee = {&fee, 1u,
           static_cast<std::uint32_t>((static_cast<std::uint32_t>(engine.exchange.raw) << 8u) | engine.market.raw),
           sources_[leg].sizing.quoteCurrency, engine.exchange.raw, engine.market.raw,
