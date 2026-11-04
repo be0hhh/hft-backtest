@@ -269,7 +269,6 @@ bool BacktestCanonicalExecutionAdapter::prepareCycle(StrategyContext& context,
       (descriptor_->runtimePolicy->selection.enabled() && !selection_)) return false;
   input = {};
   input.sizingPolicy = descriptor_->runtimePolicy->sizingPolicy;
-  input.openingSignalPolicy = descriptor_->runtimePolicy->openingSignalPolicy;
   if (preparedLots_.status == capital::sizing::PairSizingStatus::Ok) input.preparedLots = &preparedLots_;
   bool financialAuthorityCurrent = true;
   for (std::size_t leg = 0u; leg < 2u; ++leg) {
