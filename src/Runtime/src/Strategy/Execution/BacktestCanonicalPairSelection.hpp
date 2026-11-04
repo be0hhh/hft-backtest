@@ -11,12 +11,11 @@ namespace hft_backtest {
 class BacktestCanonicalPairSelection final {
  public:
   [[nodiscard]] bool bindCold(const trading_core::StrategyRuntimePolicy&,
-      std::span<const trading_core::StrategySelectionIdentity>,
-      std::uint64_t maximumAgeNs, std::string& error) noexcept;
+      std::span<const trading_core::StrategySelectionIdentity>, std::string& error) noexcept;
   // Append membership at a cold owner boundary. Existing indices, absolute
   // collection start, winner and actor state survive; no election restart.
   [[nodiscard]] bool appendCold(std::span<const trading_core::StrategySelectionIdentity>,
-      std::uint64_t maximumAgeNs, std::string& error) noexcept;
+      std::string& error) noexcept;
   void withdraw(std::uint32_t context, std::uint64_t now) noexcept;
   [[nodiscard]] bool observe(std::uint32_t context,
       const trading_core::StrategyParamStorage&,
@@ -41,6 +40,5 @@ class BacktestCanonicalPairSelection final {
   std::vector<std::uint64_t> observedAt_{};
   // Source-owned immutable symbol bytes outlive this selection owner.
   std::vector<trading_core::StrategySelectionIdentity> identities_{};
-  std::uint64_t maximumAgeNs_{};
 };
 }

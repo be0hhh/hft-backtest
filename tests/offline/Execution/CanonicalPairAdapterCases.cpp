@@ -242,7 +242,7 @@ struct ActorFixture {
     if (descriptor.runtimePolicy->selection.enabled()) {
       const std::array<trading_core::StrategySelectionIdentity, 1u> identities{{
           {sources[1].instrument.expiryRealtimeNs, cxet::StringView{"AAA_FUT", 7u}}}};
-      CXET_CHECK(selection.bindCold(*descriptor.runtimePolicy, identities, 120'000'000'000u, error));
+      CXET_CHECK(selection.bindCold(*descriptor.runtimePolicy, identities, error));
       CXET_CHECK(adapter.bindSelectionOwner(selection, 0u));
     }
     auto& model = delivery.current;
@@ -330,7 +330,7 @@ void selectionAppendPreservesWindowAndRequiresCompleteCurrentCut() {
   const std::array<trading_core::StrategySelectionIdentity, 2u> appended{{
       {expiry, cxet::StringView{"AAA_FUT", 7u}}, {expiry, cxet::StringView{"ZZZ_FUT", 7u}}}};
   std::string error;
-  CXET_CHECK(fixture->selection.appendCold(appended, 120'000'000'000u, error));
+  CXET_CHECK(fixture->selection.appendCold(appended, error));
   CXET_CHECK(fixture->selection.nextWakeMono().raw == 61'000'000'000u);
   fixture->cycle(61'000'000'000u);
   fixture->selection.finishCut(61'000'000'000u, true, true);
@@ -341,7 +341,7 @@ void selectionAppendPreservesWindowAndRequiresCompleteCurrentCut() {
   CXET_CHECK(fixture->selection.allows(0u));
   const std::array<trading_core::StrategySelectionIdentity, 3u> afterSelection{{
       appended[0], appended[1], {expiry, cxet::StringView{"BBB_FUT", 7u}}}};
-  CXET_CHECK(fixture->selection.appendCold(afterSelection, 120'000'000'000u, error));
+  CXET_CHECK(fixture->selection.appendCold(afterSelection, error));
   CXET_CHECK(fixture->selection.status() == trading_core::StrategyInstanceSelection::Status::Selected);
   CXET_CHECK(fixture->selection.allows(0u));
 }

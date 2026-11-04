@@ -318,7 +318,7 @@ struct SimulationSession::Impl {
         const auto& facts=canonicalSources[source].instrument;
         identities.push_back({facts.expiryRealtimeNs,cxet::StringView::fromCString(facts.nativeSymbol.data)});
       }
-      if(!selection->bindCold(*strategy->runtimePolicy,identities,contexts.front()->inputPolicy.maxAgeNs,error)) {
+      if(!selection->bindCold(*strategy->runtimePolicy,identities,error)) {
         reject(Status::Unsupported,error);return result.status;
       }
       for(std::size_t i=0;i<contexts.size();++i)if(contexts[i]->scratch->canonicalExecution &&
@@ -717,7 +717,7 @@ struct SimulationSession::Impl {
         const auto source=candidate.sourceIndices.back();const auto& facts=canonicalSources[source].instrument;
         identities.push_back({facts.expiryRealtimeNs,cxet::StringView::fromCString(facts.nativeSymbol.data)});
       }
-      if(!selection->appendCold(identities,contexts.front()->inputPolicy.maxAgeNs,error)) {
+      if(!selection->appendCold(identities,error)) {
         reject(Status::Unsupported,error);return result.status;
       }
       for(std::size_t index=priorContexts;index<contexts.size();++index)

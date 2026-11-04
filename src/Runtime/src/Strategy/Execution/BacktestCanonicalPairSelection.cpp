@@ -8,13 +8,13 @@
 namespace hft_backtest {
 bool BacktestCanonicalPairSelection::bindCold(const trading_core::StrategyRuntimePolicy& policy,
     std::span<const trading_core::StrategySelectionIdentity> identities,
-    std::uint64_t maximumAgeNs, std::string& error) noexcept {
+    std::string& error) noexcept {
   const auto refuse = [&](const char* text) noexcept {
     try { error = text; } catch (...) { error.clear(); }
     return false;
   };
   if (policy_ || !policy.selection.enabled() || !policy.evaluateCandidate ||
-      !policy.selectionIdentityLess || identities.empty() || identities.size() > 100'000u || !maximumAgeNs)
+      !policy.selectionIdentityLess || identities.empty() || identities.size() > 100'000u)
     return refuse("unsupported virtual canonical selection configuration");
   try {
     const auto leaves = std::bit_ceil(identities.size());
@@ -32,18 +32,18 @@ bool BacktestCanonicalPairSelection::bindCold(const trading_core::StrategyRuntim
   } catch (...) { return refuse("virtual canonical selection storage unavailable"); }
   if (!selection_.bindCold(tree_, static_cast<std::uint32_t>(identities.size()), policy.selection))
     return refuse("canonical selection owner binding failed");
-  policy_ = &policy; maximumAgeNs_ = maximumAgeNs;
+  policy_ = &policy;
   return true;
 }
 
 bool BacktestCanonicalPairSelection::appendCold(
     std::span<const trading_core::StrategySelectionIdentity> identities,
-    std::uint64_t maximumAgeNs, std::string& error) noexcept {
+    std::string& error) noexcept {
   const auto refuse = [&](const char* text) noexcept {
     try { error = text; } catch (...) { error.clear(); }
     return false;
   };
-  if (!policy_ || maximumAgeNs != maximumAgeNs_ || identities.size() < identities_.size() ||
+  if (!policy_ || identities.size() < identities_.size() ||
       identities.size() > 100'000u) return refuse("invalid canonical selection membership append");
   for (std::size_t index = 0u; index < identities_.size(); ++index)
     if (identities[index].expiryRealtimeNs != identities_[index].expiryRealtimeNs ||
@@ -51,7 +51,7 @@ bool BacktestCanonicalPairSelection::appendCold(
       return refuse("canonical selection append changed an existing candidate identity");
   if (identities.size() == identities_.size()) return true;
   BacktestCanonicalPairSelection replacement;
-  if (!replacement.bindCold(*policy_, identities, maximumAgeNs, error)) return false;
+  if (!replacement.bindCold(*policy_, identities, error)) return false;
   for (std::size_t index = 0u; index < candidates_.size(); ++index) {
     replacement.candidates_[index] = candidates_[index];
     replacement.observedAt_[index] = observedAt_[index];
@@ -86,8 +86,7 @@ bool BacktestCanonicalPairSelection::observe(std::uint32_t context,
     const trading_core::StrategyContext& cycle, bool eligible) noexcept {
   if (!policy_ || context >= candidates_.size() || !cycle.nowMono.raw) return false;
   auto& candidate = candidates_[context];
-  const bool evaluated = policy_->evaluateCandidate(params, input, cycle, eligible,
-      maximumAgeNs_, candidate);
+  const bool evaluated = policy_->evaluateCandidate(params, input, cycle, eligible, candidate);
   if (!evaluated) candidate = {};
   observedAt_[context] = cycle.nowMono.raw;
   selection_.update(context, evaluated && candidate.covered, candidate.costE8,
@@ -110,7 +109,7 @@ void BacktestCanonicalPairSelection::finishCut(std::uint64_t now, bool fullReady
   bool current = true;
   if (needsFullCut(now))
     for (const auto observed : observedAt_) current = current && observed == now;
-  (void)selection_.observeHealthOwner(fullReady, healthy, now, maximumAgeNs_, policy_->selection, current);
+  (void)selection_.observeHealthOwner(fullReady, healthy, now, policy_->selection, current);
 }
 
 TimeNs BacktestCanonicalPairSelection::nextWakeMono() const noexcept {
