@@ -199,12 +199,12 @@ bool submitCancelIntent(EngineState& engine,
   engine.orders.back().triggerSource = static_cast<std::uint8_t>(intent.triggerSource);
   engine.orders.back().service = service;
   engine.orders.back().warmup = warmup;
-  // This simulator has no immediate match-and-cancel IOC model. Reject the
-  // newly expressible policy before quota/active-order installation instead
-  // of silently turning it into a resting GTC order.
+  // IOC matching and native DAY expiry have no simulator model. Refuse these
+  // policies before quota/active-order installation.
   if (badStopMarketIntent(intent) ||
       (intent.orderType == canon::OrderType::Limit &&
-       intent.limitTimeInForcePolicy == trading_core::LimitTimeInForcePolicy::Ioc)) {
+       (intent.limitTimeInForcePolicy == trading_core::LimitTimeInForcePolicy::Ioc ||
+        intent.limitTimeInForcePolicy == trading_core::LimitTimeInForcePolicy::Day))) {
     OpenOrder rejected{};
     rejected.contextIndex = engine.activeContextIndex;
     rejected.state.valid = true;

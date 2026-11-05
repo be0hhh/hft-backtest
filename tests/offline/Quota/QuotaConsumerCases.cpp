@@ -75,23 +75,26 @@ void symbolsOnOneVirtualAccountShareOnePermitLedger() {
 }
 
 void unsupportedIocDoesNotBecomeRestingOrder() {
-  auto engine = fundedCashQuotaEngine();
-  std::string error;
-  CXET_CHECK(applyRateLimitSchedule(*engine, policy(), error));
-  std::array<trading_core::OrderIntent, 1> orders{order(1u)};
-  orders[0].limitTimeInForcePolicy = trading_core::LimitTimeInForcePolicy::Ioc;
-  trading_core::StrategyIo io{};
-  const trading_core::StrategyIoStorage ioStorage{orders.data(), nullptr, nullptr, nullptr, nullptr};
-  CXET_CHECK(io.bind(ioStorage, orders.size(), 0u, 0u, 0u, 0u));
-  io.orderCount = 1u;
-  detail::applyIntents(*engine, io, 100, 1000000, 1000000);
-  CXET_CHECK(engine->orders.size() == 1u);
-  CXET_CHECK(engine->orders[0].status == detail::kRecordStatusRejected);
-  CXET_CHECK(engine->pending.empty());
-  for (const auto& active : engine->open) CXET_CHECK(!active.state.valid);
-  // Rejection precedes quota reservation: the one allowed GTC still fits.
-  submit(*engine, 2u, 101);
-  CXET_CHECK(engine->orders.back().status == detail::kRecordStatusPending);
+  for (const auto unsupported : {trading_core::LimitTimeInForcePolicy::Ioc,
+                                 trading_core::LimitTimeInForcePolicy::Day}) {
+    auto engine = fundedCashQuotaEngine();
+    std::string error;
+    CXET_CHECK(applyRateLimitSchedule(*engine, policy(), error));
+    std::array<trading_core::OrderIntent, 1> orders{order(1u)};
+    orders[0].limitTimeInForcePolicy = unsupported;
+    trading_core::StrategyIo io{};
+    const trading_core::StrategyIoStorage ioStorage{orders.data(), nullptr, nullptr, nullptr, nullptr};
+    CXET_CHECK(io.bind(ioStorage, orders.size(), 0u, 0u, 0u, 0u));
+    io.orderCount = 1u;
+    detail::applyIntents(*engine, io, 100, 1000000, 1000000);
+    CXET_CHECK(engine->orders.size() == 1u);
+    CXET_CHECK(engine->orders[0].status == detail::kRecordStatusRejected);
+    CXET_CHECK(engine->pending.empty());
+    for (const auto& active : engine->open) CXET_CHECK(!active.state.valid);
+    // Rejection precedes quota reservation: the one allowed GTC still fits.
+    submit(*engine, 2u, 101);
+    CXET_CHECK(engine->orders.back().status == detail::kRecordStatusPending);
+  }
 }
 
 void depletedQuotaRefusesOrderAndCancel() {
