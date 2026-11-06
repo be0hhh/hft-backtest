@@ -1,6 +1,6 @@
 #pragma once
 
-#include "capital/Risk/PortfolioRisk.hpp"
+#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
 #include "capital/AccountState/AccountState.hpp"
 #include "../../Engine/BacktestEngine.hpp"
 #include "../../Preparation/BacktestPrepared.hpp"
@@ -51,7 +51,7 @@ struct BacktestRunContext {
   std::int64_t& greatestProcessedTsNs;
   std::array<capital::accounting::StrategyAccountState, trading_core::kStrategyRuntimeMaxLegs>& riskAccounts;
   const std::size_t& riskAccountCount;
-  capital::risk::PortfolioRiskState& traderRiskState;
+  trading_core::PortfolioRiskControllerState& traderRiskState;
   bool& traderRiskCloseProblem;
   bool& legLiquidationProblem;
 };

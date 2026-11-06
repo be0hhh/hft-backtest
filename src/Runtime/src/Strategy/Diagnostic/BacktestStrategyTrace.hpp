@@ -4,7 +4,10 @@
 
 #include "../../Engine/BacktestEngine.hpp"
 
-#include "trading_core/Contracts/Strategy/StrategyContract.hpp"
+#include "trading_core/Strategy/Context/StrategyContext.hpp"
+#include "trading_core/Contracts/Strategy/StrategyDecisionTrace.hpp"
+#include "trading_core/Contracts/Strategy/StrategyExecutionTrace.hpp"
+#include "trading_core/Contracts/Strategy/StrategyInstrumentSpec.hpp"
 #include "trading_core/Strategy/Descriptor/StrategyDescriptor.hpp"
 
 #include <cstddef>

@@ -14,7 +14,10 @@
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
 #include "trading_core/Contracts/Intents/OrderState.hpp"
 #include "trading_core/Contracts/Intents/PositionState.hpp"
-#include "trading_core/Contracts/Strategy/StrategyContract.hpp"
+#include "trading_core/Strategy/Context/StrategyIo.hpp"
+#include "trading_core/Algorithm/Market/StrategyMarketSnapshot.hpp"
+#include "trading_core/Algorithm/Market/StrategyInputViews.hpp"
+#include "trading_core/Contracts/Intents/OrderProblem.hpp"
 #include "trading_core/Contracts/Strategy/StrategyDecisionTrace.hpp"
 #include "capital/Accounting/FillPositionAccounting.hpp"
 
@@ -468,6 +471,8 @@ struct EngineState {
   std::uint64_t nextActivationSequence{1u};
   std::array<OpenOrder, kMaxOrderStates> open{};
   trading_core::StrategyPositionState position{};
+  cxet::composite::Trade strategyLastTrade{};
+  cxet::composite::Trade venueLastTrade{};
   trading_core::StrategyMarketSnapshot snapshot{};
   trading_core::StrategyCandleSnapshot candle{};
   trading_core::StrategyMarketSnapshot venueSnapshot{};
@@ -641,8 +646,9 @@ inline void bumpContextRevision(EngineState& engine) noexcept {
 
 inline const cxet::composite::BookTicker& effectiveBookTicker(
     const trading_core::StrategyMarketSnapshot& snapshot) noexcept {
-  return snapshot.hasReconstructedBbo.raw == trading_core::kAlgoFlagTrue.raw
-             ? snapshot.reconstructedBookTicker
+  return snapshot.hasReconstructedBbo.raw == trading_core::kAlgoFlagTrue.raw &&
+                 snapshot.reconstructedBookTicker
+             ? *snapshot.reconstructedBookTicker
              : snapshot.lastBookTicker;
 }
 

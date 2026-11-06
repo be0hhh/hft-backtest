@@ -1,4 +1,4 @@
-#include "capital/Risk/PortfolioRisk.hpp"
+#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
 #include "capital/AccountState/AccountState.hpp"
 #include "../Run/BacktestUniverse.hpp"
 #include "hft_backtest/SimulationSession.hpp"
@@ -82,7 +82,7 @@ struct SimulationSession::Impl {
   std::vector<std::vector<std::size_t>> subscribers;
   std::array<capital::accounting::StrategyAccountState,trading_core::kStrategyRuntimeMaxLegs> riskAccounts{};
   std::array<capital::risk::PortfolioRiskLegConfig,trading_core::kStrategyRuntimeMaxLegs> riskConfigs{};
-  capital::risk::PortfolioRiskState risk{};
+  trading_core::PortfolioRiskControllerState risk{};
   SimulationOutputSink sink;
   SimulationLimits limits;
   std::vector<std::uint32_t> maximumDepthCoverageSourcesBySource;
@@ -144,7 +144,7 @@ struct SimulationSession::Impl {
     if (!loadBacktestStrategyConfig(request.configPath.string().c_str(),config,error)) {
       reject(Status::InvalidArgument,error);return result.status;
     }
-    const auto& descriptorRef=trading_core::findStrategyDescriptor(config.strategyType);
+    const auto& descriptorRef=trading_core::findStrategyDescriptor({config.strategyType.data(), config.strategyType.size()});
     strategy=descriptorRef;
     if (!strategy || !strategy->resolveParams || !strategy->initState || !strategy->runCycle ||
         !strategy_intent_lowering::footprintSupported(*strategy)) {
@@ -329,7 +329,7 @@ struct SimulationSession::Impl {
     refreshAccounts();
     for (std::size_t a = 0; a < accounts.size(); ++a)
       riskConfigs[a] = makeBacktestPortfolioRiskLegConfig(configuredVenue(config, sources[accountSources[a]]));
-    risk = capital::risk::makePortfolioRiskState(makeBacktestPortfolioRiskConfig(config.risk),
+    risk = trading_core::makePortfolioRiskControllerState(makeBacktestPortfolioRiskConfig(config.risk),
         riskAccounts.data(), accounts.size(), riskConfigs.data());
 
     result.status=Status::Ok;result.error.clear();
@@ -552,7 +552,7 @@ struct SimulationSession::Impl {
       }
       trading_core::StrategyParamStorage params;
       const auto* venue = configuredVenue(config, sources[selected.sourceIndices[0]]);
-      if (!descriptor.resolveParams(makeBacktestStrategyParamContext(config, *venue), params, error)) {
+      if (!resolveBacktestStrategyParams(descriptor, config, *venue, params, error)) {
         reject(Status::InvalidArgument, error); return result.status;
       }
       context->inputPolicy = resolveBacktestStrategyInputPolicy(descriptor, params);
@@ -731,7 +731,7 @@ struct SimulationSession::Impl {
       refreshAccounts();
       for(std::size_t account=0;account<accounts.size();++account)
         riskConfigs[account]=makeBacktestPortfolioRiskLegConfig(configuredVenue(config,input.sessions[accountSources[account]]));
-      risk=capital::risk::makePortfolioRiskState(makeBacktestPortfolioRiskConfig(config.risk),riskAccounts.data(),accounts.size(),riskConfigs.data());
+      risk=trading_core::makePortfolioRiskControllerState(makeBacktestPortfolioRiskConfig(config.risk),riskAccounts.data(),accounts.size(),riskConfigs.data());
     }
     referenceGeneration=cut.generation;
     result.universeSources=count;result.universeContexts=contexts.size();result.virtualAccounts=accounts.size();
@@ -746,7 +746,7 @@ struct SimulationSession::Impl {
   }
   bool evaluateRisk(std::int64_t replay) {
     refreshAccounts();
-    const auto evaluation=capital::risk::evaluatePortfolioRisk(risk,riskAccounts.data(),accounts.size(),timeNsFromI64(replay));
+    const auto evaluation=trading_core::evaluatePortfolioRisk(risk,riskAccounts.data(),accounts.size(),timeNsFromI64(replay));
     if(!evaluation.breached)return false;
     for(auto& engine:engines) {
       engine.riskStopped=true;engine.riskStopTsNs=replay;

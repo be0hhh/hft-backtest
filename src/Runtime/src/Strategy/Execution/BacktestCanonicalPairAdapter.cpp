@@ -5,6 +5,7 @@
 #include "../../Execution/BacktestOrderEvidence.hpp"
 #include "trading_core/Strategy/Orders/Evidence/OrderDecisionCursor.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
+#include "trading_core/Strategy/Orders/Intent/StrategyOutputQualification.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -80,10 +81,14 @@ bool BacktestCanonicalExecutionAdapter::bindCold(const StrategyDescriptor& descr
   }
   if (engines[0].activeContextIndex != engines[1].activeContextIndex)
     return refuse("canonical pair context identity mismatch");
-  if (!descriptor.runtimePolicy->validateCold(configuration, error) ||
+  cxet::storage::DiagnosticText diagnostic;
+  if (!descriptor.runtimePolicy->validateCold(configuration, diagnostic) ||
       !descriptor.runtimePolicy->readParameters(params, parameters_) ||
       !descriptor.runtimePolicy->validatePairSizingCold(parameters_.sizing,
-          descriptor.runtimePolicy->sizingPolicy == PairSizingPolicy::ConfiguredLots, error)) return false;
+          descriptor.runtimePolicy->sizingPolicy == PairSizingPolicy::ConfiguredLots, diagnostic)) {
+    if (!diagnostic.empty()) error.assign(diagnostic.c_str(), diagnostic.view().size());
+    return false;
+  }
   if (sources[0].sizing.quoteCurrency != parameters_.sizing.quoteCurrency ||
       sources[1].sizing.quoteCurrency != parameters_.sizing.quoteCurrency)
     return refuse("captured quote identity differs from pair sizing currency");
@@ -115,6 +120,7 @@ bool BacktestCanonicalExecutionAdapter::bindCold(const StrategyDescriptor& descr
   try {
     sources_.assign(sources.begin(), sources.end());
     gates_.resize(2u); consumedCuts_.resize(2u); inputViews_.resize(2u); feeSchedules_.resize(2u);
+    inputEvidence_.assign(2u, {});
     feedback_.resize(8u);
   } catch (...) { return refuse("canonical replay cold storage unavailable"); }
   params_ = params;
@@ -149,6 +155,7 @@ bool BacktestCanonicalExecutionAdapter::bindGenericCold(const StrategyDescriptor
     sources_.assign(sources.begin(), sources.end());
     legs_.resize(sources.size()); gates_.resize(sources.size());
     inputViews_.resize(sources.size()); feeSchedules_.resize(sources.size());
+    inputEvidence_.assign(sources.size(), {});
     consumedCuts_.resize(sources.size()); slots_.resize(descriptor.executionSlotCapacity);
     feedback_.resize(descriptor.footprint.maxOrders + descriptor.footprint.maxCancels +
         2u * strategyRuntimeCommandCapacity(descriptor.footprint));
@@ -203,8 +210,10 @@ bool BacktestCanonicalExecutionAdapter::prepareCycle(StrategyContext& context,
     view.market = context.marketData.legs && leg < context.marketData.count
         ? &context.marketData.legs[leg] : nullptr;
     view.candle = context.candles.get(leg);
-    const auto evidence = [&](cxet::api::market::PublicMarketDataStream stream) noexcept {
-      auto value = engine.strategySourceEvidence[cxet::api::market::publicMarketDataStreamIndex(stream)];
+    const auto evidence = [&](cxet::api::market::PublicMarketDataStream stream,
+                              std::size_t index) noexcept -> const StrategyInputEvidence* {
+      auto& value = inputEvidence_[leg][index];
+      value = engine.strategySourceEvidence[cxet::api::market::publicMarketDataStreamIndex(stream)];
       if (engine.capturedSourceManaged && (!engine.capturedSourceMember ||
           value.sourceGeneration != engine.capturedSourceGeneration)) value.available = false;
       if (engine.capturedSourceManaged) {
@@ -214,11 +223,11 @@ bool BacktestCanonicalExecutionAdapter::prepareCycle(StrategyContext& context,
         const auto bit = hftrec::corpus::binaryMarketChannelBit(channel);
         value.continuous = (engine.capturedActiveChannels & bit) && !(engine.capturedUnhealthyChannels & bit);
       }
-      return value;
+      return &value;
     };
-    view.tradeEvidence = evidence(cxet::api::market::PublicMarketDataStream::Trades);
-    view.bookTickerEvidence = evidence(cxet::api::market::PublicMarketDataStream::BookTicker);
-    view.depthEvidence = evidence(cxet::api::market::PublicMarketDataStream::Orderbook);
+    view.tradeEvidence = evidence(cxet::api::market::PublicMarketDataStream::Trades, 0u);
+    view.bookTickerEvidence = evidence(cxet::api::market::PublicMarketDataStream::BookTicker, 1u);
+    view.depthEvidence = evidence(cxet::api::market::PublicMarketDataStream::Orderbook, 2u);
     if (engine.feePolicyKnown) {
       auto& fee = feeSchedules_[leg];
       fee = {capital::fees::OrderCommissionModel::Rate, engine.makerFeeBpsE8, engine.takerFeeBpsE8};
@@ -393,13 +402,15 @@ bool BacktestCanonicalExecutionAdapter::prepareCycle(StrategyContext& context,
 
 bool BacktestCanonicalExecutionAdapter::decideAndExecute(StrategyContext& context) noexcept {
   if (!descriptor_ || !cyclePrepared_ || (pairPolicy_ && !context.pairInputs)) return false;
+  StrategyInstanceContext selected{};
+  if (!instance_.select(0u, selected)) return false;
   const auto expected = context.io;
   const StrategyExecutionCycleInputs executionInput{gates_, {}, {feedback_.data(), feedbackCount_}};
   const auto* previousExecution = context.executionInputs;
   context.executionInputs = &executionInput;
   context.io.resultCount = resultCount_;
-  const bool produced = instance_.runCycle(0u, context);
-  if (produced && descriptor_->executeCycle) (void)instance_.executeCycle(0u, context);
+  const bool produced = instance_.runCycleSelected(selected, context);
+  if (produced && descriptor_->executeCycle) (void)instance_.executeCycleSelected(selected, context);
   context.executionInputs = previousExecution;
   if (context.io.storage() != expected.storage() ||
       context.io.orderOut().size() != expected.orderOut().size() ||
@@ -416,7 +427,7 @@ bool BacktestCanonicalExecutionAdapter::decideAndExecute(StrategyContext& contex
       context.io.capacityExceeded || context.io.transactionCount ||
       context.io.orderCount > context.io.orderOut().size() || context.io.cancelCount > context.io.cancelOut().size() ||
       context.io.commandCount > context.io.commandOut().size() ||
-      !StrategyInstance::directCapabilitiesDeclared(*descriptor_, context.io)) return false;
+      !directCapabilitiesDeclared(*descriptor_, context.io)) return false;
   // The actor has consumed the previous feedback; new dispatch replaces it.
   feedbackCount_ = 0u;
   return true;
@@ -427,7 +438,7 @@ bool BacktestCanonicalExecutionAdapter::dispatchAndCommit(StrategyContext& conte
   if (!descriptor_ || !cyclePrepared_ || engines.size() != sources_.size() ||
       context.io.orderCount + context.io.cancelCount + 2u * context.io.commandCount > feedback_.size() ||
       context.io.commandCount > commandResults_.size() ||
-      !StrategyInstance::directCapabilitiesDeclared(*descriptor_, context.io)) return false;
+      !directCapabilitiesDeclared(*descriptor_, context.io)) return false;
   const auto validRoute = [&](ExecutionRouteHandle route, std::uint32_t legId) noexcept {
     return route.raw && route.raw <= engines.size() &&
         legId == gates_[route.raw - 1u].strategyLegId;
@@ -440,14 +451,13 @@ bool BacktestCanonicalExecutionAdapter::dispatchAndCommit(StrategyContext& conte
     for (std::size_t i = 0u; i < localCount; ++i) if (localIds[i] == id.raw) return false;
     localIds[localCount++] = id.raw; return true;
   };
-  // Complete structural validation precedes the first simulated side effect.
+  // Direct-output grammar is qualified above; route and local-ID uniqueness
+  // remain replay-owned and precede the first simulated side effect.
   for (std::size_t i = 0u; i < context.io.orderCount; ++i)
-    if (!validOrderIntent(context.io.orderOut()[i], false) ||
-        !validRoute(context.io.orderOut()[i].routeHandle, context.io.orderOut()[i].strategyLegId) ||
+    if (!validRoute(context.io.orderOut()[i].routeHandle, context.io.orderOut()[i].strategyLegId) ||
         !freshLocal(context.io.orderOut()[i].clientIntentId)) return false;
   for (std::size_t i = 0u; i < context.io.cancelCount; ++i)
-    if (!validCancelIntent(context.io.cancelOut()[i]) ||
-        !validRoute(context.io.cancelOut()[i].routeHandle, context.io.cancelOut()[i].strategyLegId) ||
+    if (!validRoute(context.io.cancelOut()[i].routeHandle, context.io.cancelOut()[i].strategyLegId) ||
         !freshLocal(context.io.cancelOut()[i].clientIntentId)) return false;
   for (std::size_t i = 0u; i < context.io.commandCount; ++i) {
     const auto& command = context.io.commandOut()[i];
@@ -455,11 +465,10 @@ bool BacktestCanonicalExecutionAdapter::dispatchAndCommit(StrategyContext& conte
         ? command.warmup.order : command.order;
     if (command.kind == StrategyCommandIntentKind::Order || command.kind == StrategyCommandIntentKind::WarmupOrder ||
         command.kind == StrategyCommandIntentKind::Replace) {
-      if (!validOrderIntent(order, command.kind == StrategyCommandIntentKind::WarmupOrder) ||
-          !validRoute(order.routeHandle, order.strategyLegId) || !freshLocal(order.clientIntentId)) return false;
+      if (!validRoute(order.routeHandle, order.strategyLegId) || !freshLocal(order.clientIntentId)) return false;
     }
     if (command.kind == StrategyCommandIntentKind::Cancel || command.kind == StrategyCommandIntentKind::Replace)
-      if (!validCancelIntent(command.cancel) || !validRoute(command.cancel.routeHandle, command.cancel.strategyLegId) ||
+      if (!validRoute(command.cancel.routeHandle, command.cancel.strategyLegId) ||
           !freshLocal(command.cancel.clientIntentId)) return false;
   }
   std::array<std::uint64_t, trading_core::contracts::kMaximumStrategyLegs> fencedAccounts{};
@@ -577,7 +586,7 @@ bool BacktestCanonicalExecutionAdapter::dispatchAndCommit(StrategyContext& conte
     const auto firstFeedback = feedbackCount_;
     if (accountFenced(route.raw - 1u)) result.status = StrategyCommandResultStatus::AccountFenced;
     else if (!strategyCommandDependenciesSatisfied(command, {commandResults_.data(), i}) ||
-        !strategyCommandInputDependenciesFresh(command, context.legInputs,
+        !trading_core::detail::strategyCommandInputDependenciesReady<false>(command, context.legInputs,
             {descriptor_->legInputRequirements.data(), engines.size()}, context.nowMono.raw))
       result.status = StrategyCommandResultStatus::DependencyBlocked;
     else if (cancelOnly) result.status = cancel(command.cancel);

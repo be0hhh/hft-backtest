@@ -2,6 +2,7 @@
 
 #include "capital/Risk/PortfolioRisk.hpp"
 #include "trading_core/Strategy/Params/StrategyParams.hpp"
+#include "trading_core/Strategy/Descriptor/StrategyRuntimeFootprint.hpp"
 #include "trading_core/Algorithm/Primitives/AlgorithmPrimitives.hpp"
 #include "hft_backtest/Backtest.hpp"
 
@@ -14,6 +15,8 @@
 #include <string>
 #include <vector>
 
+namespace trading_core { struct StrategyDescriptor; }
+
 namespace hft_backtest {
 
 enum class BacktestLiveProbeMode : std::uint8_t {
@@ -25,6 +28,14 @@ enum class BacktestLiveProbeMode : std::uint8_t {
 enum class BacktestPortfolioTradeMode : std::uint8_t {
   All = 0,
   Primary = 1,
+};
+
+// Backtest owns parsed text independently of the borrowed strategy callback API.
+// Ordinary copy/move keeps ownership; callback views are built after parsing.
+struct BacktestStrategyParams {
+  struct Entry { std::string key{}, value{}; };
+  bool enabled{true};
+  std::vector<Entry> values{};
 };
 
 struct BacktestStrategyVenueConfig {
@@ -43,7 +54,7 @@ struct BacktestStrategyVenueConfig {
   std::vector<BacktestQuotaBucketConfig> rateLimitBuckets{};
   std::vector<trading_core::RateLimitActionConfig> rateLimitActions{};
   BacktestLiveProbeMode liveProbe{BacktestLiveProbeMode::Default};
-  trading_core::StrategyRuntimeParams params{};
+  BacktestStrategyParams params{};
 };
 
 struct BacktestPortfolioLegConfig {
@@ -73,7 +84,7 @@ struct BacktestRiskConfig {
 
 struct BacktestStrategyConfig {
   std::string strategyType{};
-  trading_core::StrategyRuntimeParams strategyDefaults{};
+  BacktestStrategyParams strategyDefaults{};
   BacktestRiskConfig risk{};
   std::vector<BacktestStrategyVenueConfig> venues{};
   std::vector<BacktestPortfolioConfig> portfolios{};
@@ -84,17 +95,13 @@ struct BacktestStrategyConfig {
     BacktestStrategyConfig& config,
     std::string& error);
 
-[[nodiscard]] inline trading_core::StrategyParamContext
-makeBacktestStrategyParamContext(
+// Entries, text and diagnostics remain alive through the synchronous resolver.
+[[nodiscard]] bool resolveBacktestStrategyParams(
+    const trading_core::StrategyDescriptor& descriptor,
     const BacktestStrategyConfig& config,
-    const BacktestStrategyVenueConfig& venue) noexcept {
-  return trading_core::StrategyParamContext{
-      config.strategyDefaults,
-      venue.params,
-      venue.name,
-      config.risk.rateLimitGuardEnabled && venue.rateLimitsEnabled,
-      config.risk.rateLimitGuardMinRemaining};
-}
+    const BacktestStrategyVenueConfig& venue,
+    trading_core::StrategyParamStorage& out,
+    std::string& error);
 
 [[nodiscard]] inline capital::risk::PortfolioRiskConfig
 makeBacktestPortfolioRiskConfig(const BacktestRiskConfig& config) noexcept {

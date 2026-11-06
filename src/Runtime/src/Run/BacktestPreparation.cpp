@@ -15,7 +15,7 @@
 
 #include "trading_core/Contracts/Control/ControlState.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
-#include "trading_core/Contracts/Strategy/StrategyContract.hpp"
+#include "trading_core/Contracts/Strategy/StrategyInstrumentSpec.hpp"
 #include "capital/Risk/PortfolioRisk.hpp"
 #include "trading_core/Strategy/GeneratedStrategyRegistry.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"

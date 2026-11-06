@@ -1,4 +1,4 @@
-#include "capital/Risk/PortfolioRisk.hpp"
+#include "trading_core/Strategy/Risk/PortfolioRisk.hpp"
 #include "capital/AccountState/AccountState.hpp"
 #include "hft_backtest/StrategyMetadata.hpp"
 #include "hft_backtest/Backtest.hpp"
@@ -23,7 +23,7 @@
 
 #include "trading_core/Contracts/Control/ControlState.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
-#include "trading_core/Contracts/Strategy/StrategyContract.hpp"
+#include "trading_core/Contracts/Strategy/StrategyInstrumentSpec.hpp"
 #include "trading_core/Strategy/GeneratedStrategyRegistry.hpp"
 #include "trading_core/Strategy/StrategyMarketData.hpp"
 
@@ -192,7 +192,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
     (void)writeEmptyArtifacts(artifacts);
     return result;
   }
-  const StrategyDescriptor* descriptor = trading_core::findStrategyDescriptor(cfg.strategyType);
+  const StrategyDescriptor* descriptor = trading_core::findStrategyDescriptor({cfg.strategyType.data(), cfg.strategyType.size()});
   if (!descriptor || !descriptor->resolveParams || !descriptor->initState || !descriptor->runCycle) {
     result.status = Status::Unsupported;
     result.error = "strategy descriptor is missing required callbacks";
@@ -273,8 +273,7 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   }
 
   StrategyParamStorage params{};
-  if (!descriptor->resolveParams(
-          makeBacktestStrategyParamContext(cfg, *venue), params, error)) {
+  if (!resolveBacktestStrategyParams(*descriptor, cfg, *venue, params, error)) {
     result.status = Status::InvalidArgument;
     result.error = error;
     (void)writeEmptyArtifacts(artifacts);
@@ -574,8 +573,8 @@ BacktestRunResult runBacktest(const BacktestRunRequest& request,
   for (std::size_t i = 0u; i < riskAccountCount; ++i) {
     riskLegConfigs[i] = makeBacktestPortfolioRiskLegConfig(riskVenues[i]);
   }
-  capital::risk::PortfolioRiskState traderRiskState =
-      capital::risk::makePortfolioRiskState(
+  trading_core::PortfolioRiskControllerState traderRiskState =
+      trading_core::makePortfolioRiskControllerState(
           makeBacktestPortfolioRiskConfig(cfg.risk), riskAccounts.data(),
           riskAccountCount, riskLegConfigs.data());
 

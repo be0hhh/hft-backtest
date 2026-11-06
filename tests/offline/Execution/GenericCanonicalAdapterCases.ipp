@@ -119,9 +119,13 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
     auto& snapshot = engine.snapshot; snapshot.hasBookTicker = snapshot.hasReconstructedBbo = kAlgoFlagTrue;
     snapshot.bookTickerBidPresent = snapshot.bookTickerAskPresent = kAlgoFlagTrue;
     snapshot.lastBookTicker.bid.px.raw = 99 * ActorFixture::scale; snapshot.lastBookTicker.ask.px.raw = 100 * ActorFixture::scale;
-    snapshot.reconstructedBookTicker = snapshot.lastBookTicker;
+    engine.bboReconstruction.bookTicker = snapshot.lastBookTicker;
+    snapshot.reconstructedBookTicker = &engine.bboReconstruction.bookTicker;
     snapshot.lastBookTickerRecvMono.raw = snapshot.reconstructedBookTickerRecvMono.raw = 1'000'000'000u;
     market[leg] = {&snapshot, snapshot.orderBookMaxLevelsPerSide};
+    auto& tradeEvidence = engine.strategySourceEvidence[cxet::api::market::publicMarketDataStreamIndex(
+        cxet::api::market::PublicMarketDataStream::Trades)];
+    tradeEvidence = {1'000'000'000u, 1u, leg + 1u, true, true};
     CXET_CHECK(detail::prepareSimulationOrderEvidence(engine)); evidence[leg] = detail::simulationOrderEvidenceView(engine);
   }
   alignas(kStrategyRuntimeStateAlign) GenericActor state{};
@@ -150,6 +154,15 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
   CXET_CHECK(context.io.bind(ioStorage, 0u, 0u, output->commands.size(), 0u, results.size()));
   strategy::PairStrategyInputs pair{};
   CXET_CHECK(adapter.prepareCycle(context, engines, {}, pair));
+  const auto* retainedTradeEvidence = context.legInputs.get(0u)->tradeEvidence;
+  for (std::size_t leg = 0u; leg < count; ++leg) {
+    const auto* view = context.legInputs.get(leg);
+    CXET_CHECK(view && view->tradeEvidence && view->bookTickerEvidence && view->depthEvidence);
+    CXET_CHECK(view->tradeEvidence != &owners[leg]->strategySourceEvidence[
+        cxet::api::market::publicMarketDataStreamIndex(cxet::api::market::PublicMarketDataStream::Trades)]);
+    CXET_CHECK(view->tradeEvidence->sequence == leg + 1u && view->tradeEvidence->available);
+    CXET_CHECK(!view->priceLimit.value && !view->funding.value);
+  }
   CXET_CHECK(context.pairInputs == nullptr && adapter.decideAndExecute(context));
   CXET_CHECK(context.executionInputs == nullptr && context.io.commandCount == count * 2u);
   CXET_CHECK(adapter.dispatchAndCommit(context, engines, 1'000'000'000u));
@@ -159,6 +172,7 @@ void genericReplayUsesActualLegsAndMultipleSlots(std::size_t count) {
   for (const auto& engine : owners) CXET_CHECK(engine->orders.size() == 2u);
   context.io.clear(); ++context.nowMono.raw;
   CXET_CHECK(adapter.prepareCycle(context, engines, {}, pair) && adapter.decideAndExecute(context));
+  CXET_CHECK(context.legInputs.get(0u)->tradeEvidence == retainedTradeEvidence);
   if (count == 1u) {
     // A missing named optional input blocks only its command and descendants.
     // Independent commands keep source order and may still be admitted.

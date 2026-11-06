@@ -1,6 +1,7 @@
 #include "Internal/BacktestStrategyConfigHelpers.hpp"
 #include "cxet/Parse/DecimalToScaled.hpp"
 #include "BacktestStrategyConfig.hpp"
+#include "trading_core/Strategy/Descriptor/StrategyDescriptor.hpp"
 
 
 #include "cxet/Api/Resolve/LocalSymbolValidation.hpp"
@@ -142,6 +143,14 @@ namespace strategy_config {
 
 
 
+static void setBacktestStrategyParam(BacktestStrategyParams& params,
+    const std::string& key, const std::string& value) {
+  for (auto& entry : params.values) {
+    if (entry.key == key) { entry.value = value; return; }
+  }
+  params.values.push_back({key, value});
+}
+
 [[nodiscard]] bool venueFromSection(
     const std::string& section,
     BacktestStrategyVenueConfig& out) {
@@ -235,6 +244,34 @@ namespace strategy_config {
 
 using namespace strategy_config;
 
+bool resolveBacktestStrategyParams(
+    const trading_core::StrategyDescriptor& descriptor,
+    const BacktestStrategyConfig& config,
+    const BacktestStrategyVenueConfig& venue,
+    trading_core::StrategyParamStorage& out,
+    std::string& error) {
+  const auto entries = [](const BacktestStrategyParams& source) {
+    std::vector<trading_core::StrategyRuntimeParams::Entry> out;
+    out.reserve(source.values.size());
+    for (const auto& entry : source.values)
+      out.push_back({{entry.key.data(), entry.key.size()},
+          {entry.value.data(), entry.value.size()}});
+    return out;
+  };
+  const auto defaults = entries(config.strategyDefaults);
+  const auto overrides = entries(venue.params);
+  const trading_core::StrategyRuntimeParams defaultParams{config.strategyDefaults.enabled, defaults};
+  const trading_core::StrategyRuntimeParams venueParams{venue.params.enabled, overrides};
+  const trading_core::StrategyParamContext context{defaultParams, venueParams,
+      {venue.name.data(), venue.name.size()},
+      config.risk.rateLimitGuardEnabled && venue.rateLimitsEnabled,
+      config.risk.rateLimitGuardMinRemaining};
+  cxet::storage::DiagnosticText diagnostic;
+  if (descriptor.resolveParams(context, out, diagnostic)) return true;
+  if (!diagnostic.empty()) error.assign(diagnostic.c_str(), diagnostic.view().size());
+  return false;
+}
+
 bool loadBacktestStrategyConfig(const char* path,
                                 BacktestStrategyConfig& config,
                                 std::string& error) {
@@ -316,7 +353,7 @@ bool loadBacktestStrategyConfig(const char* path,
         }
         config.strategyDefaults.enabled = enabled;
       } else {
-        trading_core::setStrategyParam(config.strategyDefaults, key, value);
+        setBacktestStrategyParam(config.strategyDefaults, key, value);
       }
       continue;
     }
@@ -436,7 +473,7 @@ bool loadBacktestStrategyConfig(const char* path,
           }
           currentVenue.params.enabled = enabled;
         } else {
-          trading_core::setStrategyParam(currentVenue.params, key, value);
+          setBacktestStrategyParam(currentVenue.params, key, value);
         }
       }
       continue;

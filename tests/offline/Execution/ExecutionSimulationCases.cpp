@@ -584,7 +584,7 @@ const cxet::testing::Case cases[]{
       f.place(ExecutionFixture::intent(1u, q));
       CXET_CHECK(f.state->fills.empty() && f.state->depthFallbackFills == 0u);
       apply(detail::kTimelineKindBookTicker, 1u, 140);
-      CXET_CHECK(f.state->venueSnapshot.reconstructedBookTicker.ask.px.raw == 101 * q);
+      CXET_CHECK(f.state->venueSnapshot.reconstructedBookTicker->ask.px.raw == 101 * q);
       CXET_CHECK(f.state->venueOrderBook.asks.storedCount.raw == 0u);
       f.nextTs = 145;
       f.place(ExecutionFixture::intent(2u, q));

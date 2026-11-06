@@ -77,6 +77,7 @@ class BacktestCanonicalExecutionAdapter final {
   std::vector<trading_core::strategy::StrategyExecutionSlot> slots_{};
   std::vector<trading_core::strategy::StrategyExecutionLegGate> gates_{};
   std::vector<trading_core::StrategyLegInputView> inputViews_{};
+  std::vector<std::array<trading_core::StrategyInputEvidence, 3u>> inputEvidence_{};
   std::vector<capital::fees::OrderCommissionSchedule> feeSchedules_{};
   std::uint64_t feeQualificationMono_{};
   std::uint64_t marketMaximumAgeNs_{};

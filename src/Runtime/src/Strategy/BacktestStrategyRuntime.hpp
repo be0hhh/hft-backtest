@@ -12,7 +12,7 @@
 
 #include "trading_core/Contracts/Control/ControlState.hpp"
 #include "trading_core/Algorithm/Market/LocalOrderBook.hpp"
-#include "trading_core/Contracts/Strategy/StrategyContract.hpp"
+#include "trading_core/Strategy/Context/StrategyContext.hpp"
 #include "trading_core/Strategy/Descriptor/StrategyDescriptor.hpp"
 
 #include <array>

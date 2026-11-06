@@ -41,11 +41,42 @@
       cxet::composite::Trade trade{};
       CXET_CHECK(detail::toRuntime(row, trade));
       trading_core::StrategyMarketSnapshot snapshot{};
-      CXET_CHECK(trading_core::copyTradeSnapshot(snapshot, trade, row.nativeIdentity));
+      CXET_CHECK(trading_core::bindTradeSnapshot(snapshot, trade, row.nativeIdentity));
       CXET_CHECK(snapshot.lastTradeIdentityShape == m::PublicMarketNativeIdentityShape::UuidTail64 &&
           trade.eventId.raw == 0);
       row.nativeIdentity.nativeSecond = 1; row.priceE8 = 9;
       CXET_CHECK(!detail::toRuntime(row, trade) && trade.price().raw == 1);
+    }},
+    cxet::testing::Case{"trade_replay_rejected_identity_preserves_borrowed_owner_and_source", +[] {
+      namespace market = cxet::api::market;
+      auto engine = std::make_unique<detail::EngineState>();
+      detail::SessionData session{};
+      detail::TradeRow row{}; row.priceE8 = 11; row.qtyE8 = 2; row.tsNs = 100;
+      row.nativeIdentity = {.nativeFirst = 7u,
+          .origin = market::PublicMarketIdentityOrigin::NativeExact,
+          .nativeShape = market::PublicMarketNativeIdentityShape::U64};
+      session.trades.push_back(row);
+      hft_backtest::StrategyInstrumentSpec instrument{};
+      for (const bool strategyVisible : {false, true}) {
+        detail::TimelineEvent event{}; event.kind = detail::kTimelineKindTrade;
+        event.tsNs = event.deliveryTsNs = 100;
+        event.sourceId = event.producerEpoch = event.sourceGeneration = event.sessionEpoch = 1u;
+        session.trades[0] = row;
+        hft_backtest::applyMarketEventToSnapshots(*engine, session, event, Symbol{}, instrument, strategyVisible);
+        const auto& snapshot = strategyVisible ? engine->snapshot : engine->venueSnapshot;
+        const auto& backing = strategyVisible ? engine->strategyLastTrade : engine->venueLastTrade;
+        const auto& identity = strategyVisible ? engine->reconstructionTradeIdentity : engine->venueReconstructionTradeIdentity;
+        CXET_CHECK(snapshot.hasTrade.raw == 1u && snapshot.lastTrade == &backing);
+        CXET_CHECK(snapshot.lastTrade->price().raw == 11 && snapshot.lastTrade->eventId.raw == 7u);
+        const auto revision = engine->contextRevision;
+        session.trades[0].nativeIdentity.nativeSecond = 8u;
+        session.trades[0].priceE8 = 99;
+        event.sourceId = event.producerEpoch = event.sourceGeneration = event.sessionEpoch = 2u;
+        hft_backtest::applyMarketEventToSnapshots(*engine, session, event, Symbol{}, instrument, strategyVisible);
+        CXET_CHECK(snapshot.lastTrade == &backing && backing.price().raw == 11 && backing.eventId.raw == 7u);
+        CXET_CHECK(identity.sourceId == 1u && identity.sourceGeneration == 1u && engine->contextRevision == revision);
+      }
+      CXET_CHECK(engine->snapshot.lastTrade != engine->venueSnapshot.lastTrade);
     }},
     cxet::testing::Case{"trade_replay_negative_json_refused_without_row_mutation", +[] {
       detail::TradeRow row{};

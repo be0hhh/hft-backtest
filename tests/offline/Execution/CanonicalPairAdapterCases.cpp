@@ -221,10 +221,14 @@ struct ActorFixture {
       snapshot.lastBookTicker.bid.px.raw = (leg ? 110 : 99) * scale;
       snapshot.lastBookTicker.ask.px.raw = (leg ? 111 : 100) * scale;
       snapshot.lastBookTicker.bid.qty.raw = snapshot.lastBookTicker.ask.qty.raw = 10 * scale;
-      snapshot.reconstructedBookTicker = snapshot.lastBookTicker;
+      engine.bboReconstruction.bookTicker = snapshot.lastBookTicker;
+      snapshot.reconstructedBookTicker = &engine.bboReconstruction.bookTicker;
       snapshot.lastBookTickerRecvMono.raw = snapshot.reconstructedBookTickerRecvMono.raw = 1'000'000'000u;
       snapshot.lastBookTickerRecvUtc.raw = utc;
-      engine.venueSnapshot = snapshot; market[leg] = snapshot;
+      engine.venueBboReconstruction.bookTicker = snapshot.lastBookTicker;
+      engine.venueSnapshot = snapshot;
+      engine.venueSnapshot.reconstructedBookTicker = &engine.venueBboReconstruction.bookTicker;
+      market[leg] = snapshot;
       CXET_CHECK(detail::prepareSimulationOrderEvidence(engine));
       evidence[leg] = detail::simulationOrderEvidenceView(engine);
     }
@@ -364,9 +368,53 @@ void privateBalanceCycleCannotOpenAfterFinancialAuthorityWithdrawal(bool changed
   CXET_CHECK(!fixture->descriptor.hasExecutionExposure(fixture->state.data()));
 }
 
+void correctedInputEvidenceBelongsToAdapterCycle() {
+  constexpr trading_core::CompiledDeliveryParameters profile{
+      .entryPpm = 5'000, .exitPpm = 0, .sizingMode = capital::sizing::PairSizingMode::AnchorLots,
+      .sizingAnchorLeg = 1u, .sizingValueRaw = 1, .exchangeRaw = 1u};
+  auto fixture = std::make_unique<ActorFixture>(*trading_core::compiledDeliveryDescriptor<profile>());
+  namespace market = cxet::api::market;
+  namespace corpus = hftrec::corpus;
+  const auto tradeIndex = market::publicMarketDataStreamIndex(market::PublicMarketDataStream::Trades);
+  const auto bbo = corpus::binaryMarketChannelBit(corpus::BinaryMarketChannel::BookTicker);
+  const auto trade = corpus::binaryMarketChannelBit(corpus::BinaryMarketChannel::Trade);
+  const auto depth = corpus::binaryMarketChannelBit(corpus::BinaryMarketChannel::Depth);
+  for (std::size_t leg = 0u; leg < 2u; ++leg) {
+    auto& engine = fixture->engines[leg];
+    engine.capturedSourceManaged = true; engine.capturedSourceMember = leg == 0u;
+    engine.capturedSourceGeneration = 11u;
+    engine.capturedActiveChannels = bbo | trade | depth;
+    engine.capturedUnhealthyChannels = depth;
+    for (auto& evidence : engine.strategySourceEvidence)
+      evidence = {1'000'000'000u, 11u, 7u, true, true};
+  }
+  fixture->engines[0].strategySourceEvidence[tradeIndex].sourceGeneration = 10u;
+  fixture->cycle(1'000'000'000u);
+  const auto* first = fixture->context.legInputs.get(0u);
+  const auto* second = fixture->context.legInputs.get(1u);
+  CXET_CHECK(first && second && first->tradeEvidence && first->bookTickerEvidence && first->depthEvidence);
+  CXET_CHECK(!first->tradeEvidence->available && first->tradeEvidence->continuous);
+  CXET_CHECK(first->bookTickerEvidence->available && first->bookTickerEvidence->continuous);
+  CXET_CHECK(first->depthEvidence->available && !first->depthEvidence->continuous);
+  CXET_CHECK(second->tradeEvidence && !second->tradeEvidence->available);
+  CXET_CHECK(fixture->engines[0].strategySourceEvidence[tradeIndex].available);
+  CXET_CHECK(fixture->engines[0].strategySourceEvidence[
+      market::publicMarketDataStreamIndex(market::PublicMarketDataStream::Orderbook)].continuous);
+  CXET_CHECK(fixture->engines[1].strategySourceEvidence[tradeIndex].available);
+  const auto* retained = first->tradeEvidence;
+  CXET_CHECK(retained != &fixture->engines[0].strategySourceEvidence[tradeIndex]);
+  fixture->engines[0].strategySourceEvidence[tradeIndex].sourceGeneration = 11u;
+  CXET_CHECK(!retained->available && retained->sourceGeneration == 10u);
+  fixture->cycle(1'000'000'001u);
+  CXET_CHECK(fixture->context.legInputs.get(0u)->tradeEvidence == retained);
+  CXET_CHECK(retained->available && retained->sourceGeneration == 11u);
+  CXET_CHECK(fixture->engines[0].orders.empty() && fixture->engines[1].orders.empty());
+}
+
 #include "GenericCanonicalAdapterCases.ipp"
 
 constexpr cxet::testing::Case cases[]{
+  {"canonical_input_evidence_retains_corrected_cycle_cut", correctedInputEvidenceBelongsToAdapterCycle},
   {"canonical_generic_one_leg_multiple_slots", +[] { genericReplayUsesActualLegsAndMultipleSlots(1u); }},
   {"canonical_generic_sixteen_legs_multiple_slots", +[] { genericReplayUsesActualLegsAndMultipleSlots(16u); }},
   {"canonical_terminal_waits_for_actor_consumed_cut", terminalRecordWaitsForConsumedActorCut},

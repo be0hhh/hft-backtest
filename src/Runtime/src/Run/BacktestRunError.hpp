@@ -1,6 +1,7 @@
 #pragma once
 
 #include "trading_core/Strategy/Descriptor/StrategyDescriptor.hpp"
+#include "trading_core/Strategy/Descriptor/StrategyDescriptorNames.hpp"
 
 #include <cstdint>
 #include <string>

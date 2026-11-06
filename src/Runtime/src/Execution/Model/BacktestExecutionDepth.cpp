@@ -231,7 +231,7 @@ class ExecutionDepthCheckpointCache {
       checkpoint.sourceRows = impl.sourceRows;
       checkpoint.lastSourceKey = impl.lastSourceKey;
       checkpoint.lastSourceRowValid = impl.lastSourceRowValid;
-      checkpoint.book = book;
+      if (!checkpoint.book.cloneFrom(book)) return;
       cxet::runtime::market::LocalOrderBookCheckpointView coreCheckpoint{};
       if (!owner->checkpoint(&coreCheckpoint)) return;
       checkpoint.coreBids.assign(coreCheckpoint.bids.begin(), coreCheckpoint.bids.end());

@@ -2,7 +2,7 @@
 #include "BinaryCorpusLoader.hpp"
 
 #include "hftrec/CorpusContract/BinaryMarketCorpusReader.hpp"
-#include "trading_core/Algorithm/Market/StrategyInputs.hpp"
+#include "trading_core/Algorithm/Market/StrategyMarketSnapshotCopy.hpp"
 #include "cxet/Primitives/Buf/CanonConstants.hpp"
 #include "cxet/Network/Common/NativeOrderQuantity.hpp"
 

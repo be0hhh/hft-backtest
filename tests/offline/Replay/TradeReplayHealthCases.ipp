@@ -53,7 +53,9 @@
       engine->capturedSourceManaged = true; engine->capturedSourceGeneration = 11u;
       const auto trade = corpus::binaryMarketChannelBit(corpus::BinaryMarketChannel::Trade);
       engine->capturedExecutionRequiredChannels = engine->capturedActiveChannels = trade;
-      engine->snapshot.hasTrade = trading_core::kAlgoFlagTrue; engine->snapshot.lastTrade.ts.raw = 100u;
+      engine->snapshot.hasTrade = trading_core::kAlgoFlagTrue;
+      engine->strategyLastTrade.ts.raw = 100u;
+      engine->snapshot.lastTrade = &engine->strategyLastTrade;
       CXET_CHECK(trading_core::configureBboReconstruction(engine->bboReconstruction,Price{1}));
       cxet::composite::BookTicker quote{};quote.ts.raw=90u;
       quote.bid.px.raw=100;quote.ask.px.raw=105;quote.bid.qty.raw=quote.ask.qty.raw=10;
@@ -64,8 +66,8 @@
       CXET_CHECK(trading_core::applyBboReconstructionKnownInitiatorTrade(engine->bboReconstruction,seller,
           trading_core::BboReconstructionTimestampOrigin::Exchange));
       engine->venueBboReconstruction=engine->bboReconstruction;
-      for (auto* snapshot:{&engine->snapshot,&engine->venueSnapshot})
-        trading_core::copyReconstructedBboSnapshot(*snapshot,trading_core::bboReconstructionView(engine->bboReconstruction),TimeNs{100});
+      trading_core::bindReconstructedBboSnapshotOwner(engine->snapshot,engine->bboReconstruction,TimeNs{100});
+      trading_core::bindReconstructedBboSnapshotOwner(engine->venueSnapshot,engine->venueBboReconstruction,TimeNs{100});
       engine->pending.push_back({}); engine->pending[0].sourceGeneration = 11u;
       engine->open[0].state.valid = true; engine->open[0].sourceGeneration = 11u;
       engine->netQtyRaw = 7;
@@ -78,7 +80,7 @@
       std::string error;
       CXET_CHECK(hft_backtest::run_detail::applyCapturedSourceHealth(*engine, row, 200, error));
       CXET_CHECK(engine->capturedUnhealthyChannels == trade && engine->snapshot.hasTrade.raw == 0u);
-      CXET_CHECK(engine->snapshot.reconstructedBookTicker.bid.px.raw==104 &&
+      CXET_CHECK(engine->snapshot.reconstructedBookTicker->bid.px.raw==104 &&
           engine->snapshot.reconstructedBookTickerRecvMono.raw==100 && engine->reconstructionTradeRebasePending);
       CXET_CHECK(engine->capturedDirectoryRevision == 0u && engine->executionBoundaryEpoch == 1u);
       CXET_CHECK(hft_backtest::strategy_runtime_detail::nextPendingTs(*engine) == std::numeric_limits<std::int64_t>::max());
@@ -87,7 +89,7 @@
       row.unhealthy = false; row.record.header.sourceFlags = 0u;
       CXET_CHECK(hft_backtest::run_detail::applyCapturedSourceHealth(*engine, row, 300, error));
       CXET_CHECK(engine->capturedUnhealthyChannels == 0u && engine->snapshot.hasTrade.raw == 0u);
-      CXET_CHECK(engine->venueSnapshot.reconstructedBookTicker.bid.px.raw==104 &&
+      CXET_CHECK(engine->venueSnapshot.reconstructedBookTicker->bid.px.raw==104 &&
           engine->venueSnapshot.reconstructedBookTickerRecvMono.raw==100 && engine->venueReconstructionTradeRebasePending);
       CXET_CHECK(engine->executionBoundaryEpoch == 2u && engine->replayNotBeforeNs == 300);
       CXET_CHECK(engine->pending.size() == 1u && engine->open[0].state.valid && engine->netQtyRaw == 7);

@@ -83,7 +83,7 @@ reconstructionTimestampOrigin(
 void overlayBacktestReconstructedBbo(
     trading_core::StrategyMarketSnapshot& snapshot,
     trading_core::LocalOrderBookState& orderBook,
-    const trading_core::BboReconstructionView& view) noexcept;
+    const trading_core::BboReconstructionState& bbo) noexcept;
 void publishBacktestReconstructedBbo(
     trading_core::StrategyMarketSnapshot& snapshot,
     trading_core::LocalOrderBookState& orderBook,

@@ -43,13 +43,13 @@ reconstructionTimestampOrigin(
 void overlayBacktestReconstructedBbo(
     trading_core::StrategyMarketSnapshot& snapshot,
     trading_core::LocalOrderBookState& orderBook,
-    const trading_core::BboReconstructionView& view) noexcept {
-  if (trading_core::validBboReconstruction(view) &&
+    const trading_core::BboReconstructionState& bbo) noexcept {
+  if (snapshot.hasReconstructedBbo.raw == trading_core::kAlgoFlagTrue.raw &&
       orderBook.initialized.raw == trading_core::kAlgoFlagTrue.raw) {
     (void)trading_core::applyBboOverlay(
-        orderBook, view.bookTicker,
-        trading_core::AlgoFlag{view.bidQtyKnown.raw},
-        trading_core::AlgoFlag{view.askQtyKnown.raw});
+        orderBook, bbo.bookTicker,
+        trading_core::AlgoFlag{bbo.bidQtyKnown.raw},
+        trading_core::AlgoFlag{bbo.askQtyKnown.raw});
     trading_core::bindOrderBookSnapshot(snapshot, orderBook);
   }
 }
@@ -59,12 +59,11 @@ void publishBacktestReconstructedBbo(
     trading_core::LocalOrderBookState& orderBook,
     const trading_core::BboReconstructionState& bbo,
     std::uint64_t receiveMonotonicNs, bool overlayDepth) noexcept {
-  const trading_core::BboReconstructionView view = trading_core::bboReconstructionView(bbo);
   TimeNs receiveMonotonic{};
   receiveMonotonic.raw = receiveMonotonicNs;
-  trading_core::copyReconstructedBboSnapshot(
-      snapshot, view, receiveMonotonic);
-  if (overlayDepth) overlayBacktestReconstructedBbo(snapshot, orderBook, view);
+  trading_core::bindReconstructedBboSnapshotOwner(
+      snapshot, bbo, receiveMonotonic);
+  if (overlayDepth) overlayBacktestReconstructedBbo(snapshot, orderBook, bbo);
 }
 
 [[nodiscard]] bool applyCapturedBookTicker(
@@ -117,16 +116,12 @@ void publishBacktestReconstructedBbo(
         bbo, update, reconstructionOrigin);
     if (!applied) return false;
   }
-  const auto capturedView = trading_core::bboReconstructionView(bbo);
-  if (trading_core::validBboReconstruction(capturedView)) {
-    trading_core::copyBookTickerSnapshot(
-        snapshot, capturedView.bookTicker, receiveMonotonic, receiveRealtime,
-        timestampOrigin);
-  } else {
-    trading_core::copyPartialBookTickerSnapshot(
-        snapshot, capturedView, receiveMonotonic, receiveRealtime,
-        timestampOrigin);
+  if (receiveMonotonic.raw == 0u &&
+      bbo.valid.raw == trading_core::kBboReconstructionFlagTrue.raw) {
+    receiveMonotonic = bbo.bookTicker.ts;
   }
+  trading_core::projectBookTickerStateSnapshotOwner(
+      snapshot, bbo, receiveMonotonic, receiveRealtime, timestampOrigin);
   return applied;
 }
 
@@ -252,8 +247,7 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     } else if (changed && !counterpartAlreadyCurrent) {
       trading_core::resetBboReconstruction(bbo);
       trading_core::clearBookTickerSnapshot(snapshot);
-      trading_core::copyReconstructedBboSnapshot(
-          snapshot, trading_core::BboReconstructionView{});
+      trading_core::bindReconstructedBboSnapshotOwner(snapshot, bbo);
       const trading_core::LocalOrderBookConfig config = orderBook.config;
       const Symbol symbol = orderBook.symbol;
       orderBook.reset();
@@ -337,8 +331,9 @@ void applyMarketEventToSnapshots(detail::EngineState& engine,
     changed = true;
   } else if (event.kind == detail::kTimelineKindTrade) {
     const auto& row = session.trades[event.index];
-    if (!trading_core::copyTradeSnapshot(snapshot, trade,
-            session.trades[event.index].nativeIdentity)) return;
+    auto& lastTrade = strategyVisible ? engine.strategyLastTrade : engine.venueLastTrade;
+    lastTrade = trade;
+    trading_core::bindTradeSnapshotOwner(snapshot, lastTrade, row.nativeIdentity.nativeShape);
     const bool reconstructionApplied =
         !tradeRebasePending && trading_core::applyBboReconstructionKnownInitiatorTrade(
         bbo, trade,

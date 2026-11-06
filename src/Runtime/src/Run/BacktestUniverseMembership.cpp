@@ -15,7 +15,7 @@ void resetCapturedChannels(detail::EngineState& engine, std::uint16_t channels) 
     engine.reconstructionTradeRebasePending = true;
     engine.venueReconstructionTradeRebasePending = true;
     for (auto* snapshot : {&engine.snapshot, &engine.venueSnapshot}) {
-      snapshot->lastTrade = {};
+      snapshot->lastTrade = nullptr;
       snapshot->lastTradeIdentityShape = cxet::api::market::PublicMarketNativeIdentityShape::None;
       snapshot->hasTrade = trading_core::kAlgoFlagFalse;
     }
@@ -34,8 +34,8 @@ void resetCapturedChannels(detail::EngineState& engine, std::uint16_t channels) 
   if (resetBbo) {
     trading_core::resetBboReconstruction(engine.bboReconstruction);
     trading_core::resetBboReconstruction(engine.venueBboReconstruction);
-    trading_core::copyReconstructedBboSnapshot(engine.snapshot, trading_core::bboReconstructionView(engine.bboReconstruction));
-    trading_core::copyReconstructedBboSnapshot(engine.venueSnapshot, trading_core::bboReconstructionView(engine.venueBboReconstruction));
+    trading_core::bindReconstructedBboSnapshotOwner(engine.snapshot, engine.bboReconstruction);
+    trading_core::bindReconstructedBboSnapshotOwner(engine.venueSnapshot, engine.venueBboReconstruction);
     engine.reconstructionTradeRebasePending = false;
     engine.venueReconstructionTradeRebasePending = false;
   }

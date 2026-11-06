@@ -68,8 +68,8 @@
           hft_backtest::applyMarketEventToSnapshots(
               *engine, session, event, Symbol{}, instrument, strategyVisible);
           CXET_CHECK(snapshot.hasReconstructedBbo.raw == trading_core::kAlgoFlagTrue.raw);
-          CXET_CHECK(snapshot.reconstructedBookTicker.bid.px.raw == 100 &&
-              snapshot.reconstructedBookTicker.ask.px.raw == 101);
+          CXET_CHECK(snapshot.reconstructedBookTicker->bid.px.raw == 100 &&
+              snapshot.reconstructedBookTicker->ask.px.raw == 101);
           event.kind = detail::kTimelineKindDepth;
           event.tsNs = event.deliveryTsNs = 200;
           hft_backtest::applyMarketEventToSnapshots(

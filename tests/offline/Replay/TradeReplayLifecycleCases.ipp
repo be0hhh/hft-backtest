@@ -47,7 +47,8 @@
       engine->capturedActiveChannels = bbo | trade;
       engine->capturedExecutionRequiredChannels = bbo;
       engine->snapshot.hasTrade = trading_core::kAlgoFlagTrue;
-      engine->snapshot.lastTrade.ts.raw = 123u;
+      engine->strategyLastTrade.ts.raw = 123u;
+      engine->snapshot.lastTrade = &engine->strategyLastTrade;
       engine->snapshot.hasBookTicker = trading_core::kAlgoFlagTrue;
       detail::PendingAction old; old.activeTsNs = 150; old.sourceGeneration = 11u;
       engine->pending.push_back(old);
@@ -63,14 +64,14 @@
       row.payload.kind = corpus::BinaryMarketSourceLifecycleKind::Removed;
       std::string error;
       CXET_CHECK(hft_backtest::run_detail::applyCapturedSourceLifecycle(*engine, row, 200, error));
-      CXET_CHECK(engine->snapshot.hasTrade.raw == 1u && engine->snapshot.lastTrade.ts.raw == 123u);
+      CXET_CHECK(engine->snapshot.hasTrade.raw == 1u && engine->snapshot.lastTrade->ts.raw == 123u);
       CXET_CHECK(engine->snapshot.hasBookTicker.raw == 0u && engine->capturedSourceMember);
       row.payload.directoryRevision = 2u;
       row.payload.channelMaskBefore = trade; row.payload.channelMaskAfter = bbo | trade;
       row.payload.kind = corpus::BinaryMarketSourceLifecycleKind::Readded;
       row.arrival.sessionEpoch = 19u;
       CXET_CHECK(hft_backtest::run_detail::applyCapturedSourceLifecycle(*engine, row, 300, error));
-      CXET_CHECK(engine->capturedSourceGeneration == 11u && engine->snapshot.lastTrade.ts.raw == 123u);
+      CXET_CHECK(engine->capturedSourceGeneration == 11u && engine->snapshot.lastTrade->ts.raw == 123u);
       CXET_CHECK(hft_backtest::strategy_runtime_detail::nextPendingTs(*engine) == std::numeric_limits<std::int64_t>::max());
       detail::applyDueActions(*engine, 400);
       CXET_CHECK(engine->pending.size() == 1u && engine->open[0].state.valid && engine->netQtyRaw == 7);
@@ -94,6 +95,40 @@
       CXET_CHECK(hft_backtest::run_detail::virtualAccountInitialBalance(request, config.venues[0], 0u) == 1'250'000'000);
       request.legInitialBalancesE8 = {5};
       CXET_CHECK(hft_backtest::run_detail::virtualAccountInitialBalance(request, config.venues[0], 0u) == 5);
+    }},
+    cxet::testing::Case{"strategy_parameter_callback_borrows_final_config_owners_and_preserves_diagnostics", +[] {
+      BinaryTradeFixture fixture(2u, 199u, 7u);
+      const auto configPath = fixture.root / "strategy.ini";
+      {
+        std::ofstream output(configPath);
+        output << "[strategy]\ntype=parameter_fixture\nprobe=first\nprobe=default\n"
+            "[venue.binance_spot]\nsymbols=BTC_USDT\nrate_limits_enabled=false\nprobe=venue\n";
+      }
+      hft_backtest::BacktestStrategyConfig original; std::string error;
+      CXET_CHECK(hft_backtest::loadBacktestStrategyConfig(configPath.c_str(), original, error));
+      auto copied = original;
+      original = {};
+      auto config = std::move(copied);
+      trading_core::StrategyDescriptor descriptor{};
+      descriptor.resolveParams = +[](const trading_core::StrategyParamContext& context,
+          trading_core::StrategyParamStorage& out, cxet::storage::DiagnosticText&) noexcept {
+        const auto* defaults = trading_core::findStrategyParam(context.defaults, "probe");
+        const auto* effective = trading_core::findEffectiveStrategyParam(context, "probe");
+        if (!defaults || *defaults != "default" || !effective || *effective != "venue" ||
+            context.defaults.values.size() != 1u || context.venue.values.size() != 1u ||
+            context.venueName != "binance_spot") return false;
+        out.data[0] = 7u;
+        return true;
+      };
+      trading_core::StrategyParamStorage params{};
+      CXET_CHECK(hft_backtest::resolveBacktestStrategyParams(descriptor, config,
+          config.venues[0], params, error) && params.data[0] == 7u);
+      descriptor.resolveParams = +[](const trading_core::StrategyParamContext&,
+          trading_core::StrategyParamStorage&, cxet::storage::DiagnosticText& diagnostic) noexcept {
+        diagnostic.setLiteral("refused backtest params"); return false;
+      };
+      CXET_CHECK(!hft_backtest::resolveBacktestStrategyParams(descriptor, config,
+          config.venues[0], params, error) && error == "refused backtest params");
     }},
     cxet::testing::Case{"source_removal_preserves_orders_and_fences_old_generation_pending", +[] {
       auto engine = std::make_unique<detail::EngineState>();
