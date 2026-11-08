@@ -96,6 +96,10 @@
       descriptor.commitPreparedDispatch = nullptr;
       CXET_CHECK(trading_core::strategyDescriptorContractValid(descriptor));
       CXET_CHECK(!hft_backtest::strategy_intent_lowering::footprintSupported(descriptor));
+      descriptor = supported;
+      descriptor.requiresReferenceQuote = true;
+      CXET_CHECK(trading_core::strategyDescriptorContractValid(descriptor));
+      CXET_CHECK(!hft_backtest::strategy_intent_lowering::footprintSupported(descriptor));
       for (const auto stream : {cxet::api::market::PublicMarketDataStream::PriceLimit,
                                cxet::api::market::PublicMarketDataStream::Funding}) {
         descriptor = supported;

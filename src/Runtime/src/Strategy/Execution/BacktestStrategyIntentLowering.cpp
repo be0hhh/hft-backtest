@@ -129,6 +129,9 @@ bool footprintSupported(
        trading_core::strategyDescriptorHasCanonicalExecution(descriptor) && descriptor.bindExecutionCold &&
        descriptor.commitPreparedDispatch && descriptor.retainsExecutionIntent);
   return disciplineSupported &&
+      // Replay has no external reference provider; registration alone cannot
+      // satisfy this declared input with an absent/default context view.
+      !descriptor.requiresReferenceQuote &&
       descriptor.footprint.stateScope == trading_core::StrategyStateScope::Instrument &&
       trading_core::strategyDescriptorContractValid(descriptor) &&
       footprint.maxOrders <= detail::kIntentCapacity &&
