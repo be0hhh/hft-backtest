@@ -153,8 +153,6 @@ target_compile_definitions(hft_backtest_core
     HFT_BACKTEST_BUILDING_LIBRARY=1
 )
 target_compile_options(hft_backtest_core PRIVATE
-  $<$<CONFIG:Release>:-O3>
-  $<$<AND:$<CONFIG:Release>,$<NOT:$<BOOL:${CXET_PORTABLE_BUILD}>>>:-march=native>
 )
 set_target_properties(hft_backtest_core PROPERTIES
   OUTPUT_NAME hft_backtest_core
